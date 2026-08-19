@@ -88,14 +88,18 @@ runs:
     - name: Resolve manifest metadata
       id: paths
       shell: bash
+      env:
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
+        DISTRIBUTION: ${{ inputs.distribution }}
       run: |
         set -euo pipefail
         python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
         python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" input-manifest-info \
-          '${{ inputs.input-manifest }}' >> "$GITHUB_OUTPUT"
+          "${INPUT_MANIFEST}" > input-manifest-info.txt
+        cat input-manifest-info.txt >> "$GITHUB_OUTPUT"
         # build.sh writes the manifest to <distribution>/builds/<filename>/manifest.yml.
-        echo "build-manifest=${{ inputs.distribution }}/builds/$(python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" \
-          input-manifest-info '${{ inputs.input-manifest }}' | grep '^filename=' | cut -d= -f2)/manifest.yml" >> "$GITHUB_OUTPUT"
+        FILENAME=$(grep '^filename=' input-manifest-info.txt | cut -d= -f2)
+        echo "build-manifest=${DISTRIBUTION}/builds/${FILENAME}/manifest.yml" >> "$GITHUB_OUTPUT"
 
     - name: Resolve the previous build id for the incremental build
       id: previous-build
@@ -104,14 +108,26 @@ runs:
         PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
         JOB_NAME: ${{ inputs.job-name }}
         REVISION: ${{ steps.paths.outputs.revision }}
+        INCREMENTAL: ${{ inputs.incremental }}
+        PREVIOUS_BUILD_ID: ${{ inputs.previous-build-id }}
+        PLATFORM: ${{ inputs.platform }}
+        ARCHITECTURE: ${{ inputs.architecture }}
+        DISTRIBUTION: ${{ inputs.distribution }}
+        COMPONENT_NAME: ${{ inputs.component-name }}
       run: |
         set -uo pipefail
-        INCREMENTAL='${{ inputs.incremental }}'
-        PREVIOUS_BUILD_ID='${{ inputs.previous-build-id }}'
         BUILD_NUMBER=''
 
+        # src/build_workflow/build_args.py puts --component and --incremental in one mutually exclusive group, so
+        # build.sh would reject the combination after minutes of setup. Jenkins had the same latent conflict
+        # (distribution-build.jenkinsfile passes both parameters straight through); failing here reports it up front.
+        if [ "${INCREMENTAL}" = 'true' ] && [ -n "${COMPONENT_NAME}" ]; then
+          echo '::error::COMPONENT_NAME and the incremental option are mutually exclusive in build.sh. Dispatch with either a component list or `incremental`, not both.'
+          exit 1
+        fi
+
         if [ "${INCREMENTAL}" = 'true' ] && [ "$(echo "${PREVIOUS_BUILD_ID}" | tr '[:upper:]' '[:lower:]')" = 'latest' ]; then
-          NEW_INDEX_URL="${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${REVISION}/index/${{ inputs.platform }}/${{ inputs.architecture }}/${{ inputs.distribution }}/index.json"
+          NEW_INDEX_URL="${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${REVISION}/index/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}/index.json"
           OLD_INDEX_URL="${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${REVISION}/index.json"
           if BUILD_NUMBER=$(curl -sL --fail "${NEW_INDEX_URL}" | jq -er '.latest'); then
             echo "Use new URL path for the latest index."
@@ -143,25 +159,43 @@ runs:
 
     - name: Build the distribution
       shell: bash
+      # Every value is read from the environment rather than interpolated into the script, so a manifest name or a
+      # component name can never terminate a quote and inject a command.
       env:
         INCREMENTAL_ENABLED: ${{ steps.previous-build.outputs.incremental-enabled }}
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
+        COMPONENT_NAME: ${{ inputs.component-name }}
+        PLATFORM: ${{ inputs.platform }}
+        ARCHITECTURE: ${{ inputs.architecture }}
+        DISTRIBUTION: ${{ inputs.distribution }}
+        SNAPSHOT: ${{ inputs.snapshot }}
+        LOCK: ${{ inputs.lock }}
+        CONTINUE_ON_ERROR: ${{ inputs.continue-on-error }}
+        SKIP_ARTIFACT_CHECK: ${{ inputs.skip-artifact-check }}
+        PARALLEL: ${{ inputs.parallel }}
+        BUILD_LOG_FILE: ${{ inputs.build-log-file }}
       run: |
         set -euo pipefail
         # Jenkins built this argument list in Groovy and dropped the null entries; the shell equivalent appends
         # conditionally. On Windows agents Jenkins shelled out through `bat bash ./build.sh`, which `shell: bash` covers.
-        ARGS=('./build.sh' '${{ inputs.input-manifest }}')
-        if [ -n '${{ inputs.distribution }}' ]; then ARGS+=('-d' '${{ inputs.distribution }}'); fi
-        if [ -n '${{ inputs.component-name }}' ]; then ARGS+=('--component' '${{ inputs.component-name }}'); fi
-        if [ -n '${{ inputs.platform }}' ]; then ARGS+=('-p' '${{ inputs.platform }}'); fi
-        if [ -n '${{ inputs.architecture }}' ]; then ARGS+=('-a' '${{ inputs.architecture }}'); fi
-        if [ '${{ inputs.snapshot }}' = 'true' ]; then ARGS+=('--snapshot'); fi
-        if [ '${{ inputs.lock }}' = 'true' ]; then ARGS+=('--lock'); fi
-        if [ '${{ inputs.continue-on-error }}' = 'true' ]; then ARGS+=('--continue-on-error'); fi
-        if [ '${{ inputs.skip-artifact-check }}' = 'true' ]; then ARGS+=('--skip-artifact-check'); fi
+        ARGS=('./build.sh' "${INPUT_MANIFEST}")
+        if [ -n "${DISTRIBUTION}" ]; then ARGS+=('-d' "${DISTRIBUTION}"); fi
+        if [ -n "${COMPONENT_NAME}" ]; then
+          # build.sh declares --component with nargs='*' (src/build_workflow/build_args.py:118), so a space separated
+          # COMPONENT_NAME has to arrive as one argument per component, the way the unquoted Jenkins string did.
+          read -ra COMPONENTS <<< "${COMPONENT_NAME}"
+          ARGS+=('--component' "${COMPONENTS[@]}")
+        fi
+        if [ -n "${PLATFORM}" ]; then ARGS+=('-p' "${PLATFORM}"); fi
+        if [ -n "${ARCHITECTURE}" ]; then ARGS+=('-a' "${ARCHITECTURE}"); fi
+        if [ "${SNAPSHOT}" = 'true' ]; then ARGS+=('--snapshot'); fi
+        if [ "${LOCK}" = 'true' ]; then ARGS+=('--lock'); fi
+        if [ "${CONTINUE_ON_ERROR}" = 'true' ]; then ARGS+=('--continue-on-error'); fi
+        if [ "${SKIP_ARTIFACT_CHECK}" = 'true' ]; then ARGS+=('--skip-artifact-check'); fi
         if [ "${INCREMENTAL_ENABLED}" = 'true' ]; then ARGS+=('--incremental'); fi
-        if [ -n '${{ inputs.parallel }}' ] && [ '${{ inputs.parallel }}' != '0' ]; then ARGS+=('--parallel' '${{ inputs.parallel }}'); fi
+        if [ -n "${PARALLEL}" ] && [ "${PARALLEL}" != '0' ]; then ARGS+=('--parallel' "${PARALLEL}"); fi
 
         echo "Run command: ${ARGS[*]}"
         # The log is kept so the CONTINUE_ON_ERROR path can search it, the way Jenkins searched the build log.
         set -o pipefail
-        "${ARGS[@]}" 2>&1 | tee '${{ inputs.build-log-file }}'
+        "${ARGS[@]}" 2>&1 | tee "${BUILD_LOG_FILE}"

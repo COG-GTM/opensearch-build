@@ -151,8 +151,22 @@ OPTIONS: continue-on-error incremental update-latest-url update-github-issue par
 | `SMOKE_TEST_JOB_NAME`, `BWC_TEST_JOB_NAME` | not migrated, see [§5](#5-not-migrated--needs-decisions) |
 
 `integ-test.jenkinsfile:39-65` has five parameters, so `integ-test.yml` maps them one to one
-(`COMPONENT_NAME`, `TEST_MANIFEST`, `BUILD_MANIFEST_URL`, `RC_NUMBER`, `VALIDATE_ARTIFACTS`) and adds
-`UPDATE_GITHUB_ISSUES` so the distribution build can request issue updates when it triggers the workflow.
+(`COMPONENT_NAME`, `TEST_MANIFEST`, `BUILD_MANIFEST_URL`, `RC_NUMBER`, `VALIDATE_ARTIFACTS`) and adds two inputs:
+`UPDATE_GITHUB_ISSUES` so the distribution build can request issue updates when it triggers the workflow, and
+`DISTRIBUTION_BUILD_URL` because Jenkins derived the `distributionBuildUrl` metrics field from the *upstream*
+distribution build (`integ-test.jenkinsfile:316`), which a dispatched workflow cannot discover on its own.
+`trigger-downstream-tests` fills it with the run URL of the distribution build; for a manual dispatch it can be left
+empty, and the build manifest URL identifies the build under test instead.
+
+Both `verify-parameters` jobs validate the dispatch inputs against a character allow-list before anything else runs.
+Every input reaches a shell command or a `docker run` option somewhere downstream (manifest paths, component lists,
+platform and distribution lists), so the values are constrained once, centrally, and every step reads them from `env`
+rather than having `${{ ... }}` expanded into the middle of a bash script.
+
+`COMPONENT_NAME` and `OPTIONS: incremental` are mutually exclusive: `--component` and `--incremental` are in one
+mutually exclusive group in `src/build_workflow/build_args.py`, so `build.sh` rejects the pair. Jenkins passed both
+parameters straight through and failed inside `build.sh` minutes into the job; `build-manifest` now fails with an
+explicit error before the build starts.
 
 ## 4. Required secrets and AWS configuration
 
@@ -167,6 +181,7 @@ have to be created before a run can succeed. The Jenkins equivalents are the 1Pa
 | `AWS_ACCOUNT_ARTIFACT` / `ARTIFACT_PRODUCTION_BUCKET_NAME` | `retrieve-previous-build`, `download-from-s3` | the artifact promotion account and bucket |
 | `ARTIFACT_PROMOTION_ROLE_NAME` | `retrieve-previous-build`, `sign-artifacts` | `op://opensearch-release-secrets/aws-iam-roles/jenkins-artifact-promotion-role` |
 | `RPM_SIGNING_ACCOUNT` | `sign-artifacts` | the RPM signing account used by `signArtifacts()` |
+| `RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN`, `RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN`, `RPM_RELEASE_SIGNING_KEY_ID`, `RPM_SIGNING_PASSPHRASE_SECRETS_ARN`, `RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN`, `RPM_SIGNING_KEY_ID` | `sign-artifacts`, exported as job-level `env` by the `assemble` job of `distribution-build-package.yml` | `op://opensearch-release-secrets/rpm-signing/*`, read inside `withSecrets()` by `signArtifacts.groovy` |
 | `METRICS_HOST_URL`, `METRICS_HOST_ACCOUNT` | `publish-distribution-build-results`, `publish-integ-test-results`, `update-build-failure-issues` | the metrics cluster endpoint and account |
 | `GITHUB_BOT_TOKEN` | `update-build-failure-issues` | `op://opensearch-infra-secrets/github-bot/*` |
 
@@ -205,6 +220,7 @@ the full distribution.
 | `triggerDistributionValidationWorkflow()` / `triggerNightlyPlayground()` | `distribution-build.jenkinsfile:1123-1145` | **Reported, not triggered.** Both only fire for release candidates (`RC_NUMBER > 0`) and live in other repositories/pipelines. |
 | `build job: 'distribution-validation'` for `VALIDATE_ARTIFACTS` | `integ-test.jenkinsfile:108-135` | **Reported, not triggered.** The `validate-artifacts` job prints the parameters; migrating `distribution-validation` is a separate slice. |
 | `build job: 'integ-test-notification', wait: false` | `integ-test.jenkinsfile:330-345` | **Reported, not triggered.** Notifications depend on Jenkins-only credentials; the recommended pattern is a small `notify` job posting to Slack via a webhook secret. |
+| rpm signing | `distribution-build.jenkinsfile:397-404`, `vars/signArtifacts.groovy` | **Ported, disabled by default.** `sign-rpm` defaults to `false`, matching a fork that has no signing keys. The six 1Password values are exported as job-level `env` from repository secrets ([§4](#4-required-secrets-and-aws-configuration)); when `sign-rpm` is `true` and any of them is empty, `sign-artifacts` fails with an explicit error instead of producing unsigned-but-reported packages. The mac, windows, `jar_signer` and PGP branches of `signArtifacts()` are unreachable from these two pipelines and were not ported. |
 | Metrics publication | `vars/publishDistributionBuildResults.groovy`, `vars/publishIntegTestResults.groovy` | **Ported, unverified against a live cluster.** The documents and index mappings were reconstructed from the Groovy sources (`.github/scripts/metrics_records.py`, `.github/mappings/*.json`); they cannot be validated without the metrics cluster, so treat the schema as proposed rather than confirmed. |
 | GitHub issue create/close | `vars/updateBuildFailureIssues.groovy`, `createGithubIssue.groovy`, `closeGithubIssue.groovy` | **Ported, unverified.** `update-build-failure-issues` queries the metrics cluster for component build failures and then uses `gh issue create/close`. Without the metrics cluster the query cannot be exercised, and the step is only enabled when `OPTIONS: update-github-issue` is set. |
 | Agent-specific state (workspace reuse, `postCleanup()`, `/tmp/workspace` sizing, docker-in-docker) | throughout both pipelines | **No equivalent needed, but capacity matters.** Every Actions job starts clean, so any implicit reliance on a warm workspace or a pre-pulled image becomes a fresh download. Self-hosted runners with a persistent gradle/maven cache (or `actions/cache`) are the recommended replacement for the warm Jenkins agents. |
@@ -224,6 +240,13 @@ Fidelity was preferred over cleanliness; these are ported as-is and flagged rath
 * **The build matrix is a hand-written stage list.** Jenkins declares seven near-identical stages
   (`distribution-build.jenkinsfile:239-957`); `BUILD_TARGETS` in `manifest_paths.py` mirrors that list, including
   the fact that the arm64 rpm stage is pinned to the x64 agent label (`distribution-build.jenkinsfile:650`).
+* **The rpm/deb build stage mixes images.** `distribution-build.jenkinsfile:337-339` builds the archive on the
+  *tar* image but with the *package* docker args, and `:373-376` runs the assemble stage on the package image with no
+  args at all. `manifest_paths.py` reproduces that pairing (`image`/`args` for the build job, `assemble-image`/empty
+  `assemble-args` for the assemble job) rather than making the two stages consistent.
+* **The test java version ignores the distribution.** `runIntegTestScript.groovy:32` calls `detectTestDockerAgent()`
+  without a platform or distribution, so `JAVA_HOME` always comes from the linux/tar image and is only exported for
+  the OpenSearch core distribution off Windows. Both quirks are kept.
 * **`RC_NUMBER` forces the docker tag.** `distribution-build.jenkinsfile:205-208` overrides `BUILD_DOCKER` for
   release candidates; the port reproduces the override rather than making the caller pass a consistent pair.
 
@@ -233,6 +256,12 @@ These workflows cannot be executed here: they need the OpenSearch build infrastr
 metrics cluster. What was checked:
 
 * `actionlint` is clean for all new workflows.
+* An empty component list is possible: every component of the test manifest can be missing from the build manifest,
+  or excluded for rpm/deb. A matrix cannot be empty, so `verify-parameters` publishes a `has-components` flag and the
+  matrix job is gated on it, leaving a warning in the run summary instead of an invalid-matrix failure.
+* Temporary AWS credentials are handed to `curl` through a `0600` config file (`--config`) rather than
+  `--user`/`-H` arguments, so they never appear in the process table of a runner that also executes build and test
+  code.
 * `yamllint` (repository configuration) reports no errors for the new workflows, composite actions and mappings.
 * `flake8`, `isort` and `mypy` are clean for `.github/scripts/`.
 * `manifest_paths.py` was run against `manifests/3.9.0/opensearch-3.9.0.yml` and

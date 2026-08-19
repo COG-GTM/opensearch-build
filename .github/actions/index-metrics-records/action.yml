@@ -59,9 +59,17 @@ runs:
       run: |
         set -uo pipefail
         set +x
-        SIGV4=(--aws-sigv4 "aws:amz:${REGION}:es"
-               --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}"
-               -H "x-amz-security-token:${AWS_SESSION_TOKEN}")
+        # The signing credentials go into a 0600 curl config file instead of the command line, so they never appear in
+        # the process table of a runner that is also executing build and test code.
+        CURL_CONFIG=$(mktemp)
+        chmod 600 "${CURL_CONFIG}"
+        trap 'rm -f "${CURL_CONFIG}"' EXIT
+        {
+          echo "aws-sigv4 = \"aws:amz:${REGION}:es\""
+          echo "user = \"${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}\""
+          echo "header = \"x-amz-security-token:${AWS_SESSION_TOKEN}\""
+        } > "${CURL_CONFIG}"
+        SIGV4=(--config "${CURL_CONFIG}")
 
         if curl -s -I "${METRICS_HOST_URL}/${INDEX}" "${SIGV4[@]}" | grep -qE 'HTTP/[0-9]+(\.[0-9]+)? 200'; then
           echo "Index ${INDEX} already exists. Indexing results."

@@ -44,40 +44,69 @@ runs:
     - name: Resolve the artifact paths
       id: paths
       shell: bash
+      env:
+        BUILD_MANIFEST: ${{ inputs.build-manifest }}
+        JOB_NAME: ${{ inputs.job-name }}
+        PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+        LOCAL_PATH: ${{ inputs.local-path }}
       run: |
         set -euo pipefail
         python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
         python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" integ-test-paths \
-          '${{ inputs.build-manifest }}' \
-          --job-name '${{ inputs.job-name }}' \
-          --public-artifact-url '${{ inputs.public-artifact-url }}' \
-          --local-path '${{ inputs.local-path }}' | tee -a "$GITHUB_OUTPUT"
+          "${BUILD_MANIFEST}" \
+          --job-name "${JOB_NAME}" \
+          --public-artifact-url "${PUBLIC_ARTIFACT_URL}" \
+          --local-path "${LOCAL_PATH}" | tee -a "$GITHUB_OUTPUT"
 
     - name: Detect the test docker agent java version
       id: agent
+      # runIntegTestScript.groovy:32 calls detectTestDockerAgent(testManifest:) without a platform or distribution, so
+      # the java version comes from the linux/tar image even when the artifacts under test are rpm or windows. The
+      # defaults of this action are the same linux/tar, keeping the Jenkins behaviour.
       uses: ./.github/actions/detect-test-docker-agent
       with:
         test-manifest: ${{ inputs.test-manifest }}
 
     - name: Run the integration tests
       shell: bash
+      env:
+        TEST_MANIFEST: ${{ inputs.test-manifest }}
+        COMPONENT_NAME: ${{ inputs.component-name }}
+        TEST_RUN_ID: ${{ inputs.test-run-id }}
+        PATHS: ${{ steps.paths.outputs.paths }}
+        BASE_PATH: ${{ steps.paths.outputs.base-path }}
+        CI_GROUP: ${{ inputs.ci-group }}
+        BUILD_FILENAME: ${{ steps.paths.outputs.filename }}
+        BUILD_PLATFORM: ${{ steps.paths.outputs.platform }}
+        JAVA_VERSION: ${{ steps.agent.outputs.java-version }}
+        SWITCH_USER_NON_ROOT: ${{ inputs.switch-user-non-root }}
       run: |
         set -euo pipefail
-        ARGS=('./test.sh' 'integ-test' '${{ inputs.test-manifest }}'
-              '--component' '${{ inputs.component-name }}'
-              '--test-run-id' '${{ inputs.test-run-id }}'
-              '--paths' '${{ steps.paths.outputs.paths }}'
-              '--base-path' '${{ steps.paths.outputs.base-path }}')
-        if [ -n '${{ inputs.ci-group }}' ]; then ARGS+=('--ci-group' '${{ inputs.ci-group }}'); fi
+        # test.sh declares --component and --paths with nargs='*' and TestKwargs splits each argv entry on a single
+        # '=' (src/test_workflow/test_kwargs.py:21), so both have to be word split the way the unquoted Jenkins
+        # strings were: --paths carries two key=value pairs for an OpenSearch Dashboards build manifest.
+        read -ra COMPONENTS <<< "${COMPONENT_NAME}"
+        read -ra PATH_PAIRS <<< "${PATHS}"
+        ARGS=('./test.sh' 'integ-test' "${TEST_MANIFEST}"
+              '--component' "${COMPONENTS[@]}"
+              '--test-run-id' "${TEST_RUN_ID}"
+              '--paths' "${PATH_PAIRS[@]}"
+              '--base-path' "${BASE_PATH}")
+        if [ -n "${CI_GROUP}" ]; then ARGS+=('--ci-group' "${CI_GROUP}"); fi
 
-        # runIntegTestScript.groovy:60 - only the OpenSearch core distribution pins JAVA_HOME to the CI image java.
-        export JAVA_HOME="/opt/java/${{ steps.agent.outputs.java-version }}"
+        # runIntegTestScript.groovy:32-33 - only the OpenSearch core distribution, and only off windows, pins
+        # JAVA_HOME to the CI image java.
+        if [ "${BUILD_FILENAME}" = 'opensearch' ] && [ "${BUILD_PLATFORM}" != 'windows' ]; then
+          export JAVA_HOME="/opt/java/${JAVA_VERSION}"
+        fi
 
-        if [ '${{ inputs.switch-user-non-root }}' = 'true' ]; then
-          # runIntegTestScript.groovy:83 - rpm and deb tests must not run as root, and docker ENV is not visible to su,
-          # so PATH and JAVA_HOME are passed explicitly.
+        if [ "${SWITCH_USER_NON_ROOT}" = 'true' ]; then
+          # runIntegTestScript.groovy:68 - rpm and deb tests must not run as root, and docker ENV is not visible to su,
+          # so PATH and JAVA_HOME are passed explicitly. Like Jenkins, JAVA_HOME is left out when it was not pinned.
           # https://github.com/opensearch-project/opensearch-build-libraries/issues/197
-          su "$(id -un 1000)" -c "env PATH=$PATH JAVA_HOME=$JAVA_HOME $(printf '%q ' "${ARGS[@]}")"
+          ENV_ARGS=("PATH=${PATH}")
+          if [ -n "${JAVA_HOME:-}" ]; then ENV_ARGS+=("JAVA_HOME=${JAVA_HOME}"); fi
+          su "$(id -un 1000)" -c "env $(printf '%q ' "${ENV_ARGS[@]}")$(printf '%q ' "${ARGS[@]}")"
         else
           "${ARGS[@]}"
         fi

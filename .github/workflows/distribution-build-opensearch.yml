@@ -105,15 +105,39 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Check that the input manifest exists
+      - name: Verify the parameters
         # distribution-build.jenkinsfile:150-153 aborted the build when the manifest was missing.
+        env:
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
+          BUILD_PLATFORM: ${{ inputs.BUILD_PLATFORM }}
+          BUILD_DISTRIBUTION: ${{ inputs.BUILD_DISTRIBUTION }}
+          TEST_PLATFORM: ${{ inputs.TEST_PLATFORM }}
+          TEST_DISTRIBUTION: ${{ inputs.TEST_DISTRIBUTION }}
+          RC_NUMBER: ${{ inputs.RC_NUMBER }}
+          COMPONENT_NAME: ${{ inputs.COMPONENT_NAME }}
         run: |
           set -euo pipefail
-          if [ ! -f 'manifests/${{ inputs.INPUT_MANIFEST }}' ]; then
-            echo "::error::Input manifest was not provided or not found at manifests/${{ inputs.INPUT_MANIFEST }}."
+          # Every dispatch input reaches a shell or a container option somewhere downstream, so the character set is
+          # constrained here once instead of being escaped in each of the composite actions.
+          check() {
+            if ! printf '%s' "$2" | grep -Eq "$3"; then
+              echo "::error::$1 contains characters that are not allowed: $2"
+              exit 1
+            fi
+          }
+          check INPUT_MANIFEST "${INPUT_MANIFEST}" '^[A-Za-z0-9._/-]+$'
+          check BUILD_PLATFORM "${BUILD_PLATFORM}" '^[a-z0-9 ]*$'
+          check BUILD_DISTRIBUTION "${BUILD_DISTRIBUTION}" '^[a-z0-9 ]*$'
+          check TEST_PLATFORM "${TEST_PLATFORM}" '^[a-z0-9 ]*$'
+          check TEST_DISTRIBUTION "${TEST_DISTRIBUTION}" '^[a-z0-9 ]*$'
+          check RC_NUMBER "${RC_NUMBER}" '^[0-9]+$'
+          check COMPONENT_NAME "${COMPONENT_NAME}" '^[A-Za-z0-9 ._-]*$'
+
+          if [ ! -f "manifests/${INPUT_MANIFEST}" ]; then
+            echo "::error::Input manifest was not provided or not found at manifests/${INPUT_MANIFEST}."
             exit 1
           fi
-          echo "### ${{ inputs.INPUT_MANIFEST }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ${INPUT_MANIFEST}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Unpack the OPTIONS input
         id: options
@@ -129,7 +153,10 @@ jobs:
             [parallel]=0 [previous-build-id]=latest
             [build-docker]=build_docker
           )
-          for TOKEN in ${OPTIONS}; do
+          # The tokens are validated below, so word splitting the input here is deliberate.
+          # shellcheck disable=SC2206
+          read -ra TOKENS <<< "${OPTIONS}"
+          for TOKEN in "${TOKENS[@]}"; do
             case "${TOKEN}" in
               *=*) KEY=${TOKEN%%=*}; VALUE=${TOKEN#*=} ;;
               no-*) KEY=${TOKEN#no-}; VALUE=false ;;
@@ -139,6 +166,14 @@ jobs:
               echo "::error::Unknown OPTIONS flag '${TOKEN}'."
               exit 1
             fi
+            # The values end up in shell arguments and in `docker run` options further down, so only the two shapes the
+            # Jenkins parameters allowed are accepted.
+            case "${KEY}" in
+              parallel) [[ "${VALUE}" =~ ^[0-9]+$ ]] || { echo "::error::parallel must be a number, got '${VALUE}'."; exit 1; } ;;
+              previous-build-id) [[ "${VALUE}" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::previous-build-id must be alphanumeric, got '${VALUE}'."; exit 1; } ;;
+              build-docker) [[ "${VALUE}" =~ ^(build_docker|build_docker_with_build_number_tag|do_not_build_docker)$ ]] || { echo "::error::unknown build-docker value '${VALUE}'."; exit 1; } ;;
+              *) [[ "${VALUE}" =~ ^(true|false)$ ]] || { echo "::error::${KEY} is a flag and takes no value, got '${VALUE}'."; exit 1; } ;;
+            esac
             OPT[$KEY]=${VALUE}
           done
           for KEY in "${!OPT[@]}"; do
@@ -147,32 +182,43 @@ jobs:
 
       - name: Read the input manifest
         id: manifest
+        env:
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
         run: |
           set -euo pipefail
           python3 -m pip install --quiet pyyaml
           python3 .github/scripts/manifest_paths.py input-manifest-info \
-            'manifests/${{ inputs.INPUT_MANIFEST }}' >> "$GITHUB_OUTPUT"
+            "manifests/${INPUT_MANIFEST}" >> "$GITHUB_OUTPUT"
 
       - name: Validate the parameters and build the matrices
         id: matrix
         # Ports verifyParameterPlatformDistribution() (distribution-build.jenkinsfile:1160-1176) and the
         # `when { expression { params.BUILD_PLATFORM.contains(...) } }` guard of every build stage.
+        env:
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
+          BUILD_PLATFORM: ${{ inputs.BUILD_PLATFORM }}
+          BUILD_DISTRIBUTION: ${{ inputs.BUILD_DISTRIBUTION }}
+          TEST_PLATFORM: ${{ inputs.TEST_PLATFORM }}
+          TEST_DISTRIBUTION: ${{ inputs.TEST_DISTRIBUTION }}
         run: |
           set -euo pipefail
           python3 .github/scripts/manifest_paths.py distribution-matrix \
-            'manifests/${{ inputs.INPUT_MANIFEST }}' \
-            --build-platform '${{ inputs.BUILD_PLATFORM }}' \
-            --build-distribution '${{ inputs.BUILD_DISTRIBUTION }}' \
-            --test-platform '${{ inputs.TEST_PLATFORM }}' \
-            --test-distribution '${{ inputs.TEST_DISTRIBUTION }}' | tee -a "$GITHUB_OUTPUT"
+            "manifests/${INPUT_MANIFEST}" \
+            --build-platform "${BUILD_PLATFORM}" \
+            --build-distribution "${BUILD_DISTRIBUTION}" \
+            --test-platform "${TEST_PLATFORM}" \
+            --test-distribution "${TEST_DISTRIBUTION}" | tee -a "$GITHUB_OUTPUT"
 
       - name: Resolve the docker build option
         id: docker
         # distribution-build.jenkinsfile:205-208 forces the build number tag for release candidates.
+        env:
+          BUILD_DOCKER_OPTION: ${{ steps.options.outputs.build-docker }}
+          RC_NUMBER: ${{ inputs.RC_NUMBER }}
         run: |
           set -euo pipefail
-          BUILD_DOCKER='${{ steps.options.outputs.build-docker }}'
-          if [ '${{ inputs.RC_NUMBER }}' -gt 0 ]; then
+          BUILD_DOCKER="${BUILD_DOCKER_OPTION}"
+          if [ "${RC_NUMBER}" -gt 0 ]; then
             echo 'This is a release candidate build, enforcing build_docker_with_build_number_tag'
             BUILD_DOCKER='build_docker_with_build_number_tag'
           fi
@@ -193,8 +239,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Report the downstream snapshot job
+        env:
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
         run: |
-          echo "::notice::Jenkins triggers publish-opensearch-min-snapshots with INPUT_MANIFEST=${{ inputs.INPUT_MANIFEST }}; that pipeline is still Jenkins-only."
+          echo "::notice::Jenkins triggers publish-opensearch-min-snapshots with INPUT_MANIFEST=${INPUT_MANIFEST}; that pipeline is still Jenkins-only."
 
   build-archives:
     # distribution-build.jenkinsfile:239-321 (linux x64 tar), :560-639 (linux arm64 tar) and :880-957 (windows x64 zip).
@@ -283,12 +331,17 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Report the docker build parameters
+        env:
+          PUBLIC_ARTIFACT_URL: ${{ vars.PUBLIC_ARTIFACT_URL || 'https://ci.opensearch.org/ci/dbc' }}
+          REVISION: ${{ needs.verify-parameters.outputs.revision }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          BUILD_DOCKER: ${{ needs.verify-parameters.outputs.build-docker }}
         run: |
           set -euo pipefail
           for ARCHITECTURE in x64 arm64; do
-            echo "${ARCHITECTURE}: ${{ vars.PUBLIC_ARTIFACT_URL || 'https://ci.opensearch.org/ci/dbc' }}/${JOB_NAME}/${{ needs.verify-parameters.outputs.revision }}/${{ github.run_number }}/linux/${ARCHITECTURE}/tar/dist/opensearch"
+            echo "${ARCHITECTURE}: ${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${REVISION}/${BUILD_NUMBER}/linux/${ARCHITECTURE}/tar/dist/opensearch"
           done
-          echo "::notice::buildDockerImage() triggers the Jenkins jobs docker-build, docker-copy and docker-scan with buildOption=${{ needs.verify-parameters.outputs.build-docker }}; those pipelines are still Jenkins-only (docs/jenkins-to-actions.md)."
+          echo "::notice::buildDockerImage() triggers the Jenkins jobs docker-build, docker-copy and docker-scan with buildOption=${BUILD_DOCKER}; those pipelines are still Jenkins-only (docs/jenkins-to-actions.md)."
 
   publish-build-results:
     # distribution-build.jenkinsfile:1009-1033 post { always }: publishDistributionBuildResults() and, when
@@ -348,5 +401,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Report the release candidate follow-ups
+        env:
+          REVISION: ${{ needs.verify-parameters.outputs.revision }}
+          BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          echo "::notice::Jenkins triggers the distribution-validation job (VERSION=${{ needs.verify-parameters.outputs.revision }}, OS_BUILD_NUMBER=${{ github.run_number }}) and the opensearch-devops nightly-playground-trigger.yml workflow for RC builds; both are still Jenkins-only (docs/jenkins-to-actions.md)."
+          echo "::notice::Jenkins triggers the distribution-validation job (VERSION=${REVISION}, OS_BUILD_NUMBER=${BUILD_NUMBER}) and the opensearch-devops nightly-playground-trigger.yml workflow for RC builds; both are still Jenkins-only (docs/jenkins-to-actions.md)."

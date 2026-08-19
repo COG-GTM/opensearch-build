@@ -49,14 +49,19 @@ runs:
     - name: Read the build manifest
       id: info
       shell: bash
+      env:
+        BUILD_MANIFEST: ${{ inputs.build-manifest }}
+        JOB_NAME: ${{ inputs.job-name }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+        PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
       run: |
         set -euo pipefail
         python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
         python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" build-manifest-info \
-          '${{ inputs.build-manifest }}' \
-          --job-name '${{ inputs.job-name }}' \
-          --build-number '${{ inputs.build-number }}' \
-          --public-artifact-url '${{ inputs.public-artifact-url }}' | tee -a "$GITHUB_OUTPUT" > manifest-info.txt
+          "${BUILD_MANIFEST}" \
+          --job-name "${JOB_NAME}" \
+          --build-number "${BUILD_NUMBER}" \
+          --public-artifact-url "${PUBLIC_ARTIFACT_URL}" | tee -a "$GITHUB_OUTPUT" > manifest-info.txt
         VERSION=$(grep '^version=' manifest-info.txt | cut -d= -f2)
         # assembleManifest.groovy:276 - majorVersion > 2 signs with release@opensearch.org
         if [ "$(echo "${VERSION}" | cut -d. -f1)" -gt 2 ]; then
@@ -67,9 +72,12 @@ runs:
 
     - name: Assemble the distribution
       shell: bash
+      env:
+        BUILD_MANIFEST: ${{ inputs.build-manifest }}
+        BASE_URL: ${{ steps.info.outputs.artifact-root-url-without-distribution }}
       run: |
         set -euo pipefail
-        ./assemble.sh '${{ inputs.build-manifest }}' --base-url '${{ steps.info.outputs.artifact-root-url-without-distribution }}'
+        ./assemble.sh "${BUILD_MANIFEST}" --base-url "${BASE_URL}"
 
     - name: Sign the rpm package
       if: ${{ steps.info.outputs.distribution == 'rpm' && inputs.sign-rpm == 'true' }}

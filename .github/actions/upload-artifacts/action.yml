@@ -64,14 +64,20 @@ runs:
     - name: Read the build manifest
       id: info
       shell: bash
+      env:
+        BUILD_MANIFEST: ${{ inputs.build-manifest }}
+        JOB_NAME: ${{ inputs.job-name }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+        PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+        BUILD_FEATURE: ${{ inputs.build-feature }}
       run: |
         set -euo pipefail
         python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
-        ARGS=('build-manifest-info' '${{ inputs.build-manifest }}'
-              '--job-name' '${{ inputs.job-name }}'
-              '--build-number' '${{ inputs.build-number }}'
-              '--public-artifact-url' '${{ inputs.public-artifact-url }}')
-        if [ -n '${{ inputs.build-feature }}' ]; then ARGS+=('--build-feature' '${{ inputs.build-feature }}'); fi
+        ARGS=('build-manifest-info' "${BUILD_MANIFEST}"
+              '--job-name' "${JOB_NAME}"
+              '--build-number' "${BUILD_NUMBER}"
+              '--public-artifact-url' "${PUBLIC_ARTIFACT_URL}")
+        if [ -n "${BUILD_FEATURE}" ]; then ARGS+=('--build-feature' "${BUILD_FEATURE}"); fi
         python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" "${ARGS[@]}" | tee -a "$GITHUB_OUTPUT" > manifest-info.txt
         ROOT_URL=$(grep '^artifact-root-url=' manifest-info.txt | cut -d= -f2-)
         FILENAME=$(grep '^filename=' manifest-info.txt | cut -d= -f2)
@@ -113,26 +119,32 @@ runs:
     - name: Promote the release candidate artifacts
       if: ${{ inputs.build-feature == '' && inputs.artifact-production-bucket-name != '' }}
       shell: bash
+      env:
+        DISTRIBUTION: ${{ steps.info.outputs.distribution }}
+        FILENAME: ${{ steps.info.outputs.filename }}
+        VERSION: ${{ steps.info.outputs.version }}
+        BUCKET: ${{ inputs.artifact-production-bucket-name }}
+        MIN_ARTIFACT: ${{ steps.info.outputs.min-artifact }}
+        PACKAGE_NAME: ${{ steps.info.outputs.package-name }}
       run: |
         set -euo pipefail
-        DISTRIBUTION='${{ steps.info.outputs.distribution }}'
-        FILENAME='${{ steps.info.outputs.filename }}'
-        VERSION='${{ steps.info.outputs.version }}'
-        BUCKET='${{ inputs.artifact-production-bucket-name }}'
         echo "Uploading to s3://${BUCKET}/release-candidates"
-        aws s3 cp --quiet "${DISTRIBUTION}/builds/${FILENAME}/${{ steps.info.outputs.min-artifact }}" \
+        aws s3 cp --quiet "${DISTRIBUTION}/builds/${FILENAME}/${MIN_ARTIFACT}" \
           "s3://${BUCKET}/release-candidates/core/${FILENAME}/${VERSION}/"
-        aws s3 cp --quiet "${DISTRIBUTION}/dist/${FILENAME}/${{ steps.info.outputs.package-name }}" \
+        aws s3 cp --quiet "${DISTRIBUTION}/dist/${FILENAME}/${PACKAGE_NAME}" \
           "s3://${BUCKET}/release-candidates/bundle/${FILENAME}/${VERSION}/"
 
     - name: Publish the manifest URLs
       shell: bash
+      env:
+        BUILD_MANIFEST_URL: ${{ steps.info.outputs.build-manifest-url }}
+        BUNDLE_MANIFEST_URL: ${{ steps.info.outputs.bundle-manifest-url }}
       run: |
         set -euo pipefail
         # Jenkins collected these two URLs with lib.jenkins.Messages so the notification job could render them;
         # the GitHub Actions equivalent is the job summary.
         {
           echo '### Artifacts'
-          echo '${{ steps.info.outputs.build-manifest-url }}'
-          echo '${{ steps.info.outputs.bundle-manifest-url }}'
+          echo "${BUILD_MANIFEST_URL}"
+          echo "${BUNDLE_MANIFEST_URL}"
         } >> "$GITHUB_STEP_SUMMARY"

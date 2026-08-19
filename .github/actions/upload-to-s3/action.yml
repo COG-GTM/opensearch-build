@@ -40,10 +40,13 @@ runs:
 
     - name: Upload to S3
       shell: bash
+      env:
+        SOURCE: ${{ inputs.source-path }}
+        BUCKET: ${{ inputs.bucket }}
+        UPLOAD_PATH: ${{ inputs.path }}
       run: |
         set -euo pipefail
-        SOURCE='${{ inputs.source-path }}'
-        DESTINATION="s3://${{ inputs.bucket }}/${{ inputs.path }}"
+        DESTINATION="s3://${BUCKET}/${UPLOAD_PATH}"
         echo "Uploading ${SOURCE} to ${DESTINATION}"
         if [ -d "${SOURCE}" ]; then
           aws s3 cp --recursive --quiet "${SOURCE}" "${DESTINATION}/"

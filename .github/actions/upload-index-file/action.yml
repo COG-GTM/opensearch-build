@@ -24,9 +24,11 @@ runs:
   steps:
     - name: Write index.json
       shell: bash
+      env:
+        BUILD_NUMBER: ${{ inputs.build-number }}
       run: |
         set -euo pipefail
-        printf '{"latest":"%s"}' '${{ inputs.build-number }}' > index.json
+        printf '{"latest":"%s"}' "${BUILD_NUMBER}" > index.json
         cat index.json
 
     - name: Upload index.json

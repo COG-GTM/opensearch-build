@@ -42,6 +42,12 @@ inputs:
     description: 'Ref the downstream workflow runs on'
     required: false
     default: ''
+  distribution-build-url:
+    description: >-
+      Run URL of this distribution build, forwarded so the integ-test metrics keep the Jenkins distributionBuildUrl
+      semantics (integ-test.jenkinsfile:316) instead of pointing at the test run itself.
+    required: false
+    default: ''
   github-token:
     description: 'Token used by gh workflow run'
     required: true
@@ -53,13 +59,23 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        INTEG_TEST_WORKFLOW: ${{ inputs.integ-test-workflow }}
+        TEST_MANIFEST: ${{ inputs.test-manifest }}
+        BUILD_MANIFEST_URL: ${{ inputs.build-manifest-url }}
+        PLATFORM: ${{ inputs.platform }}
+        DISTRIBUTION: ${{ inputs.distribution }}
+        TEST_PLATFORM: ${{ inputs.test-platform }}
+        TEST_DISTRIBUTION: ${{ inputs.test-distribution }}
+        RC_NUMBER: ${{ inputs.rc-number }}
+        REF: ${{ inputs.ref || github.ref_name }}
+        DISTRIBUTION_BUILD_URL: ${{ inputs.distribution-build-url }}
       run: |
         set -euo pipefail
         SKIP=false
-        if [ -z '${{ inputs.integ-test-workflow }}' ] || [ -z '${{ inputs.test-manifest }}' ] \
-          || [ -z '${{ inputs.build-manifest-url }}' ] \
-          || ! echo '${{ inputs.test-platform }}' | grep -qw '${{ inputs.platform }}' \
-          || ! echo '${{ inputs.test-distribution }}' | grep -qw '${{ inputs.distribution }}'; then
+        if [ -z "${INTEG_TEST_WORKFLOW}" ] || [ -z "${TEST_MANIFEST}" ] \
+          || [ -z "${BUILD_MANIFEST_URL}" ] \
+          || ! echo "${TEST_PLATFORM}" | grep -qw "${PLATFORM}" \
+          || ! echo "${TEST_DISTRIBUTION}" | grep -qw "${DISTRIBUTION}"; then
           SKIP=true
         fi
 
@@ -67,15 +83,16 @@ runs:
           echo 'Skipping INTEG tests as one of the values has empty or wrong string: integ-test-workflow, test-manifest, build-manifest-url, test-platform, test-distribution'
         else
           echo 'Running INTEG tests'
-          gh workflow run '${{ inputs.integ-test-workflow }}' \
+          gh workflow run "${INTEG_TEST_WORKFLOW}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --ref "${{ inputs.ref || github.ref_name }}" \
-            --field "TEST_MANIFEST=${{ inputs.test-manifest }}" \
-            --field "BUILD_MANIFEST_URL=${{ inputs.build-manifest-url }}" \
-            --field "RC_NUMBER=${{ inputs.rc-number }}" \
+            --ref "${REF}" \
+            --field "TEST_MANIFEST=${TEST_MANIFEST}" \
+            --field "BUILD_MANIFEST_URL=${BUILD_MANIFEST_URL}" \
+            --field "RC_NUMBER=${RC_NUMBER}" \
+            --field "DISTRIBUTION_BUILD_URL=${DISTRIBUTION_BUILD_URL}" \
             --field 'UPDATE_GITHUB_ISSUES=true'
         fi
 
         # triggerSmokeTests() and triggerBWCTests() are out of scope for this migration
         # (see docs/jenkins-to-actions.md, 'Not migrated').
-        echo "::notice::Jenkins would also trigger the smoke-test and bwc-test jobs for ${{ inputs.platform }}/${{ inputs.distribution }} with build manifest ${{ inputs.build-manifest-url }}"
+        echo "::notice::Jenkins would also trigger the smoke-test and bwc-test jobs for ${PLATFORM}/${DISTRIBUTION} with build manifest ${BUILD_MANIFEST_URL}"

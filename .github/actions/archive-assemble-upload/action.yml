@@ -84,12 +84,15 @@ runs:
     - name: Locate the build manifest
       id: manifest
       shell: bash
+      env:
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
+        DISTRIBUTION: ${{ inputs.distribution }}
       run: |
         set -euo pipefail
         python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
-        INFO=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" input-manifest-info '${{ inputs.input-manifest }}')
+        INFO=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" input-manifest-info "${INPUT_MANIFEST}")
         FILENAME=$(echo "${INFO}" | grep '^filename=' | cut -d= -f2)
-        echo "build-manifest=${{ inputs.distribution }}/builds/${FILENAME}/manifest.yml" >> "$GITHUB_OUTPUT"
+        echo "build-manifest=${DISTRIBUTION}/builds/${FILENAME}/manifest.yml" >> "$GITHUB_OUTPUT"
 
     - name: Assemble and upload the distribution
       id: assemble

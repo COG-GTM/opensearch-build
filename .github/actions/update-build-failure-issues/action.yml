@@ -65,21 +65,34 @@ runs:
         METRICS_HOST_URL: ${{ inputs.metrics-host-url }}
         METRICS_INDEX: ${{ inputs.metrics-index }}
         REGION: ${{ inputs.aws-region }}
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
+        DISTRIBUTION_BUILD_NUMBER: ${{ inputs.distribution-build-number }}
+        BUILD_START_TIME_FROM: ${{ inputs.build-start-time-from }}
+        BUILD_START_TIME_TO: ${{ inputs.build-start-time-to }}
       run: |
         set -euo pipefail
         set +x
         python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        # The signing credentials go into a 0600 curl config file instead of the command line, so they never appear in
+        # the process table of a runner that is also executing build and test code.
+        CURL_CONFIG=$(mktemp)
+        chmod 600 "${CURL_CONFIG}"
+        trap 'rm -f "${CURL_CONFIG}"' EXIT
+        {
+          echo "aws-sigv4 = \"aws:amz:${REGION}:es\""
+          echo "user = \"${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}\""
+          echo "header = \"x-amz-security-token:${AWS_SESSION_TOKEN}\""
+        } > "${CURL_CONFIG}"
+
         for RESULT in failed passed; do
           python3 "${GITHUB_WORKSPACE}/.github/scripts/build_failure_issues.py" query \
-            --input-manifest '${{ inputs.input-manifest }}' \
-            --distribution-build-number '${{ inputs.distribution-build-number }}' \
-            --build-start-time-from '${{ inputs.build-start-time-from }}' \
-            --build-start-time-to '${{ inputs.build-start-time-to }}' \
+            --input-manifest "${INPUT_MANIFEST}" \
+            --distribution-build-number "${DISTRIBUTION_BUILD_NUMBER}" \
+            --build-start-time-from "${BUILD_START_TIME_FROM}" \
+            --build-start-time-to "${BUILD_START_TIME_TO}" \
             --result "${RESULT}" > "query-${RESULT}.json"
           curl -s -XGET "${METRICS_HOST_URL}/${METRICS_INDEX}/_search" \
-            --aws-sigv4 "aws:amz:${REGION}:es" \
-            --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" \
-            -H "x-amz-security-token:${AWS_SESSION_TOKEN}" \
+            --config "${CURL_CONFIG}" \
             -H 'Content-Type: application/json' \
             --data-binary "@query-${RESULT}.json" > "response-${RESULT}.json"
           python3 "${GITHUB_WORKSPACE}/.github/scripts/build_failure_issues.py" components \
@@ -92,12 +105,13 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         RUN_URL: ${{ inputs.build-url }}
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
       run: |
         set -euo pipefail
-        VERSION=$(python3 -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['build']['version'])" '${{ inputs.input-manifest }}')
+        VERSION=$(python3 -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['build']['version'])" "${INPUT_MANIFEST}")
 
         python3 "${GITHUB_WORKSPACE}/.github/scripts/build_failure_issues.py" plan \
-          --input-manifest '${{ inputs.input-manifest }}' \
+          --input-manifest "${INPUT_MANIFEST}" \
           --failed components-failed.txt \
           --passed components-passed.txt > issue-plan.tsv
 

@@ -169,6 +169,17 @@ jobs:
     outputs:
       artifact-url: ${{ steps.assemble.outputs.artifact-url }}
       build-manifest-url: ${{ steps.assemble.outputs.build-manifest-url }}
+    # Jenkins wrapped the assemble stage in withSecrets(secrets: [rpm-signing/*]) (signArtifacts.groovy). A composite
+    # action cannot read secrets itself, so the seven rpm signing values are exported here, at the job level, where the
+    # sign-artifacts steps inherit them. Unset secrets stay empty and sign-artifacts fails loudly instead of signing
+    # with the wrong key - see docs/jenkins-to-actions.md for what has to be configured.
+    env:
+      RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN }}
+      RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+      RPM_RELEASE_SIGNING_KEY_ID: ${{ secrets.RPM_RELEASE_SIGNING_KEY_ID }}
+      RPM_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_SIGNING_PASSPHRASE_SECRETS_ARN }}
+      RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+      RPM_SIGNING_KEY_ID: ${{ secrets.RPM_SIGNING_KEY_ID }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -211,4 +222,5 @@ jobs:
           test-platform: ${{ inputs.test-platform }}
           test-distribution: ${{ inputs.test-distribution }}
           rc-number: ${{ inputs.rc-number }}
+          distribution-build-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}

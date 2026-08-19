@@ -37,6 +37,14 @@ on:
         required: false
         default: false
         type: boolean
+      DISTRIBUTION_BUILD_URL:
+        description: >-
+          '<Optional> Run URL of the distribution build that produced BUILD_MANIFEST_URL, used as the
+          distributionBuildUrl metrics field. distribution-build-opensearch.yml fills it in; when it is empty the
+          build manifest URL identifies the build under test instead.'
+        required: false
+        default: ''
+        type: string
 
 permissions: {}
 
@@ -65,17 +73,38 @@ jobs:
       image: ${{ steps.agent.outputs.image }}
       args: ${{ steps.agent.outputs.args }}
       components: ${{ steps.components.outputs.components }}
+      has-components: ${{ steps.components.outputs.has-components }}
       switch-user-non-root: ${{ steps.components.outputs.switch-user-non-root }}
       build-start-time: ${{ steps.start-time.outputs.build-start-time }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Check that the test manifest exists
+      - name: Verify the parameters
         # integ-test.jenkinsfile:71-79 aborted the build for a missing manifest or an empty build manifest URL.
+        env:
+          TEST_MANIFEST: ${{ inputs.TEST_MANIFEST }}
+          COMPONENT_NAME: ${{ inputs.COMPONENT_NAME }}
+          RC_NUMBER: ${{ inputs.RC_NUMBER }}
+          BUILD_MANIFEST_URL: ${{ inputs.BUILD_MANIFEST_URL }}
+          DISTRIBUTION_BUILD_URL: ${{ inputs.DISTRIBUTION_BUILD_URL }}
         run: |
           set -euo pipefail
-          if [ ! -f 'manifests/${{ inputs.TEST_MANIFEST }}' ]; then
-            echo '::error::Integration Tests failed to start. Test manifest was not provided or not found in manifests/${{ inputs.TEST_MANIFEST }}.'
+          # Every dispatch input reaches a shell or a container option somewhere downstream, so the character set is
+          # constrained here once instead of being escaped in each of the composite actions.
+          check() {
+            if ! printf '%s' "$2" | grep -Eq "$3"; then
+              echo "::error::$1 contains characters that are not allowed: $2"
+              exit 1
+            fi
+          }
+          check TEST_MANIFEST "${TEST_MANIFEST}" '^[A-Za-z0-9._/-]+$'
+          check COMPONENT_NAME "${COMPONENT_NAME}" '^[A-Za-z0-9 ._-]*$'
+          check RC_NUMBER "${RC_NUMBER}" '^[0-9]+$'
+          check BUILD_MANIFEST_URL "${BUILD_MANIFEST_URL}" '^https://[A-Za-z0-9._~:/?#@!$&()*+,;=%-]+$'
+          check DISTRIBUTION_BUILD_URL "${DISTRIBUTION_BUILD_URL}" '^(https://[A-Za-z0-9._~:/?#@!$&()*+,;=%-]+)?$'
+
+          if [ ! -f "manifests/${TEST_MANIFEST}" ]; then
+            echo "::error::Integration Tests failed to start. Test manifest was not provided or not found in manifests/${TEST_MANIFEST}."
             exit 1
           fi
 
@@ -98,13 +127,25 @@ jobs:
       - name: Select the components to test
         id: components
         # integ-test.jenkinsfile:149-172, including the rpm/deb component skips.
+        env:
+          TEST_MANIFEST: ${{ inputs.TEST_MANIFEST }}
+          COMPONENT_NAME: ${{ inputs.COMPONENT_NAME }}
         run: |
           set -euo pipefail
           python3 -m pip install --quiet pyyaml
           python3 .github/scripts/manifest_paths.py integ-test-components \
-            'manifests/${{ inputs.TEST_MANIFEST }}' \
-            --build-manifest '${{ env.BUILD_MANIFEST }}' \
-            --component-name '${{ inputs.COMPONENT_NAME }}' | tee -a "$GITHUB_OUTPUT"
+            "manifests/${TEST_MANIFEST}" \
+            --build-manifest "${BUILD_MANIFEST}" \
+            --component-name "${COMPONENT_NAME}" | tee -a "$GITHUB_OUTPUT" > components.txt
+          # Every requested component can be filtered out (absent from the build manifest, or skipped for rpm/deb),
+          # and a matrix cannot be empty, so the component job is gated on this flag instead.
+          COMPONENTS=$(grep '^components=' components.txt | cut -d= -f2-)
+          if [ "${COMPONENTS}" = '[]' ]; then
+            echo 'has-components=false' >> "$GITHUB_OUTPUT"
+            echo '::warning::No component of the test manifest is present in the build manifest, nothing to test.'
+          else
+            echo 'has-components=true' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Record the run start time
         id: start-time
@@ -112,15 +153,23 @@ jobs:
 
       - name: Summarize the run
         # integ-test.jenkinsfile:173 set currentBuild.description to the same values.
+        env:
+          TEST_MANIFEST: ${{ inputs.TEST_MANIFEST }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+          ARCHITECTURE: ${{ steps.manifest.outputs.architecture }}
+          PLATFORM: ${{ steps.manifest.outputs.platform }}
+          BUILD_ID: ${{ steps.manifest.outputs.build-id }}
+          DISTRIBUTION: ${{ steps.manifest.outputs.distribution }}
+          COMPONENTS: ${{ steps.components.outputs.components }}
         run: |
           {
-            echo "### ${{ inputs.TEST_MANIFEST }}"
-            echo "version: ${{ steps.manifest.outputs.version }}"
-            echo "architecture: ${{ steps.manifest.outputs.architecture }}"
-            echo "platform: ${{ steps.manifest.outputs.platform }}"
-            echo "build id: ${{ steps.manifest.outputs.build-id }}"
-            echo "distribution: ${{ steps.manifest.outputs.distribution }}"
-            echo "components: ${{ steps.components.outputs.components }}"
+            echo "### ${TEST_MANIFEST}"
+            echo "version: ${VERSION}"
+            echo "architecture: ${ARCHITECTURE}"
+            echo "platform: ${PLATFORM}"
+            echo "build id: ${BUILD_ID}"
+            echo "distribution: ${DISTRIBUTION}"
+            echo "components: ${COMPONENTS}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   validate-artifacts:
@@ -134,8 +183,13 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Report the validation parameters
+        env:
+          VERSION: ${{ needs.verify-parameters.outputs.version }}
+          DISTRIBUTION: ${{ needs.verify-parameters.outputs.distribution }}
+          ARCHITECTURE: ${{ needs.verify-parameters.outputs.architecture }}
+          BUILD_ID: ${{ needs.verify-parameters.outputs.build-id }}
         run: |
-          echo "::notice::Jenkins runs distribution-validation with VERSION=${{ needs.verify-parameters.outputs.version }}, DISTRIBUTION=${{ needs.verify-parameters.outputs.distribution }}, ARCHITECTURE=${{ needs.verify-parameters.outputs.architecture }}, OS_BUILD_NUMBER=${{ needs.verify-parameters.outputs.build-id }}, ARTIFACT_TYPE=staging; that pipeline is still Jenkins-only (docs/jenkins-to-actions.md)."
+          echo "::notice::Jenkins runs distribution-validation with VERSION=${VERSION}, DISTRIBUTION=${DISTRIBUTION}, ARCHITECTURE=${ARCHITECTURE}, OS_BUILD_NUMBER=${BUILD_ID}, ARTIFACT_TYPE=staging; that pipeline is still Jenkins-only (docs/jenkins-to-actions.md)."
 
   integ-test:
     # integ-test.jenkinsfile:136-281 stage('integ-test'). Jenkins built the parallel branches at runtime from
@@ -143,7 +197,10 @@ jobs:
     # and each entry gets its own runner, so the workspace no longer has to be stashed and unstashed.
     name: ${{ matrix.component }}
     needs: [verify-parameters, validate-artifacts]
-    if: always() && needs.verify-parameters.result == 'success' && needs.validate-artifacts.result != 'failure'
+    if: |
+      always() && needs.verify-parameters.result == 'success'
+        && needs.validate-artifacts.result != 'failure'
+        && needs.verify-parameters.outputs.has-components == 'true'
     runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
     timeout-minutes: 720
     permissions:
@@ -160,9 +217,12 @@ jobs:
 
       - name: Stagger the component start
         # integ-test.jenkinsfile:204-222: component index * 20 seconds, to spread the load of the parallel branches.
+        env:
+          JOB_INDEX: ${{ strategy.job-index }}
+          COMPONENT: ${{ matrix.component }}
         run: |
-          WAIT_SECONDS=$(( ${{ strategy.job-index }} * 20 ))
-          echo "${{ matrix.component }} with index ${{ strategy.job-index }} will sleep ${WAIT_SECONDS} seconds to reduce load"
+          WAIT_SECONDS=$(( JOB_INDEX * 20 ))
+          echo "${COMPONENT} with index ${JOB_INDEX} will sleep ${WAIT_SECONDS} seconds to reduce load"
           sleep "${WAIT_SECONDS}"
 
       - name: Download the build manifest
@@ -186,11 +246,13 @@ jobs:
       - name: Move the artifacts into the distribution directory
         # integ-test.jenkinsfile:187 `rm -rf $WORKSPACE/$distribution && mv -v $WORKSPACE/artifacts/${artifactPath} $WORKSPACE`
         shell: bash
+        env:
+          DISTRIBUTION: ${{ needs.verify-parameters.outputs.distribution }}
+          ARTIFACT_PATH: ${{ needs.verify-parameters.outputs.artifact-path }}
         run: |
           set -euo pipefail
-          DISTRIBUTION='${{ needs.verify-parameters.outputs.distribution }}'
           rm -rf "${DISTRIBUTION}" test-results
-          mv -v "artifacts/${{ needs.verify-parameters.outputs.artifact-path }}" "${DISTRIBUTION}"
+          mv -v "artifacts/${ARTIFACT_PATH}" "${DISTRIBUTION}"
 
       - name: Run the integration tests
         uses: ./.github/actions/run-integ-test-script
@@ -268,7 +330,8 @@ jobs:
         with:
           test-report-manifest-yml: test-report.yml
           job-name: integ-test
-          distribution-build-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # integ-test.jenkinsfile:316 pointed this at the upstream distribution build, not at the test run.
+          distribution-build-url: ${{ inputs.DISTRIBUTION_BUILD_URL || inputs.BUILD_MANIFEST_URL }}
           test-run-id: ${{ github.run_number }}
           test-run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           build-start-time: ${{ needs.verify-parameters.outputs.build-start-time }}
@@ -285,5 +348,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Report the notification parameters
+        env:
+          VERSION: ${{ needs.verify-parameters.outputs.version }}
+          BUILD_ID: ${{ needs.verify-parameters.outputs.build-id }}
         run: |
-          echo "::notice::Jenkins triggers integ-test-notification with INPUT_MANIFEST=${{ needs.verify-parameters.outputs.version }}/opensearch-${{ needs.verify-parameters.outputs.version }}.yml and DISTRIBUTION_NUMBER=${{ needs.verify-parameters.outputs.build-id }}; that pipeline is still Jenkins-only (docs/jenkins-to-actions.md)."
+          echo "::notice::Jenkins triggers integ-test-notification with INPUT_MANIFEST=${VERSION}/opensearch-${VERSION}.yml and DISTRIBUTION_NUMBER=${BUILD_ID}; that pipeline is still Jenkins-only (docs/jenkins-to-actions.md)."

@@ -38,16 +38,23 @@ runs:
     - name: Generate the integration test records
       id: records
       shell: bash
+      env:
+        TEST_REPORT: ${{ inputs.test-report-manifest-yml }}
+        JOB_NAME: ${{ inputs.job-name }}
+        TEST_RUN_ID: ${{ inputs.test-run-id }}
+        TEST_RUN_URL: ${{ inputs.test-run-url }}
+        DISTRIBUTION_BUILD_URL: ${{ inputs.distribution-build-url }}
+        BUILD_START_TIME: ${{ inputs.build-start-time }}
       run: |
         set -euo pipefail
         python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
         python3 "${GITHUB_WORKSPACE}/.github/scripts/metrics_records.py" integ-test-results \
-          --test-report '${{ inputs.test-report-manifest-yml }}' \
-          --job-name '${{ inputs.job-name }}' \
-          --integ-test-build-number '${{ inputs.test-run-id }}' \
-          --integ-test-build-url '${{ inputs.test-run-url }}' \
-          --distribution-build-url '${{ inputs.distribution-build-url }}' \
-          --build-start-time '${{ inputs.build-start-time }}' \
+          --test-report "${TEST_REPORT}" \
+          --job-name "${JOB_NAME}" \
+          --integ-test-build-number "${TEST_RUN_ID}" \
+          --integ-test-build-url "${TEST_RUN_URL}" \
+          --distribution-build-url "${DISTRIBUTION_BUILD_URL}" \
+          --build-start-time "${BUILD_START_TIME}" \
           --output test-records.json \
           --failures-output test-failures.json | tee -a "$GITHUB_OUTPUT"
 

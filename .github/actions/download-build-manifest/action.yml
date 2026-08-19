@@ -48,33 +48,42 @@ runs:
   steps:
     - name: Download the build manifest
       shell: bash
+      env:
+        MANIFEST_PATH: ${{ inputs.path }}
+        URL: ${{ inputs.url }}
       run: |
         set -euo pipefail
-        mkdir -p "$(dirname '${{ inputs.path }}')"
-        curl -sSL --retry 5 '${{ inputs.url }}' --output '${{ inputs.path }}'
-        cat '${{ inputs.path }}'
+        mkdir -p "$(dirname "${MANIFEST_PATH}")"
+        curl -sSL --retry 5 "${URL}" --output "${MANIFEST_PATH}"
+        cat "${MANIFEST_PATH}"
 
     - name: Read the build manifest
       id: info
       shell: bash
+      env:
+        MANIFEST_PATH: ${{ inputs.path }}
+        JOB_NAME: ${{ inputs.job-name }}
       run: |
         set -euo pipefail
         python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
-        BUILD_ID=$(python3 -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['build']['id'])" '${{ inputs.path }}')
+        BUILD_ID=$(python3 -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['build']['id'])" "${MANIFEST_PATH}")
         python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" build-manifest-info \
-          '${{ inputs.path }}' \
-          --job-name '${{ inputs.job-name }}' \
+          "${MANIFEST_PATH}" \
+          --job-name "${JOB_NAME}" \
           --build-number "${BUILD_ID}" | tee -a "$GITHUB_OUTPUT"
 
     - name: Select the runner for the build platform
       id: runner
       shell: bash
+      env:
+        PLATFORM: ${{ steps.info.outputs.platform }}
+        ARCHITECTURE: ${{ steps.info.outputs.architecture }}
       run: |
         set -euo pipefail
-        case '${{ steps.info.outputs.platform }}_${{ steps.info.outputs.architecture }}' in
+        case "${PLATFORM}_${ARCHITECTURE}" in
           linux_x64) RUNNER='ubuntu-24.04' ;;
           linux_arm64) RUNNER='ubuntu-24.04-arm' ;;
           windows_x64) RUNNER='windows-2022' ;;
-          *) echo "::error::No runner mapping for ${{ steps.info.outputs.platform }}_${{ steps.info.outputs.architecture }}"; exit 1 ;;
+          *) echo "::error::No runner mapping for ${PLATFORM}_${ARCHITECTURE}"; exit 1 ;;
         esac
         echo "runs-on=${RUNNER}" >> "$GITHUB_OUTPUT"

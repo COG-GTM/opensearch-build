@@ -167,20 +167,22 @@ def distribution_matrix(manifest: Dict[str, Any], build_platform: str, build_dis
         if target["platform"] not in platforms or target["distribution"] not in distributions:
             continue
         runner = RUNNERS[f"{target['platform']}-{target['architecture']}"]
-        # The rpm/deb stages build the tar with the linux tar image and only assemble with the package image.
-        build_agent = ci_image(manifest, "input", target["platform"], "tar" if target["kind"] == "package" else target["distribution"])
-        assemble_agent = ci_image(manifest, "input", target["platform"], target["distribution"])
+        agent = ci_image(manifest, "input", target["platform"], target["distribution"])
+        tar_agent = ci_image(manifest, "input", target["platform"], "tar")
+        package = target["kind"] == "package"
+        # The rpm/deb build stage mixes the tar image with the package args and the assemble stage runs the package
+        # image with no args at all (distribution-build.jenkinsfile:337-339, 373-376).
         matrices[str(target["kind"])].append(
             {
                 "platform": str(target["platform"]),
                 "architecture": str(target["architecture"]),
                 "distribution": str(target["distribution"]),
                 "runs-on": runner,
-                "image": build_agent["image"],
-                "args": build_agent["args"],
-                "java-version": build_agent["java-version"],
-                "assemble-image": assemble_agent["image"],
-                "assemble-args": assemble_agent["args"],
+                "image": tar_agent["image"] if package else agent["image"],
+                "args": agent["args"],
+                "java-version": agent["java-version"],
+                "assemble-image": agent["image"],
+                "assemble-args": "",
             }
         )
 
@@ -246,7 +248,13 @@ def integ_test_paths(build_manifest: Dict[str, Any], job_name: str, public_artif
         paths = f"opensearch={latest_core_url} opensearch-dashboards={artifact_root_url}"
 
     base_path = "/".join([public_artifact_url, job_name, build["version"], build_id, build["platform"], build["architecture"], build["distribution"]])
-    return {"paths": paths, "base-path": base_path}
+    # runIntegTestScript.groovy:32-33 pins JAVA_HOME only for the OpenSearch core distribution on a non-windows agent.
+    return {
+        "paths": paths,
+        "base-path": base_path,
+        "filename": filename(build["name"]),
+        "platform": build["platform"],
+    }
 
 
 def main() -> int:

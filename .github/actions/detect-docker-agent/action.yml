@@ -35,11 +35,15 @@ runs:
     - name: Detect docker agent from input manifest
       id: detect
       shell: bash
+      env:
+        MANIFEST: ${{ inputs.manifest }}
+        PLATFORM: ${{ inputs.platform }}
+        DISTRIBUTION: ${{ inputs.distribution }}
       run: |
         set -euo pipefail
         python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
         python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" ci-image \
-          "${{ inputs.manifest }}" \
+          "${MANIFEST}" \
           --kind input \
-          --platform "${{ inputs.platform }}" \
-          --distribution "${{ inputs.distribution }}" | tee -a "$GITHUB_OUTPUT"
+          --platform "${PLATFORM}" \
+          --distribution "${DISTRIBUTION}" | tee -a "$GITHUB_OUTPUT"

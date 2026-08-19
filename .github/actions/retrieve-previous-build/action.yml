@@ -38,13 +38,20 @@ runs:
     - name: Resolve the previous artifact path
       id: previous
       shell: bash
+      env:
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
+        JOB_NAME: ${{ inputs.job-name }}
+        PREVIOUS_BUILD_NUMBER: ${{ inputs.previous-build-number }}
+        PLATFORM: ${{ inputs.platform }}
+        ARCHITECTURE: ${{ inputs.architecture }}
+        DISTRIBUTION: ${{ inputs.distribution }}
       run: |
         set -euo pipefail
         python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
-        INFO=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" input-manifest-info '${{ inputs.input-manifest }}')
+        INFO=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" input-manifest-info "${INPUT_MANIFEST}")
         REVISION=$(echo "${INFO}" | grep '^revision=' | cut -d= -f2)
         FILENAME=$(echo "${INFO}" | grep '^filename=' | cut -d= -f2)
-        echo "artifact-path=${{ inputs.job-name }}/${REVISION}/${{ inputs.previous-build-number }}/${{ inputs.platform }}/${{ inputs.architecture }}/${{ inputs.distribution }}" >> "$GITHUB_OUTPUT"
+        echo "artifact-path=${JOB_NAME}/${REVISION}/${PREVIOUS_BUILD_NUMBER}/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}" >> "$GITHUB_OUTPUT"
         echo "filename=${FILENAME}" >> "$GITHUB_OUTPUT"
 
     - name: Download the previous build artifacts
@@ -58,14 +65,17 @@ runs:
 
     - name: Move the previous build artifacts into the workspace
       shell: bash
+      env:
+        DISTRIBUTION: ${{ inputs.distribution }}
+        ARTIFACT_PATH: ${{ steps.previous.outputs.artifact-path }}
+        FILENAME: ${{ steps.previous.outputs.filename }}
       run: |
         set -euo pipefail
-        DISTRIBUTION='${{ inputs.distribution }}'
         rm -rf "${DISTRIBUTION}"
         mkdir -p "${DISTRIBUTION}"
-        mv -v "${{ github.workspace }}/download/${{ steps.previous.outputs.artifact-path }}"/* "${GITHUB_WORKSPACE}/${DISTRIBUTION}"
+        mv -v "${GITHUB_WORKSPACE}/download/${ARTIFACT_PATH}"/* "${GITHUB_WORKSPACE}/${DISTRIBUTION}"
 
-        if [ '${{ steps.previous.outputs.filename }}' = 'opensearch' ]; then
+        if [ "${FILENAME}" = 'opensearch' ]; then
           echo 'Setting up Maven Local for OpenSearch build.'
           mkdir -p "${HOME}/.m2/repository/org/"
           cp -r "${DISTRIBUTION}/builds/opensearch/maven/org/opensearch/" "${HOME}/.m2/repository/org/"

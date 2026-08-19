@@ -133,9 +133,11 @@ jobs:
         # needs the one the manifest asks for.
         if: inputs.platform == 'windows'
         shell: bash
+        env:
+          JAVA_VERSION: ${{ inputs.java-version }}
         run: |
           set -euo pipefail
-          JAVA_VERSION_NUMBER=$(echo '${{ inputs.java-version }}' | tr -dc '0-9')
+          JAVA_VERSION_NUMBER=$(echo "${JAVA_VERSION}" | tr -dc '0-9')
           scoop reset "$(scoop list jdk | cut -d ' ' -f1 | grep "${JAVA_VERSION_NUMBER}" | head -1)"
 
       - name: Build, assemble and upload
@@ -196,4 +198,5 @@ jobs:
           test-platform: ${{ inputs.test-platform }}
           test-distribution: ${{ inputs.test-distribution }}
           rc-number: ${{ inputs.rc-number }}
+          distribution-build-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}

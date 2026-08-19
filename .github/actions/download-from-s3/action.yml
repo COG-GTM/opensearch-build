@@ -41,10 +41,14 @@ runs:
 
     - name: Download from S3
       shell: bash
+      env:
+        LOCAL_PATH: ${{ inputs.local-path }}
+        DOWNLOAD_PATH: ${{ inputs.download-path }}
+        BUCKET_NAME: ${{ inputs.bucket-name }}
       run: |
         set -euo pipefail
         # Jenkins s3Download(force: true) always overwrote the workspace copy; `aws s3 cp --recursive` does the same.
-        TARGET='${{ inputs.local-path }}/${{ inputs.download-path }}'
+        TARGET="${LOCAL_PATH}/${DOWNLOAD_PATH}"
         mkdir -p "${TARGET}"
-        echo "Downloading s3://${{ inputs.bucket-name }}/${{ inputs.download-path }} to ${TARGET}"
-        aws s3 cp --recursive --quiet "s3://${{ inputs.bucket-name }}/${{ inputs.download-path }}" "${TARGET}"
+        echo "Downloading s3://${BUCKET_NAME}/${DOWNLOAD_PATH} to ${TARGET}"
+        aws s3 cp --recursive --quiet "s3://${BUCKET_NAME}/${DOWNLOAD_PATH}" "${TARGET}"
