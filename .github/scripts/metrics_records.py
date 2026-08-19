@@ -63,6 +63,7 @@ def extract_components(log_text: str, pattern: str) -> List[str]:
 
 
 def distribution_build_records(
+    index: str,
     input_manifest: Dict[str, Any],
     log_text: str,
     build_number: str,
@@ -72,7 +73,6 @@ def distribution_build_records(
     component_category: str,
     overall_build_result: str,
 ) -> str:
-    index = monthly_index(BUILD_RESULTS_ALIAS)
     failed = extract_components(log_text, r"(?<=\bError building\s).*")
     passed = extract_components(log_text, r"(?<=\bSuccessfully built\s).*")
     build = input_manifest["build"]
@@ -116,6 +116,8 @@ def config_of(component: Dict[str, Any], name: str) -> Dict[str, Any]:
 
 
 def integ_test_records(
+    results_index: str,
+    failures_index: str,
     report: Dict[str, Any],
     job_name: str,
     integ_test_build_number: str,
@@ -124,9 +126,6 @@ def integ_test_records(
     build_start_time: int,
 ) -> Dict[str, str]:
     """publishIntegTestResults.groovy:37-110, one results record and N failure records per component."""
-    results_index = monthly_index(INTEG_RESULTS_ALIAS)
-    failures_index = monthly_index(INTEG_FAILURES_ALIAS)
-
     full_version = str(report["version"])
     tokens = full_version.split("-")
     version = tokens[0]
@@ -277,7 +276,11 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "distribution-build-results":
+        # Computed once so the `_index` of every bulk line and the index the composite action creates cannot straddle a
+        # month boundary.
+        index = monthly_index(BUILD_RESULTS_ALIAS)
         body = distribution_build_records(
+            index,
             load(args.input_manifest),
             read_logs(args.build_log),
             args.build_number,
@@ -288,10 +291,14 @@ def main() -> int:
             args.overall_build_result,
         )
         write(args.output, body)
-        print(f"index={monthly_index(BUILD_RESULTS_ALIAS)}")
+        print(f"index={index}")
         print(f"alias={BUILD_RESULTS_ALIAS}")
     else:
+        results_index = monthly_index(INTEG_RESULTS_ALIAS)
+        failures_index = monthly_index(INTEG_FAILURES_ALIAS)
         bodies = integ_test_records(
+            results_index,
+            failures_index,
             load(args.test_report),
             args.job_name,
             args.integ_test_build_number,
@@ -301,9 +308,9 @@ def main() -> int:
         )
         write(args.output, bodies["results"])
         write(args.failures_output, bodies["failures"])
-        print(f"index={monthly_index(INTEG_RESULTS_ALIAS)}")
+        print(f"index={results_index}")
         print(f"alias={INTEG_RESULTS_ALIAS}")
-        print(f"failures-index={monthly_index(INTEG_FAILURES_ALIAS)}")
+        print(f"failures-index={failures_index}")
         print(f"failures-alias={INTEG_FAILURES_ALIAS}")
 
     return 0

@@ -216,6 +216,13 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
+      - name: Set up Python on the Windows runner
+        # See distribution-build-archive.yml: the windows-2022 runner has no `python3` on PATH by default.
+        if: needs.verify-parameters.outputs.platform == 'windows'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.9'
+
       - name: Stagger the component start
         # integ-test.jenkinsfile:204-222: component index * 20 seconds, to spread the load of the parallel branches.
         env:
@@ -293,6 +300,13 @@ jobs:
     container: ${{ needs.verify-parameters.outputs.platform == 'linux' && fromJSON(format('{{"image":"{0}","options":"{1}"}}', needs.verify-parameters.outputs.image, needs.verify-parameters.outputs.args)) || null }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Python on the Windows runner
+        # See distribution-build-archive.yml: the windows-2022 runner has no `python3` on PATH by default.
+        if: needs.verify-parameters.outputs.platform == 'windows'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.9'
 
       - name: Download the build manifest
         uses: ./.github/actions/download-build-manifest

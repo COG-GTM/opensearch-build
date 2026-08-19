@@ -96,7 +96,7 @@ runs:
         read -ra COMPONENTS <<< "${COMPONENT_NAME}"
         read -ra PATH_PAIRS <<< "${PATHS}"
         ARGS=('./test.sh' 'integ-test' "${TEST_MANIFEST}"
-              '--component' "${COMPONENTS[@]}"
+              '--component' ${COMPONENTS[@]+"${COMPONENTS[@]}"}
               '--test-run-id' "${TEST_RUN_ID}"
               '--paths' "${PATH_PAIRS[@]}"
               '--base-path' "${BASE_PATH}")

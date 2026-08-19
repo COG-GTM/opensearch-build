@@ -61,16 +61,20 @@ runs:
       run: |
         set -euo pipefail
         python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        # The `${arr[@]+...}` guard keeps an empty array expandable under `set -u` on the bash 4.2 the AL2 based CI
+        # images ship.
         LOG_ARGS=()
+        LOG_COUNT=0
         while IFS= read -r log; do
           LOG_ARGS+=('--build-log' "${log}")
+          LOG_COUNT=$((LOG_COUNT + 1))
         done < <(find "${BUILD_LOGS_DIRECTORY}" -type f -name '*.log' 2>/dev/null || true)
-        if [ "${#LOG_ARGS[@]}" -eq 0 ]; then
+        if [ "${LOG_COUNT}" -eq 0 ]; then
           echo "::warning::No build logs found under ${BUILD_LOGS_DIRECTORY}; no component results can be derived."
         fi
         python3 "${GITHUB_WORKSPACE}/.github/scripts/metrics_records.py" distribution-build-results \
           --input-manifest "${INPUT_MANIFEST}" \
-          "${LOG_ARGS[@]}" \
+          ${LOG_ARGS[@]+"${LOG_ARGS[@]}"} \
           --build-number "${BUILD_NUMBER}" \
           --build-url "${BUILD_URL}" \
           --build-start-time "${BUILD_START_TIME}" \

@@ -46,6 +46,12 @@ runs:
         UPLOAD_PATH: ${{ inputs.path }}
       run: |
         set -euo pipefail
+        if [ ! -e "${SOURCE}" ]; then
+          # uploadTestResults() runs from the `finally` of every branch, so the directory can be missing when the test
+          # step died early; the Jenkins s3Upload() step tolerated that, and the real failure must stay visible.
+          echo "::warning::${SOURCE} does not exist, nothing to upload."
+          exit 0
+        fi
         DESTINATION="s3://${BUCKET}/${UPLOAD_PATH}"
         echo "Uploading ${SOURCE} to ${DESTINATION}"
         if [ -d "${SOURCE}" ]; then

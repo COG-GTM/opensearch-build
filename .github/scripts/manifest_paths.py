@@ -79,6 +79,33 @@ def index_file_root(manifest: Dict[str, Any], job_name: str, build_feature: Opti
     return "/".join([job_name, build_feature or build["version"], "index", build["platform"], build["architecture"], build["distribution"]])
 
 
+# GitHub Actions rejects `--network` and `--entrypoint` in jobs.<id>.container.options, and the runner appends its
+# own `--entrypoint tail -f /dev/null` regardless, so the systemd entrypoint the rpm/deb test images carry cannot be
+# honoured (docs/jenkins-to-actions.md). Those options are dropped with a warning instead of failing the parse.
+UNSUPPORTED_CONTAINER_OPTIONS = ("--entrypoint", "--network")
+
+
+def sanitize_container_options(args: str) -> str:
+    """Filter manifest ci.image args down to options GitHub Actions accepts in a job container."""
+    tokens = args.split()
+    kept: List[str] = []
+    skip_value = False
+    for token in tokens:
+        if skip_value:
+            skip_value = False
+            continue
+        if '"' in token:
+            # The options end up inside a hand-built JSON container object, so a double quote would break out of it.
+            raise ValueError(f"container option {token!r} contains a double quote, which is not supported")
+        name = token.split("=", 1)[0]
+        if name in UNSUPPORTED_CONTAINER_OPTIONS:
+            print(f"Dropping container option {token}: GitHub Actions does not support it.", file=sys.stderr)
+            skip_value = "=" not in token
+            continue
+        kept.append(token)
+    return " ".join(kept)
+
+
 def ci_image(manifest: Dict[str, Any], kind: str, platform: str, distribution: str) -> Dict[str, str]:
     """detectDockerAgent() / detectTestDockerAgent().
 
@@ -105,7 +132,7 @@ def ci_image(manifest: Dict[str, Any], kind: str, platform: str, distribution: s
     java_match = re.search(r"openjdk-\d+", args)
     return {
         "image": image,
-        "args": args,
+        "args": sanitize_container_options(args),
         "java-version": java_match.group(0) if java_match else DEFAULT_JAVA_VERSION,
     }
 
