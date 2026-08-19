@@ -254,6 +254,13 @@ jobs:
     name: ${{ matrix.platform }}-${{ matrix.architecture }}-${{ matrix.distribution }}
     needs: verify-parameters
     if: needs.verify-parameters.outputs.archive-count != '0'
+    # A called workflow can only narrow the caller's token, so the permissions the reusable workflows request
+    # (id-token for the AWS OIDC role, actions: write for the `gh workflow run` downstream trigger) have to be granted
+    # here as well; the workflow default is `permissions: {}`.
+    permissions:
+      contents: read
+      id-token: write
+      actions: write
     strategy:
       # Jenkins ran the stages inside `parallel { }` without failing the siblings; fail-fast: false is the equivalent.
       fail-fast: false
@@ -287,6 +294,13 @@ jobs:
     name: ${{ matrix.platform }}-${{ matrix.architecture }}-${{ matrix.distribution }}
     needs: verify-parameters
     if: needs.verify-parameters.outputs.package-count != '0'
+    # A called workflow can only narrow the caller's token, so the permissions the reusable workflows request
+    # (id-token for the AWS OIDC role, actions: write for the `gh workflow run` downstream trigger) have to be granted
+    # here as well; the workflow default is `permissions: {}`.
+    permissions:
+      contents: read
+      id-token: write
+      actions: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.verify-parameters.outputs.package-matrix) }}

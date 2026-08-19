@@ -224,7 +224,7 @@ def integ_test_components(test_manifest: Dict[str, Any], build_manifest: Dict[st
     return result
 
 
-def integ_test_paths(build_manifest: Dict[str, Any], job_name: str, public_artifact_url: str, local_path: str) -> Dict[str, str]:
+def integ_test_paths(build_manifest: Dict[str, Any], job_name: str, base_path_job_name: str, public_artifact_url: str, local_path: str) -> Dict[str, str]:
     """runIntegTestScript.groovy generatePaths()/generateBasePaths()."""
     build = build_manifest["build"]
     build_id = str(build["id"])
@@ -247,7 +247,9 @@ def integ_test_paths(build_manifest: Dict[str, Any], job_name: str, public_artif
     else:
         paths = f"opensearch={latest_core_url} opensearch-dashboards={artifact_root_url}"
 
-    base_path = "/".join([public_artifact_url, job_name, build["version"], build_id, build["platform"], build["architecture"], build["distribution"]])
+    # generatePaths() uses the distribution build job name, generateBasePaths() the name of the test job itself
+    # (tests/jenkins/TestOpenSearchIntegTest.groovy:100-101 shows the two prefixes side by side).
+    base_path = "/".join([public_artifact_url, base_path_job_name, build["version"], build_id, build["platform"], build["architecture"], build["distribution"]])
     # runIntegTestScript.groovy:32-33 pins JAVA_HOME only for the OpenSearch core distribution on a non-windows agent.
     return {
         "paths": paths,
@@ -295,6 +297,7 @@ def main() -> int:
     paths = subparsers.add_parser("integ-test-paths", help="--paths and --base-path of test.sh integ-test")
     paths.add_argument("manifest", help="Build manifest")
     paths.add_argument("--job-name", default="distribution-build-opensearch")
+    paths.add_argument("--base-path-job-name", default="integ-test")
     paths.add_argument("--public-artifact-url", default=DEFAULT_PUBLIC_ARTIFACT_URL)
     paths.add_argument("--local-path", default="")
 
@@ -357,7 +360,7 @@ def main() -> int:
         verify_platform_distribution("TEST_DISTRIBUTION", args.test_distribution, SUPPORTED_DISTRIBUTIONS, required=False)
         emit(distribution_matrix(manifest, args.build_platform, args.build_distribution))
     elif args.command == "integ-test-paths":
-        emit(integ_test_paths(manifest, args.job_name, args.public_artifact_url, args.local_path))
+        emit(integ_test_paths(manifest, args.job_name, args.base_path_job_name, args.public_artifact_url, args.local_path))
 
     return 0
 

@@ -115,9 +115,17 @@ runs:
           --failed components-failed.txt \
           --passed components-passed.txt > issue-plan.tsv
 
+        # createGithubIssue.groovy:28 defaults daysToReOpen to 3: an autocut issue closed within that window is
+        # reopened instead of being cut again.
+        REOPEN_AFTER=$(date -u -d '3 days ago' +'%Y-%m-%d')
+
         while IFS=$'\t' read -r ACTION REPO_URL COMPONENT; do
           TITLE="[AUTOCUT] Distribution Build Failed for ${COMPONENT}-${VERSION}"
+          # gh resolves the manifest `repository` value (a https://github.com/<owner>/<repo>.git URL) itself, exactly
+          # as the Jenkins steps passed it through.
           EXISTING=$(gh issue list --repo "${REPO_URL}" -S "${TITLE} in:title" --json number --jq '.[0].number // empty' || true)
+          RECENTLY_CLOSED=$(gh issue list --repo "${REPO_URL}" -S "${TITLE} in:title is:closed closed:>=${REOPEN_AFTER}" \
+            --json number --jq '.[0].number // empty' || true)
 
           if [ "${ACTION}" = 'create' ]; then
             BODY="***Build Failed Error***: **${COMPONENT} failed during the distribution build for version: ${VERSION}.**
@@ -127,6 +135,11 @@ runs:
             if [ -n "${EXISTING}" ]; then
               echo "Issue for ${COMPONENT} already exists, editing the issue body"
               gh issue edit "${EXISTING}" --repo "${REPO_URL}" --body "${BODY}"
+            elif [ -n "${RECENTLY_CLOSED}" ]; then
+              # createGithubIssue.groovy:63-79 re-opens and updates a recently closed issue.
+              echo "Re-opening the recently closed issue for ${COMPONENT}"
+              gh issue reopen "${RECENTLY_CLOSED}" --repo "${REPO_URL}"
+              gh issue edit "${RECENTLY_CLOSED}" --repo "${REPO_URL}" --body "${BODY}"
             else
               echo "Creating a new issue for ${COMPONENT}"
               for LABEL in autocut "v${VERSION}"; do

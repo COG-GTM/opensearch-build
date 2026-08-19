@@ -18,6 +18,12 @@ inputs:
     description: 'Build job name used to compute the artifact root URL'
     required: false
     default: 'distribution-build-opensearch'
+  test-job-name:
+    description: >-
+      Name of the test job itself, used for --base-path. generateBasePaths() built it from the Jenkins JOB_NAME of the
+      integ-test job, not from the distribution build job that produced the artifacts.
+    required: false
+    default: 'integ-test'
   local-path:
     description: 'Local artifact directory. Empty means resolve the artifacts from the public artifact URL.'
     required: false
@@ -47,6 +53,7 @@ runs:
       env:
         BUILD_MANIFEST: ${{ inputs.build-manifest }}
         JOB_NAME: ${{ inputs.job-name }}
+        TEST_JOB_NAME: ${{ inputs.test-job-name }}
         PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
         LOCAL_PATH: ${{ inputs.local-path }}
       run: |
@@ -55,6 +62,7 @@ runs:
         python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" integ-test-paths \
           "${BUILD_MANIFEST}" \
           --job-name "${JOB_NAME}" \
+          --base-path-job-name "${TEST_JOB_NAME}" \
           --public-artifact-url "${PUBLIC_ARTIFACT_URL}" \
           --local-path "${LOCAL_PATH}" | tee -a "$GITHUB_OUTPUT"
 
@@ -96,16 +104,19 @@ runs:
 
         # runIntegTestScript.groovy:32-33 - only the OpenSearch core distribution, and only off windows, pins
         # JAVA_HOME to the CI image java.
+        JAVA_HOME_PINNED=false
         if [ "${BUILD_FILENAME}" = 'opensearch' ] && [ "${BUILD_PLATFORM}" != 'windows' ]; then
           export JAVA_HOME="/opt/java/${JAVA_VERSION}"
+          JAVA_HOME_PINNED=true
         fi
 
         if [ "${SWITCH_USER_NON_ROOT}" = 'true' ]; then
           # runIntegTestScript.groovy:68 - rpm and deb tests must not run as root, and docker ENV is not visible to su,
-          # so PATH and JAVA_HOME are passed explicitly. Like Jenkins, JAVA_HOME is left out when it was not pinned.
-          # https://github.com/opensearch-project/opensearch-build-libraries/issues/197
+          # so PATH and JAVA_HOME are passed explicitly. Like Jenkins, JAVA_HOME is left out when this step did not pin
+          # it - a JAVA_HOME the CI image itself exports (`-e JAVA_HOME=...` in the manifest ci.image args) must not
+          # leak into the su environment. https://github.com/opensearch-project/opensearch-build-libraries/issues/197
           ENV_ARGS=("PATH=${PATH}")
-          if [ -n "${JAVA_HOME:-}" ]; then ENV_ARGS+=("JAVA_HOME=${JAVA_HOME}"); fi
+          if [ "${JAVA_HOME_PINNED}" = 'true' ]; then ENV_ARGS+=("JAVA_HOME=${JAVA_HOME}"); fi
           su "$(id -un 1000)" -c "env $(printf '%q ' "${ENV_ARGS[@]}")$(printf '%q ' "${ARGS[@]}")"
         else
           "${ARGS[@]}"

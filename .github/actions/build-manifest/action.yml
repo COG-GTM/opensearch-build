@@ -70,7 +70,7 @@ inputs:
     required: false
     default: ''
   build-log-file:
-    description: 'File the build output is tee-ed into so mark-unstable-if-plugins-failed-to-build can search it'
+    description: 'File the build output is tee-ed into so the failed-plugin check can search it'
     required: false
     default: 'build.log'
 
@@ -199,3 +199,18 @@ runs:
         # The log is kept so the CONTINUE_ON_ERROR path can search it, the way Jenkins searched the build log.
         set -o pipefail
         "${ARGS[@]}" 2>&1 | tee "${BUILD_LOG_FILE}"
+
+    - name: Mark the build as unstable if plugins failed to build
+      # distribution-build.jenkinsfile:1067-1071 markStageUnstableIfPluginsFailedToBuild() searched the stage log for
+      # 'Failed plugins are' and turned the stage UNSTABLE. GitHub Actions has no UNSTABLE result between success and
+      # failure, so the closest equivalent is a warning annotation on the job (docs/jenkins-to-actions.md).
+      if: always()
+      shell: bash
+      env:
+        BUILD_LOG_FILE: ${{ inputs.build-log-file }}
+      run: |
+        set -euo pipefail
+        if [ -f "${BUILD_LOG_FILE}" ] && grep -q 'Failed plugins are' "${BUILD_LOG_FILE}"; then
+          grep 'Failed plugins are' "${BUILD_LOG_FILE}" | tail -1
+          echo '::warning title=Plugins failed to build::Some plugins failed to build. See the ./build.sh step for logs and more details'
+        fi

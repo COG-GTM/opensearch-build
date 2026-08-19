@@ -72,12 +72,13 @@ runs:
       run: |
         set -euo pipefail
         SKIP=false
-        if [ -z "${INTEG_TEST_WORKFLOW}" ] || [ -z "${TEST_MANIFEST}" ] \
-          || [ -z "${BUILD_MANIFEST_URL}" ] \
-          || ! echo "${TEST_PLATFORM}" | grep -qw "${PLATFORM}" \
-          || ! echo "${TEST_DISTRIBUTION}" | grep -qw "${DISTRIBUTION}"; then
+        # Jenkins used TEST_PLATFORM.contains(platform) / TEST_DISTRIBUTION.contains(distribution), a plain substring
+        # test, so `tar.gz` matches `tar`; the case globs keep that behaviour instead of matching whole words.
+        if [ -z "${INTEG_TEST_WORKFLOW}" ] || [ -z "${TEST_MANIFEST}" ] || [ -z "${BUILD_MANIFEST_URL}" ]; then
           SKIP=true
         fi
+        case "${TEST_PLATFORM}" in *"${PLATFORM}"*) ;; *) SKIP=true ;; esac
+        case "${TEST_DISTRIBUTION}" in *"${DISTRIBUTION}"*) ;; *) SKIP=true ;; esac
 
         if [ "${SKIP}" = 'true' ]; then
           echo 'Skipping INTEG tests as one of the values has empty or wrong string: integ-test-workflow, test-manifest, build-manifest-url, test-platform, test-distribution'
@@ -89,8 +90,11 @@ runs:
             --field "TEST_MANIFEST=${TEST_MANIFEST}" \
             --field "BUILD_MANIFEST_URL=${BUILD_MANIFEST_URL}" \
             --field "RC_NUMBER=${RC_NUMBER}" \
-            --field "DISTRIBUTION_BUILD_URL=${DISTRIBUTION_BUILD_URL}" \
-            --field 'UPDATE_GITHUB_ISSUES=true'
+            --field "DISTRIBUTION_BUILD_URL=${DISTRIBUTION_BUILD_URL}"
+          # distribution-build.jenkinsfile:1086 also passes UPDATE_GITHUB_ISSUES=true, but integ-test.jenkinsfile
+          # declares no such parameter and never reads it - the integ test autocut path lives in the separate
+          # updateIntegTestFailureIssues() release pipeline (docs/jenkins-to-actions.md, 'Not migrated'). An unknown
+          # --field would make `gh workflow run` fail, so it is left out instead of being carried over dead.
         fi
 
         # triggerSmokeTests() and triggerBWCTests() are out of scope for this migration

@@ -32,11 +32,6 @@ on:
         required: false
         default: true
         type: boolean
-      UPDATE_GITHUB_ISSUES:
-        description: '<Optional> Create/close/update a github issue per component.'
-        required: false
-        default: false
-        type: boolean
       DISTRIBUTION_BUILD_URL:
         description: >-
           '<Optional> Run URL of the distribution build that produced BUILD_MANIFEST_URL, used as the
@@ -47,6 +42,12 @@ on:
         type: string
 
 permissions: {}
+
+defaults:
+  run:
+    # A windows build manifest puts the component jobs on windows-2022, where the default shell is pwsh; every inline
+    # script of this workflow is bash, exactly like the `sh` steps of integ-test.jenkinsfile.
+    shell: bash
 
 env:
   GRADLE_OPTS: '-Drepos.mavenLocal=true'
