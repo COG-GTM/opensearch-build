@@ -1,0 +1,72 @@
+---
+name: 'Publish Integ Test Results'
+description: >-
+  Port of the shared-library step publishIntegTestResults() (opensearch-build-libraries
+  vars/publishIntegTestResults.groovy). Turns the test-report.yml produced by ./report.sh into one results record per
+  component plus one failure record per failed test, and indexes both into the metrics cluster.
+
+inputs:
+  test-report-manifest-yml:
+    description: 'Path to the downloaded test-report.yml'
+    required: true
+  job-name:
+    description: 'Test job name used to build the report URL, the Jenkins JOB_NAME (integ-test)'
+    required: false
+    default: 'integ-test'
+  distribution-build-url:
+    description: 'URL of the distribution build under test'
+    required: true
+  test-run-id:
+    description: 'Test run id, the Jenkins BUILD_NUMBER'
+    required: true
+  test-run-url:
+    description: 'URL of this run, the equivalent of the Jenkins RUN_DISPLAY_URL'
+    required: true
+  build-start-time:
+    description: 'Run start time in epoch milliseconds'
+    required: true
+  metrics-host-url:
+    description: 'Metrics cluster endpoint'
+    required: true
+  metrics-host-account:
+    description: 'AWS account of the metrics cluster'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Generate the integration test records
+      id: records
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        python3 "${GITHUB_WORKSPACE}/.github/scripts/metrics_records.py" integ-test-results \
+          --test-report '${{ inputs.test-report-manifest-yml }}' \
+          --job-name '${{ inputs.job-name }}' \
+          --integ-test-build-number '${{ inputs.test-run-id }}' \
+          --integ-test-build-url '${{ inputs.test-run-url }}' \
+          --distribution-build-url '${{ inputs.distribution-build-url }}' \
+          --build-start-time '${{ inputs.build-start-time }}' \
+          --output test-records.json \
+          --failures-output test-failures.json | tee -a "$GITHUB_OUTPUT"
+
+    - name: Index the integration test results
+      uses: ./.github/actions/index-metrics-records
+      with:
+        records-file: test-records.json
+        index: ${{ steps.records.outputs.index }}
+        alias: ${{ steps.records.outputs.alias }}
+        mapping-file: .github/mappings/opensearch-integration-test-results.json
+        metrics-host-url: ${{ inputs.metrics-host-url }}
+        metrics-host-account: ${{ inputs.metrics-host-account }}
+
+    - name: Index the integration test failures
+      uses: ./.github/actions/index-metrics-records
+      with:
+        records-file: test-failures.json
+        index: ${{ steps.records.outputs.failures-index }}
+        alias: ${{ steps.records.outputs.failures-alias }}
+        mapping-file: .github/mappings/opensearch-integration-test-failures.json
+        metrics-host-url: ${{ inputs.metrics-host-url }}
+        metrics-host-account: ${{ inputs.metrics-host-account }}

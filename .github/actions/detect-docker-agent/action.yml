@@ -1,0 +1,45 @@
+---
+name: 'Detect Docker Agent'
+description: >-
+  Port of the shared-library step detectDockerAgent() (opensearch-build-libraries vars/detectDockerAgent.groovy).
+  Reads the CI image, CI image arguments and Java version out of an input manifest so a downstream job can use them
+  as its `container:` image. Called from distribution-build.jenkinsfile:181-195.
+
+inputs:
+  manifest:
+    description: 'Path to the input manifest, e.g. manifests/3.0.0/opensearch-3.0.0.yml'
+    required: true
+  platform:
+    description: 'Platform the image is looked up for (schema-version >= 1.2 manifests)'
+    required: false
+    default: 'linux'
+  distribution:
+    description: 'Distribution the image is looked up for (schema-version >= 1.2 manifests)'
+    required: false
+    default: 'tar'
+
+outputs:
+  image:
+    description: 'CI runner image, e.g. opensearchstaging/ci-runner:ci-runner-al2-opensearch-build-v1'
+    value: ${{ steps.detect.outputs.image }}
+  args:
+    description: 'Docker arguments the Jenkins agent used, e.g. -e JAVA_HOME=/opt/java/openjdk-21'
+    value: ${{ steps.detect.outputs.args }}
+  java-version:
+    description: 'Java version parsed out of the image arguments, e.g. openjdk-21'
+    value: ${{ steps.detect.outputs.java-version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect docker agent from input manifest
+      id: detect
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" ci-image \
+          "${{ inputs.manifest }}" \
+          --kind input \
+          --platform "${{ inputs.platform }}" \
+          --distribution "${{ inputs.distribution }}" | tee -a "$GITHUB_OUTPUT"

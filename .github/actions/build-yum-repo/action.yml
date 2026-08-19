@@ -1,0 +1,44 @@
+---
+name: 'Build Yum Repo'
+description: >-
+  Port of the shared-library step buildYumRepo() (opensearch-build-libraries vars/buildYumRepo.groovy). Runs createrepo
+  over the assembled rpm directory and writes the staging .repo file next to it.
+
+inputs:
+  build-manifest:
+    description: 'Path to the build manifest'
+    required: true
+  base-url:
+    description: 'Artifact root URL without the distribution segment, used as the repo baseurl'
+    required: true
+  build-number:
+    description: 'Build number, equivalent to the Jenkins BUILD_NUMBER'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Create the yum repository metadata and repo file
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        INFO=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" build-manifest-info \
+          '${{ inputs.build-manifest }}' --job-name unused --build-number '${{ inputs.build-number }}')
+        FILENAME=$(echo "${INFO}" | grep '^filename=' | cut -d= -f2)
+        NAME=$(echo "${INFO}" | grep '^name=' | cut -d= -f2-)
+        VERSION=$(echo "${INFO}" | grep '^version=' | cut -d= -f2)
+        REPO_FILE_PATH="rpm/dist/${FILENAME}"
+
+        echo "Create yum repo metadata and repo file ${{ inputs.build-manifest }}"
+        createrepo "${REPO_FILE_PATH}"
+
+        cat > "${REPO_FILE_PATH}/${FILENAME}-${VERSION}.staging.repo" <<EOF
+        [${FILENAME}-${VERSION}-${{ inputs.build-number }}-staging]
+        name=${NAME} ${VERSION} ${{ inputs.build-number }} Staging
+        baseurl=${{ inputs.base-url }}/${REPO_FILE_PATH}/
+        enabled=1
+        gpgcheck=0
+        autorefresh=1
+        type=rpm-md
+        EOF

@@ -1,0 +1,83 @@
+---
+name: 'Run Integ Test Script'
+description: >-
+  Port of the shared-library step runIntegTestScript() (opensearch-build-libraries vars/runIntegTestScript.groovy).
+  Builds the ./test.sh integ-test command line from the build manifest and runs it for a single component.
+
+inputs:
+  component-name:
+    description: 'Component under test'
+    required: true
+  test-manifest:
+    description: 'Path to the test manifest'
+    required: true
+  build-manifest:
+    description: 'Path to the downloaded build manifest'
+    required: true
+  job-name:
+    description: 'Build job name used to compute the artifact root URL'
+    required: false
+    default: 'distribution-build-opensearch'
+  local-path:
+    description: 'Local artifact directory. Empty means resolve the artifacts from the public artifact URL.'
+    required: false
+    default: ''
+  ci-group:
+    description: 'CI group to run'
+    required: false
+    default: ''
+  test-run-id:
+    description: 'Test run id, the Jenkins BUILD_NUMBER'
+    required: true
+  switch-user-non-root:
+    description: 'Run the test as uid 1000 instead of root, which Jenkins does for rpm and deb'
+    required: false
+    default: 'false'
+  public-artifact-url:
+    description: 'Public artifact URL used to build --base-path'
+    required: false
+    default: 'https://ci.opensearch.org/ci/dbc'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve the artifact paths
+      id: paths
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" integ-test-paths \
+          '${{ inputs.build-manifest }}' \
+          --job-name '${{ inputs.job-name }}' \
+          --public-artifact-url '${{ inputs.public-artifact-url }}' \
+          --local-path '${{ inputs.local-path }}' | tee -a "$GITHUB_OUTPUT"
+
+    - name: Detect the test docker agent java version
+      id: agent
+      uses: ./.github/actions/detect-test-docker-agent
+      with:
+        test-manifest: ${{ inputs.test-manifest }}
+
+    - name: Run the integration tests
+      shell: bash
+      run: |
+        set -euo pipefail
+        ARGS=('./test.sh' 'integ-test' '${{ inputs.test-manifest }}'
+              '--component' '${{ inputs.component-name }}'
+              '--test-run-id' '${{ inputs.test-run-id }}'
+              '--paths' '${{ steps.paths.outputs.paths }}'
+              '--base-path' '${{ steps.paths.outputs.base-path }}')
+        if [ -n '${{ inputs.ci-group }}' ]; then ARGS+=('--ci-group' '${{ inputs.ci-group }}'); fi
+
+        # runIntegTestScript.groovy:60 - only the OpenSearch core distribution pins JAVA_HOME to the CI image java.
+        export JAVA_HOME="/opt/java/${{ steps.agent.outputs.java-version }}"
+
+        if [ '${{ inputs.switch-user-non-root }}' = 'true' ]; then
+          # runIntegTestScript.groovy:83 - rpm and deb tests must not run as root, and docker ENV is not visible to su,
+          # so PATH and JAVA_HOME are passed explicitly.
+          # https://github.com/opensearch-project/opensearch-build-libraries/issues/197
+          su "$(id -un 1000)" -c "env PATH=$PATH JAVA_HOME=$JAVA_HOME $(printf '%q ' "${ARGS[@]}")"
+        else
+          "${ARGS[@]}"
+        fi

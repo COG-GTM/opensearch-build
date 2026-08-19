@@ -1,0 +1,352 @@
+---
+# GitHub Actions port of jenkins/opensearch/distribution-build.jenkinsfile (the Jenkins job
+# `distribution-build-opensearch`). The Jenkins `parameters {}` block (:34-137) became the workflow_dispatch inputs
+# below, its `stages { parallel { } }` block (:216-1007) became the matrixed calls to the two reusable workflows, and
+# its `post {}` block (:1009-1064) became the post-build jobs at the bottom of this file.
+#
+# The workflow is dispatch-only on purpose: it builds and uploads a full OpenSearch distribution and must never run on
+# push or pull_request. See docs/jenkins-to-actions.md for the secrets it needs and for the parts of the Jenkins job
+# that are deliberately not migrated.
+name: Distribution Build OpenSearch
+
+on:
+  workflow_dispatch:
+    inputs:
+      INPUT_MANIFEST:
+        description: '<Required> Input manifest under the manifests folder, e.g. 3.0.0/opensearch-3.0.0.yml.'
+        required: true
+        type: string
+      COMPONENT_NAME:
+        description: '<Optional> One or more component names (e.g. OpenSearch common-utils), else build everything in the INPUT_MANIFEST.'
+        required: false
+        default: ''
+        type: string
+      TEST_MANIFEST:
+        description: '<Optional> Test manifest under the manifests folder, e.g. 3.0.0/opensearch-3.0.0-test.yml.'
+        required: false
+        default: ''
+        type: string
+      INTEG_TEST_WORKFLOW:
+        description: '<Optional> Workflow triggered in place of the Jenkins INTEG_TEST_JOB_NAME. Empty skips integration tests.'
+        required: false
+        default: 'integ-test.yml'
+        type: string
+      BUILD_PLATFORM:
+        description: '<Optional> Build selected platform: linux, windows or both separated by a space.'
+        required: false
+        default: 'linux windows'
+        type: string
+      BUILD_DISTRIBUTION:
+        description: '<Optional> Build selected distribution: tar, rpm, deb, zip, separated by spaces.'
+        required: false
+        default: 'tar rpm deb zip'
+        type: string
+      TEST_PLATFORM:
+        description: '<Optional> Test selected platform: linux, windows or both separated by a space.'
+        required: false
+        default: ''
+        type: string
+      TEST_DISTRIBUTION:
+        description: '<Optional> Test selected distribution: tar, rpm, deb, zip, separated by spaces.'
+        required: false
+        default: ''
+        type: string
+      RC_NUMBER:
+        description: '<Optional> The RC build count. 0 means this is not a release candidate.'
+        required: false
+        default: '0'
+        type: string
+      # GitHub Actions allows at most 10 workflow_dispatch inputs, while the Jenkins job declares 18 parameters
+      # (distribution-build.jenkinsfile:34-137). The remaining Jenkins parameters are packed into this one string and
+      # unpacked by the verify-parameters job below; see docs/jenkins-to-actions.md, 'workflow_dispatch input limit'.
+      OPTIONS:
+        description: >-
+          <Optional> Space separated flags for the remaining Jenkins parameters: continue-on-error,
+          skip-artifact-check, incremental, update-latest-url, update-github-issue, parallel=<workers>,
+          previous-build-id=<id>, build-docker=<build_docker |
+          build_docker_with_build_number_tag | do_not_build_docker>. Prefix a flag with `no-` to turn it off.
+        required: false
+        default: 'continue-on-error incremental update-latest-url update-github-issue parallel=4 previous-build-id=latest'
+        type: string
+
+permissions: {}
+
+# distribution-build.jenkinsfile:24-26 declares `timeout(time: 4, unit: 'HOURS')` for the whole pipeline. GitHub
+# Actions has no workflow-level timeout, so the equivalent lives on the individual jobs (timeout-minutes below).
+env:
+  GRADLE_OPTS: '-Drepos.mavenLocal=true'
+  JOB_NAME: distribution-build-opensearch
+
+jobs:
+  verify-parameters:
+    # distribution-build.jenkinsfile:139-215 stage('verify-parameters'): validate the manifest and the
+    # platform/distribution parameters, resolve the docker agents and derive the revision.
+    name: verify-parameters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      revision: ${{ steps.manifest.outputs.revision }}
+      build-docker: ${{ steps.docker.outputs.build-docker }}
+      archive-matrix: ${{ steps.matrix.outputs.archive-matrix }}
+      package-matrix: ${{ steps.matrix.outputs.package-matrix }}
+      archive-count: ${{ steps.matrix.outputs.archive-count }}
+      package-count: ${{ steps.matrix.outputs.package-count }}
+      build-start-time: ${{ steps.start-time.outputs.build-start-time }}
+      continue-on-error: ${{ steps.options.outputs.continue-on-error }}
+      skip-artifact-check: ${{ steps.options.outputs.skip-artifact-check }}
+      incremental: ${{ steps.options.outputs.incremental }}
+      update-latest-url: ${{ steps.options.outputs.update-latest-url }}
+      update-github-issue: ${{ steps.options.outputs.update-github-issue }}
+      parallel: ${{ steps.options.outputs.parallel }}
+      previous-build-id: ${{ steps.options.outputs.previous-build-id }}
+      integ-test-workflow: ${{ inputs.INTEG_TEST_WORKFLOW }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Check that the input manifest exists
+        # distribution-build.jenkinsfile:150-153 aborted the build when the manifest was missing.
+        run: |
+          set -euo pipefail
+          if [ ! -f 'manifests/${{ inputs.INPUT_MANIFEST }}' ]; then
+            echo "::error::Input manifest was not provided or not found at manifests/${{ inputs.INPUT_MANIFEST }}."
+            exit 1
+          fi
+          echo "### ${{ inputs.INPUT_MANIFEST }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Unpack the OPTIONS input
+        id: options
+        # Jenkins declared these as individual booleans and strings; see the OPTIONS input above for why they are
+        # packed into one workflow_dispatch input.
+        env:
+          OPTIONS: ${{ inputs.OPTIONS }}
+        run: |
+          set -euo pipefail
+          declare -A OPT=(
+            [continue-on-error]=false [skip-artifact-check]=false [incremental]=false
+            [update-latest-url]=false [update-github-issue]=false
+            [parallel]=0 [previous-build-id]=latest
+            [build-docker]=build_docker
+          )
+          for TOKEN in ${OPTIONS}; do
+            case "${TOKEN}" in
+              *=*) KEY=${TOKEN%%=*}; VALUE=${TOKEN#*=} ;;
+              no-*) KEY=${TOKEN#no-}; VALUE=false ;;
+              *) KEY=${TOKEN}; VALUE=true ;;
+            esac
+            if [ -z "${OPT[$KEY]+set}" ]; then
+              echo "::error::Unknown OPTIONS flag '${TOKEN}'."
+              exit 1
+            fi
+            OPT[$KEY]=${VALUE}
+          done
+          for KEY in "${!OPT[@]}"; do
+            echo "${KEY}=${OPT[$KEY]}" | tee -a "$GITHUB_OUTPUT"
+          done
+
+      - name: Read the input manifest
+        id: manifest
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          python3 .github/scripts/manifest_paths.py input-manifest-info \
+            'manifests/${{ inputs.INPUT_MANIFEST }}' >> "$GITHUB_OUTPUT"
+
+      - name: Validate the parameters and build the matrices
+        id: matrix
+        # Ports verifyParameterPlatformDistribution() (distribution-build.jenkinsfile:1160-1176) and the
+        # `when { expression { params.BUILD_PLATFORM.contains(...) } }` guard of every build stage.
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/manifest_paths.py distribution-matrix \
+            'manifests/${{ inputs.INPUT_MANIFEST }}' \
+            --build-platform '${{ inputs.BUILD_PLATFORM }}' \
+            --build-distribution '${{ inputs.BUILD_DISTRIBUTION }}' \
+            --test-platform '${{ inputs.TEST_PLATFORM }}' \
+            --test-distribution '${{ inputs.TEST_DISTRIBUTION }}' | tee -a "$GITHUB_OUTPUT"
+
+      - name: Resolve the docker build option
+        id: docker
+        # distribution-build.jenkinsfile:205-208 forces the build number tag for release candidates.
+        run: |
+          set -euo pipefail
+          BUILD_DOCKER='${{ steps.options.outputs.build-docker }}'
+          if [ '${{ inputs.RC_NUMBER }}' -gt 0 ]; then
+            echo 'This is a release candidate build, enforcing build_docker_with_build_number_tag'
+            BUILD_DOCKER='build_docker_with_build_number_tag'
+          fi
+          echo "build-docker=${BUILD_DOCKER}" >> "$GITHUB_OUTPUT"
+
+      - name: Record the run start time
+        id: start-time
+        # currentBuild.startTimeInMillis, used by the metrics records of the post-build job.
+        run: echo "build-start-time=$(date +%s000)" >> "$GITHUB_OUTPUT"
+
+  trigger-min-snapshot-build:
+    # distribution-build.jenkinsfile:218-238 stage('Trigger-min-snapshot-build'): `build job:
+    # 'publish-opensearch-min-snapshots', wait: false`. That Jenkins job is not part of this migration slice, so the
+    # dependency is reported rather than triggered (docs/jenkins-to-actions.md, 'Not migrated').
+    name: trigger-min-snapshot-build
+    needs: verify-parameters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report the downstream snapshot job
+        run: |
+          echo "::notice::Jenkins triggers publish-opensearch-min-snapshots with INPUT_MANIFEST=${{ inputs.INPUT_MANIFEST }}; that pipeline is still Jenkins-only."
+
+  build-archives:
+    # distribution-build.jenkinsfile:239-321 (linux x64 tar), :560-639 (linux arm64 tar) and :880-957 (windows x64 zip).
+    name: ${{ matrix.platform }}-${{ matrix.architecture }}-${{ matrix.distribution }}
+    needs: verify-parameters
+    if: needs.verify-parameters.outputs.archive-count != '0'
+    strategy:
+      # Jenkins ran the stages inside `parallel { }` without failing the siblings; fail-fast: false is the equivalent.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.verify-parameters.outputs.archive-matrix) }}
+    uses: ./.github/workflows/distribution-build-archive.yml
+    with:
+      input-manifest: ${{ inputs.INPUT_MANIFEST }}
+      platform: ${{ matrix.platform }}
+      architecture: ${{ matrix.architecture }}
+      distribution: ${{ matrix.distribution }}
+      runs-on: ${{ matrix['runs-on'] }}
+      image: ${{ matrix.image }}
+      args: ${{ matrix.args }}
+      java-version: ${{ matrix['java-version'] }}
+      component-name: ${{ inputs.COMPONENT_NAME }}
+      continue-on-error: ${{ needs.verify-parameters.outputs.continue-on-error == 'true' }}
+      skip-artifact-check: ${{ needs.verify-parameters.outputs.skip-artifact-check == 'true' }}
+      incremental: ${{ needs.verify-parameters.outputs.incremental == 'true' }}
+      previous-build-id: ${{ needs.verify-parameters.outputs.previous-build-id }}
+      parallel: ${{ needs.verify-parameters.outputs.parallel }}
+      update-latest-url: ${{ needs.verify-parameters.outputs.update-latest-url == 'true' }}
+      rc-number: ${{ inputs.RC_NUMBER }}
+      test-manifest: ${{ inputs.TEST_MANIFEST }}
+      test-platform: ${{ inputs.TEST_PLATFORM }}
+      test-distribution: ${{ inputs.TEST_DISTRIBUTION }}
+      integ-test-workflow: ${{ needs.verify-parameters.outputs.integ-test-workflow }}
+    secrets: inherit
+
+  build-packages:
+    # distribution-build.jenkinsfile:322-440, :441-559, :640-758 and :759-879.
+    name: ${{ matrix.platform }}-${{ matrix.architecture }}-${{ matrix.distribution }}
+    needs: verify-parameters
+    if: needs.verify-parameters.outputs.package-count != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.verify-parameters.outputs.package-matrix) }}
+    uses: ./.github/workflows/distribution-build-package.yml
+    with:
+      input-manifest: ${{ inputs.INPUT_MANIFEST }}
+      platform: ${{ matrix.platform }}
+      architecture: ${{ matrix.architecture }}
+      distribution: ${{ matrix.distribution }}
+      runs-on: ${{ matrix['runs-on'] }}
+      image: ${{ matrix.image }}
+      args: ${{ matrix.args }}
+      assemble-image: ${{ matrix['assemble-image'] }}
+      assemble-args: ${{ matrix['assemble-args'] }}
+      component-name: ${{ inputs.COMPONENT_NAME }}
+      continue-on-error: ${{ needs.verify-parameters.outputs.continue-on-error == 'true' }}
+      skip-artifact-check: ${{ needs.verify-parameters.outputs.skip-artifact-check == 'true' }}
+      incremental: ${{ needs.verify-parameters.outputs.incremental == 'true' }}
+      previous-build-id: ${{ needs.verify-parameters.outputs.previous-build-id }}
+      parallel: ${{ needs.verify-parameters.outputs.parallel }}
+      update-latest-url: ${{ needs.verify-parameters.outputs.update-latest-url == 'true' }}
+      rc-number: ${{ inputs.RC_NUMBER }}
+      test-manifest: ${{ inputs.TEST_MANIFEST }}
+      test-platform: ${{ inputs.TEST_PLATFORM }}
+      test-distribution: ${{ inputs.TEST_DISTRIBUTION }}
+      integ-test-workflow: ${{ needs.verify-parameters.outputs.integ-test-workflow }}
+    secrets: inherit
+
+  docker-build:
+    # distribution-build.jenkinsfile:958-1005 stage('docker build'). The Jenkins stage polled
+    # env.ARTIFACT_URL_LINUX_X64_TAR / ARM64 in a `while (true) { sleep 120 }` loop because the sibling stages ran in
+    # parallel; `needs: build-archives` expresses the same dependency without polling. buildDockerImage() itself only
+    # triggers the Jenkins jobs docker-build, docker-copy and docker-scan, none of which exist as GitHub Actions
+    # workflows, so this job resolves and reports the artifact URLs and the image parameters it would have used.
+    name: docker build
+    needs: [verify-parameters, build-archives]
+    if: |
+      always() && needs.build-archives.result == 'success'
+        && needs.verify-parameters.outputs.build-docker != 'do_not_build_docker'
+        && contains(inputs.BUILD_PLATFORM, 'linux')
+        && contains(inputs.BUILD_DISTRIBUTION, 'tar')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Report the docker build parameters
+        run: |
+          set -euo pipefail
+          for ARCHITECTURE in x64 arm64; do
+            echo "${ARCHITECTURE}: ${{ vars.PUBLIC_ARTIFACT_URL || 'https://ci.opensearch.org/ci/dbc' }}/${JOB_NAME}/${{ needs.verify-parameters.outputs.revision }}/${{ github.run_number }}/linux/${ARCHITECTURE}/tar/dist/opensearch"
+          done
+          echo "::notice::buildDockerImage() triggers the Jenkins jobs docker-build, docker-copy and docker-scan with buildOption=${{ needs.verify-parameters.outputs.build-docker }}; those pipelines are still Jenkins-only (docs/jenkins-to-actions.md)."
+
+  publish-build-results:
+    # distribution-build.jenkinsfile:1009-1033 post { always }: publishDistributionBuildResults() and, when
+    # UPDATE_GITHUB_ISSUE is set, updateBuildFailureIssues(). `if: always()` is the direct equivalent of post { always }.
+    name: publish-build-results
+    needs: [verify-parameters, build-archives, build-packages]
+    if: always() && needs.verify-parameters.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Download the build logs
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          pattern: build-log-*
+          path: build-logs
+          merge-multiple: true
+
+      - name: Publish the build results
+        uses: ./.github/actions/publish-distribution-build-results
+        with:
+          input-manifest: manifests/${{ inputs.INPUT_MANIFEST }}
+          build-logs-directory: build-logs
+          build-number: ${{ github.run_number }}
+          build-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          build-start-time: ${{ needs.verify-parameters.outputs.build-start-time }}
+          rc-number: ${{ inputs.RC_NUMBER }}
+          overall-build-result: ${{ (needs.build-archives.result == 'failure' || needs.build-packages.result == 'failure') && 'FAILURE' || 'SUCCESS' }}
+          metrics-host-url: ${{ secrets.METRICS_HOST_URL }}
+          metrics-host-account: ${{ secrets.METRICS_HOST_ACCOUNT }}
+
+      - name: Update the build failure issues
+        if: needs.verify-parameters.outputs.update-github-issue == 'true'
+        uses: ./.github/actions/update-build-failure-issues
+        with:
+          input-manifest: manifests/${{ inputs.INPUT_MANIFEST }}
+          distribution-build-number: ${{ github.run_number }}
+          build-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          metrics-host-url: ${{ secrets.METRICS_HOST_URL }}
+          metrics-host-account: ${{ secrets.METRICS_HOST_ACCOUNT }}
+          github-token: ${{ secrets.GITHUB_BOT_TOKEN }}
+
+  post-success:
+    # distribution-build.jenkinsfile:1034-1055 post { success } and post { unstable }: for release candidates trigger
+    # distribution-validation and the nightly playground workflow. Neither is part of this migration slice.
+    name: post-success
+    needs: [verify-parameters, build-archives, build-packages]
+    if: |
+      always() && inputs.RC_NUMBER != '0'
+        && needs.build-archives.result != 'failure'
+        && needs.build-packages.result != 'failure'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report the release candidate follow-ups
+        run: |
+          echo "::notice::Jenkins triggers the distribution-validation job (VERSION=${{ needs.verify-parameters.outputs.revision }}, OS_BUILD_NUMBER=${{ github.run_number }}) and the opensearch-devops nightly-playground-trigger.yml workflow for RC builds; both are still Jenkins-only (docs/jenkins-to-actions.md)."

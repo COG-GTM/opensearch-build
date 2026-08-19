@@ -1,0 +1,109 @@
+---
+name: 'Archive, Assemble and Upload'
+description: >-
+  Port of the shared-library step archiveAssembleUpload() (opensearch-build-libraries
+  vars/archiveAssembleUpload.groovy), used by the rpm/deb assemble stages of distribution-build.jenkinsfile
+  (lines 366-380, 483-497, 684-698, 800-814). Jenkins `unstash`ed the builds produced by buildArchive() on a different
+  agent and then ran assembleUpload(); here the stash is a downloaded workflow artifact.
+
+inputs:
+  input-manifest:
+    description: 'Relative path to the input manifest'
+    required: true
+  distribution:
+    description: 'Distribution to assemble'
+    required: true
+  stash-name:
+    description: 'Name of the artifact uploaded by build-archive'
+    required: true
+  job-name:
+    description: 'Artifact path prefix, equivalent to the Jenkins JOB_NAME'
+    required: false
+    default: 'distribution-build-opensearch'
+  build-number:
+    description: 'Build number, equivalent to the Jenkins BUILD_NUMBER'
+    required: true
+  build-feature:
+    description: 'Replaces build.version in the artifact path for feature builds'
+    required: false
+    default: ''
+  public-artifact-url:
+    description: 'Public artifact URL'
+    required: false
+    default: 'https://ci.opensearch.org/ci/dbc'
+  artifact-bucket-name:
+    description: 'Staging artifact bucket'
+    required: true
+  aws-account-public:
+    description: 'AWS account holding the staging bucket'
+    required: true
+  artifact-production-bucket-name:
+    description: 'Production artifact bucket used for release candidates'
+    required: false
+    default: ''
+  aws-account-artifact:
+    description: 'AWS account holding the production bucket'
+    required: false
+    default: ''
+  artifact-promotion-role-name:
+    description: 'Role assumed to write into the production bucket'
+    required: false
+    default: ''
+  sign-rpm:
+    description: 'Sign rpm packages during assemble'
+    required: false
+    default: 'false'
+  rpm-signing-account:
+    description: 'AWS account holding the rpm signing role'
+    required: false
+    default: ''
+
+outputs:
+  build-manifest:
+    description: 'Path of the build manifest that was assembled'
+    value: ${{ steps.manifest.outputs.build-manifest }}
+  build-manifest-url:
+    description: 'URL of the uploaded build manifest'
+    value: ${{ steps.assemble.outputs.build-manifest-url }}
+  index-file-root:
+    description: 'Index file path used by upload-index-file'
+    value: ${{ steps.assemble.outputs.index-file-root }}
+  artifact-url:
+    description: 'BuildManifest.getArtifactUrl()'
+    value: ${{ steps.assemble.outputs.artifact-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Unstash the builds produced by the build stage
+      uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+      with:
+        name: ${{ inputs.stash-name }}
+        path: ${{ inputs.distribution }}/builds
+
+    - name: Locate the build manifest
+      id: manifest
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        INFO=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" input-manifest-info '${{ inputs.input-manifest }}')
+        FILENAME=$(echo "${INFO}" | grep '^filename=' | cut -d= -f2)
+        echo "build-manifest=${{ inputs.distribution }}/builds/${FILENAME}/manifest.yml" >> "$GITHUB_OUTPUT"
+
+    - name: Assemble and upload the distribution
+      id: assemble
+      uses: ./.github/actions/assemble-upload
+      with:
+        build-manifest: ${{ steps.manifest.outputs.build-manifest }}
+        job-name: ${{ inputs.job-name }}
+        build-number: ${{ inputs.build-number }}
+        build-feature: ${{ inputs.build-feature }}
+        public-artifact-url: ${{ inputs.public-artifact-url }}
+        artifact-bucket-name: ${{ inputs.artifact-bucket-name }}
+        aws-account-public: ${{ inputs.aws-account-public }}
+        artifact-production-bucket-name: ${{ inputs.artifact-production-bucket-name }}
+        aws-account-artifact: ${{ inputs.aws-account-artifact }}
+        artifact-promotion-role-name: ${{ inputs.artifact-promotion-role-name }}
+        sign-rpm: ${{ inputs.sign-rpm }}
+        rpm-signing-account: ${{ inputs.rpm-signing-account }}

@@ -1,0 +1,95 @@
+---
+name: 'Create and Upload Test Report Manifest'
+description: >-
+  Port of the shared-library step createUploadTestReportManifest() (opensearch-build-libraries
+  vars/createUploadTestReportManifest.groovy). Runs ./report.sh to produce test-report.yml and uploads it next to the
+  test results of the run.
+
+inputs:
+  test-manifest:
+    description: 'Path to the test manifest'
+    required: true
+  build-manifest:
+    description: 'Path to the downloaded build manifest'
+    required: true
+  test-run-id:
+    description: 'Test run id, the Jenkins BUILD_NUMBER'
+    required: true
+  test-type:
+    description: 'Test type being reported, e.g. integ-test'
+    required: true
+  rc-number:
+    description: 'RC number of the distribution. 0 means the build is not a release candidate.'
+    required: false
+    default: '0'
+  component-name:
+    description: 'Components the workflow ran on'
+    required: false
+    default: ''
+  job-name:
+    description: 'Test job name used as the artifact path prefix, the Jenkins JOB_NAME (integ-test)'
+    required: false
+    default: 'integ-test'
+  public-artifact-url:
+    description: 'Public artifact URL used to build --base-path'
+    required: false
+    default: 'https://ci.opensearch.org/ci/dbc'
+  artifact-bucket-name:
+    description: 'Staging artifact bucket'
+    required: true
+  aws-account-public:
+    description: 'AWS account holding the staging bucket'
+    required: true
+
+outputs:
+  report-url:
+    description: 'Public URL of the uploaded test-report.yml'
+    value: ${{ steps.report.outputs.report-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Generate the test report manifest
+      id: report
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        SCRIPT="${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py"
+        BUILD_ID=$(python3 -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['build']['id'])" '${{ inputs.build-manifest }}')
+        PATHS=$(python3 "${SCRIPT}" integ-test-paths '${{ inputs.build-manifest }}' \
+          --job-name distribution-build-opensearch --public-artifact-url '${{ inputs.public-artifact-url }}')
+        ARTIFACT_PATHS=$(echo "${PATHS}" | grep '^paths=' | cut -d= -f2-)
+        INFO=$(python3 "${SCRIPT}" build-manifest-info '${{ inputs.build-manifest }}' \
+          --job-name '${{ inputs.job-name }}' --build-number "${BUILD_ID}" \
+          --public-artifact-url '${{ inputs.public-artifact-url }}')
+        ARTIFACT_ROOT=$(echo "${INFO}" | grep '^artifact-root=' | cut -d= -f2-)
+        ROOT_URL=$(echo "${INFO}" | grep '^artifact-root-url=' | cut -d= -f2-)
+        BASE_PATH=$(echo "${PATHS}" | grep '^base-path=' | cut -d= -f2-)
+
+        ARGS=('./report.sh' '${{ inputs.test-manifest }}'
+              '--artifact-paths' "${ARTIFACT_PATHS}"
+              '--test-run-id' '${{ inputs.test-run-id }}'
+              '--test-type' '${{ inputs.test-type }}'
+              '--base-path' "${BASE_PATH}")
+        # createUploadTestReportManifest.groovy:74 - the release candidate and component flags are omitted when empty.
+        if [ -n '${{ inputs.rc-number }}' ] && [ '${{ inputs.rc-number }}' != '0' ]; then
+          ARGS+=('--release-candidate' '${{ inputs.rc-number }}')
+        fi
+        if [ -n '${{ inputs.component-name }}' ]; then ARGS+=('--component' '${{ inputs.component-name }}'); fi
+        "${ARGS[@]}"
+
+        UPLOAD_PATH="${ARTIFACT_ROOT}/test-results/${{ inputs.test-run-id }}/${{ inputs.test-type }}/test-report.yml"
+        {
+          echo "upload-path=${UPLOAD_PATH}"
+          echo "report-url=${ROOT_URL}/test-results/${{ inputs.test-run-id }}/${{ inputs.test-type }}/test-report.yml"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Upload the test report manifest
+      uses: ./.github/actions/upload-to-s3
+      with:
+        source-path: test-report.yml
+        bucket: ${{ inputs.artifact-bucket-name }}
+        path: ${{ steps.report.outputs.upload-path }}
+        aws-account: ${{ inputs.aws-account-public }}
+        role-name: opensearch-test

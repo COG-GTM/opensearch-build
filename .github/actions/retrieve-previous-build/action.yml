@@ -1,0 +1,72 @@
+---
+name: 'Retrieve Previous Build'
+description: >-
+  Port of the shared-library step retrievePreviousBuild() (opensearch-build-libraries
+  vars/retrievePreviousBuild.groovy). Downloads the artifacts of a previous distribution build into the workspace and,
+  for OpenSearch core, seeds the local Maven repository so an incremental build can reuse them.
+
+inputs:
+  input-manifest:
+    description: 'Relative path to the input manifest'
+    required: true
+  platform:
+    description: 'Platform of the previous build'
+    required: true
+  architecture:
+    description: 'Architecture of the previous build'
+    required: true
+  distribution:
+    description: 'Distribution of the previous build'
+    required: true
+  previous-build-number:
+    description: 'Build number of the previous build'
+    required: true
+  job-name:
+    description: 'Artifact path prefix, equivalent to the Jenkins JOB_NAME'
+    required: false
+    default: 'distribution-build-opensearch'
+  artifact-bucket-name:
+    description: 'Artifact bucket the previous build was uploaded to'
+    required: true
+  aws-account-public:
+    description: 'AWS account holding the artifact bucket'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve the previous artifact path
+      id: previous
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        INFO=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" input-manifest-info '${{ inputs.input-manifest }}')
+        REVISION=$(echo "${INFO}" | grep '^revision=' | cut -d= -f2)
+        FILENAME=$(echo "${INFO}" | grep '^filename=' | cut -d= -f2)
+        echo "artifact-path=${{ inputs.job-name }}/${REVISION}/${{ inputs.previous-build-number }}/${{ inputs.platform }}/${{ inputs.architecture }}/${{ inputs.distribution }}" >> "$GITHUB_OUTPUT"
+        echo "filename=${FILENAME}" >> "$GITHUB_OUTPUT"
+
+    - name: Download the previous build artifacts
+      uses: ./.github/actions/download-from-s3
+      with:
+        bucket-name: ${{ inputs.artifact-bucket-name }}
+        download-path: ${{ steps.previous.outputs.artifact-path }}/
+        local-path: ${{ github.workspace }}/download
+        aws-account: ${{ inputs.aws-account-public }}
+        role-name: opensearch-bundle
+
+    - name: Move the previous build artifacts into the workspace
+      shell: bash
+      run: |
+        set -euo pipefail
+        DISTRIBUTION='${{ inputs.distribution }}'
+        rm -rf "${DISTRIBUTION}"
+        mkdir -p "${DISTRIBUTION}"
+        mv -v "${{ github.workspace }}/download/${{ steps.previous.outputs.artifact-path }}"/* "${GITHUB_WORKSPACE}/${DISTRIBUTION}"
+
+        if [ '${{ steps.previous.outputs.filename }}' = 'opensearch' ]; then
+          echo 'Setting up Maven Local for OpenSearch build.'
+          mkdir -p "${HOME}/.m2/repository/org/"
+          cp -r "${DISTRIBUTION}/builds/opensearch/maven/org/opensearch/" "${HOME}/.m2/repository/org/"
+        fi

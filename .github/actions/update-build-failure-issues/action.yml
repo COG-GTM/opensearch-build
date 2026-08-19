@@ -1,0 +1,134 @@
+---
+name: 'Update Build Failure Issues'
+description: >-
+  Port of the shared-library step updateBuildFailureIssues() (opensearch-build-libraries
+  vars/updateBuildFailureIssues.groovy) plus the createGithubIssue()/closeGithubIssue() steps it calls. Reads the
+  per-component build results back out of the metrics cluster, then autocuts an issue in every component repository
+  that failed and closes the autocut issue of every component that passed. The Jenkins 1Password github-bot
+  credentials become the `github-token` input, which must be a token with issue write access on the component
+  repositories - the default GITHUB_TOKEN cannot write to other repositories.
+
+inputs:
+  input-manifest:
+    description: 'Relative path to the input manifest'
+    required: true
+  distribution-build-number:
+    description: 'Distribution build number the results were indexed with'
+    required: true
+  build-url:
+    description: 'URL of the distribution build run, used in the issue body (Jenkins RUN_DISPLAY_URL)'
+    required: true
+  build-start-time-from:
+    description: 'Start of the build_start_time range used to find the results'
+    required: false
+    default: 'now-6h'
+  build-start-time-to:
+    description: 'End of the build_start_time range used to find the results'
+    required: false
+    default: 'now'
+  metrics-host-url:
+    description: 'Metrics cluster endpoint'
+    required: true
+  metrics-host-account:
+    description: 'AWS account of the metrics cluster'
+    required: true
+  metrics-role-name:
+    description: 'Role assumed to reach the metrics cluster'
+    required: false
+    default: 'OpenSearchJenkinsAccessRole'
+  metrics-index:
+    description: 'Index queried for the component results'
+    required: false
+    default: 'opensearch-distribution-build-results'
+  aws-region:
+    description: 'Region used for SigV4 signing'
+    required: false
+    default: 'us-east-1'
+  github-token:
+    description: 'Token used for the gh issue calls'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Assume the metrics cluster role
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.metrics-host-account }}:role/${{ inputs.metrics-role-name }}
+        role-duration-seconds: 900
+        role-session-name: github-actions-metrics-session
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Fetch the component build results
+      shell: bash
+      env:
+        METRICS_HOST_URL: ${{ inputs.metrics-host-url }}
+        METRICS_INDEX: ${{ inputs.metrics-index }}
+        REGION: ${{ inputs.aws-region }}
+      run: |
+        set -euo pipefail
+        set +x
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        for RESULT in failed passed; do
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/build_failure_issues.py" query \
+            --input-manifest '${{ inputs.input-manifest }}' \
+            --distribution-build-number '${{ inputs.distribution-build-number }}' \
+            --build-start-time-from '${{ inputs.build-start-time-from }}' \
+            --build-start-time-to '${{ inputs.build-start-time-to }}' \
+            --result "${RESULT}" > "query-${RESULT}.json"
+          curl -s -XGET "${METRICS_HOST_URL}/${METRICS_INDEX}/_search" \
+            --aws-sigv4 "aws:amz:${REGION}:es" \
+            --user "${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}" \
+            -H "x-amz-security-token:${AWS_SESSION_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            --data-binary "@query-${RESULT}.json" > "response-${RESULT}.json"
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/build_failure_issues.py" components \
+            --response "response-${RESULT}.json" > "components-${RESULT}.txt"
+          echo "${RESULT} components: $(tr '\n' ' ' < "components-${RESULT}.txt")"
+        done
+
+    - name: Create and close the autocut issues
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        RUN_URL: ${{ inputs.build-url }}
+      run: |
+        set -euo pipefail
+        VERSION=$(python3 -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['build']['version'])" '${{ inputs.input-manifest }}')
+
+        python3 "${GITHUB_WORKSPACE}/.github/scripts/build_failure_issues.py" plan \
+          --input-manifest '${{ inputs.input-manifest }}' \
+          --failed components-failed.txt \
+          --passed components-passed.txt > issue-plan.tsv
+
+        while IFS=$'\t' read -r ACTION REPO_URL COMPONENT; do
+          TITLE="[AUTOCUT] Distribution Build Failed for ${COMPONENT}-${VERSION}"
+          EXISTING=$(gh issue list --repo "${REPO_URL}" -S "${TITLE} in:title" --json number --jq '.[0].number' || true)
+
+          if [ "${ACTION}" = 'create' ]; then
+            BODY="***Build Failed Error***: **${COMPONENT} failed during the distribution build for version: ${VERSION}.**
+        Please see build log at ${RUN_URL}.
+        The failed build job will be marked as failed. Please see the ./build.sh step for more details.
+        Checkout the [wiki](https://github.com/opensearch-project/opensearch-build/wiki/Building-an-OpenSearch-and-OpenSearch-Dashboards-Distribution) to reproduce the failure locally."
+            if [ -n "${EXISTING}" ]; then
+              echo "Issue for ${COMPONENT} already exists, editing the issue body"
+              gh issue edit "${EXISTING}" --repo "${REPO_URL}" --body "${BODY}"
+            else
+              echo "Creating a new issue for ${COMPONENT}"
+              for LABEL in autocut "v${VERSION}"; do
+                if [ "$(gh label list --repo "${REPO_URL}" -S "${LABEL}" --json name --jq '.[0].name' || true)" != "${LABEL}" ]; then
+                  gh label create "${LABEL}" --repo "${REPO_URL}" || true
+                fi
+              done
+              gh issue create --repo "${REPO_URL}" --title "${TITLE}" --body "${BODY}" \
+                --label "autocut,v${VERSION}" --label untriaged
+            fi
+          elif [ -n "${EXISTING}" ]; then
+            echo "Closing the issue for ${COMPONENT}"
+            gh issue close "${EXISTING}" --repo "${REPO_URL}" --comment "Closing the issue as the distribution build for ${COMPONENT} has passed for version: **${VERSION}**.
+        Please see build log at ${RUN_URL}"
+          else
+            echo "No open autocut issue to close for ${COMPONENT}"
+          fi
+          sleep 3
+        done < issue-plan.tsv

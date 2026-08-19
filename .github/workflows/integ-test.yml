@@ -1,0 +1,289 @@
+---
+# GitHub Actions port of jenkins/opensearch/integ-test.jenkinsfile (the Jenkins job `integ-test`). The Jenkins
+# `parameters {}` block (:39-65) became the workflow_dispatch inputs, the dynamic `parallel componentTests` map
+# (:197-279) became a component matrix, and the `post { always }` blocks (:282-327, :330-346) became the report and
+# notification jobs. distribution-build-opensearch.yml triggers this workflow through the trigger-downstream-tests
+# action, the equivalent of the Jenkins `build job: INTEG_TEST_JOB_NAME, wait: false`.
+name: Integ Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      TEST_MANIFEST:
+        description: '<Required> Test manifest under the manifests folder, e.g. 3.0.0/opensearch-3.0.0-test.yml.'
+        required: true
+        type: string
+      BUILD_MANIFEST_URL:
+        description: '<Required> Build manifest URL, e.g. https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/2.9.0/8172/linux/x64/tar/builds/opensearch/manifest.yml'
+        required: true
+        type: string
+      COMPONENT_NAME:
+        description: '<Optional> One or more component names separated by a space, else test everything in the TEST_MANIFEST.'
+        required: false
+        default: ''
+        type: string
+      RC_NUMBER:
+        description: '<Optional> The RC build count. 0 means this is not an RC build.'
+        required: false
+        default: '0'
+        type: string
+      VALIDATE_ARTIFACTS:
+        description: '<Optional> Validate the provided artifacts before running the integration tests.'
+        required: false
+        default: true
+        type: boolean
+      UPDATE_GITHUB_ISSUES:
+        description: '<Optional> Create/close/update a github issue per component.'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+env:
+  GRADLE_OPTS: '-Drepos.mavenLocal=true'
+  BUILD_MANIFEST: build-manifest.yml
+  BUILD_JOB_NAME: distribution-build-opensearch
+
+jobs:
+  verify-parameters:
+    # integ-test.jenkinsfile:67-107 stage('verify-parameters'): validate the parameters, download the build manifest,
+    # read the platform/architecture/distribution out of it and resolve the test docker agent.
+    name: verify-parameters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.manifest.outputs.version }}
+      build-id: ${{ steps.manifest.outputs.build-id }}
+      platform: ${{ steps.manifest.outputs.platform }}
+      architecture: ${{ steps.manifest.outputs.architecture }}
+      distribution: ${{ steps.manifest.outputs.distribution }}
+      artifact-path: ${{ steps.manifest.outputs.artifact-path }}
+      runs-on: ${{ steps.manifest.outputs.runs-on }}
+      image: ${{ steps.agent.outputs.image }}
+      args: ${{ steps.agent.outputs.args }}
+      components: ${{ steps.components.outputs.components }}
+      switch-user-non-root: ${{ steps.components.outputs.switch-user-non-root }}
+      build-start-time: ${{ steps.start-time.outputs.build-start-time }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Check that the test manifest exists
+        # integ-test.jenkinsfile:71-79 aborted the build for a missing manifest or an empty build manifest URL.
+        run: |
+          set -euo pipefail
+          if [ ! -f 'manifests/${{ inputs.TEST_MANIFEST }}' ]; then
+            echo '::error::Integration Tests failed to start. Test manifest was not provided or not found in manifests/${{ inputs.TEST_MANIFEST }}.'
+            exit 1
+          fi
+
+      - name: Download the build manifest
+        id: manifest
+        uses: ./.github/actions/download-build-manifest
+        with:
+          url: ${{ inputs.BUILD_MANIFEST_URL }}
+          path: ${{ env.BUILD_MANIFEST }}
+          job-name: ${{ env.BUILD_JOB_NAME }}
+
+      - name: Detect the test docker agent
+        id: agent
+        uses: ./.github/actions/detect-test-docker-agent
+        with:
+          test-manifest: manifests/${{ inputs.TEST_MANIFEST }}
+          platform: ${{ steps.manifest.outputs.platform }}
+          distribution: ${{ steps.manifest.outputs.distribution }}
+
+      - name: Select the components to test
+        id: components
+        # integ-test.jenkinsfile:149-172, including the rpm/deb component skips.
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          python3 .github/scripts/manifest_paths.py integ-test-components \
+            'manifests/${{ inputs.TEST_MANIFEST }}' \
+            --build-manifest '${{ env.BUILD_MANIFEST }}' \
+            --component-name '${{ inputs.COMPONENT_NAME }}' | tee -a "$GITHUB_OUTPUT"
+
+      - name: Record the run start time
+        id: start-time
+        run: echo "build-start-time=$(date +%s000)" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize the run
+        # integ-test.jenkinsfile:173 set currentBuild.description to the same values.
+        run: |
+          {
+            echo "### ${{ inputs.TEST_MANIFEST }}"
+            echo "version: ${{ steps.manifest.outputs.version }}"
+            echo "architecture: ${{ steps.manifest.outputs.architecture }}"
+            echo "platform: ${{ steps.manifest.outputs.platform }}"
+            echo "build id: ${{ steps.manifest.outputs.build-id }}"
+            echo "distribution: ${{ steps.manifest.outputs.distribution }}"
+            echo "components: ${{ steps.components.outputs.components }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  validate-artifacts:
+    # integ-test.jenkinsfile:108-135 stage('validate-artifacts'): `build job: 'distribution-validation', wait: true`.
+    # That pipeline is not part of this migration slice, so the job reports the parameters Jenkins would have used and
+    # keeps the same position in the graph, meaning the integ-test job still waits for it.
+    name: validate-artifacts
+    needs: verify-parameters
+    if: inputs.VALIDATE_ARTIFACTS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report the validation parameters
+        run: |
+          echo "::notice::Jenkins runs distribution-validation with VERSION=${{ needs.verify-parameters.outputs.version }}, DISTRIBUTION=${{ needs.verify-parameters.outputs.distribution }}, ARCHITECTURE=${{ needs.verify-parameters.outputs.architecture }}, OS_BUILD_NUMBER=${{ needs.verify-parameters.outputs.build-id }}, ARTIFACT_TYPE=staging; that pipeline is still Jenkins-only (docs/jenkins-to-actions.md)."
+
+  integ-test:
+    # integ-test.jenkinsfile:136-281 stage('integ-test'). Jenkins built the parallel branches at runtime from
+    # componentList and ran each of them in a container on the same agent; a matrix job is the declarative equivalent
+    # and each entry gets its own runner, so the workspace no longer has to be stashed and unstashed.
+    name: ${{ matrix.component }}
+    needs: [verify-parameters, validate-artifacts]
+    if: always() && needs.verify-parameters.result == 'success' && needs.validate-artifacts.result != 'failure'
+    runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
+    timeout-minutes: 720
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.verify-parameters.outputs.components) }}
+    # `null` disables the container entirely, which is what a windows build manifest needs.
+    container: ${{ needs.verify-parameters.outputs.platform == 'linux' && fromJSON(format('{{"image":"{0}","options":"{1}"}}', needs.verify-parameters.outputs.image, needs.verify-parameters.outputs.args)) || null }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Stagger the component start
+        # integ-test.jenkinsfile:204-222: component index * 20 seconds, to spread the load of the parallel branches.
+        run: |
+          WAIT_SECONDS=$(( ${{ strategy.job-index }} * 20 ))
+          echo "${{ matrix.component }} with index ${{ strategy.job-index }} will sleep ${WAIT_SECONDS} seconds to reduce load"
+          sleep "${WAIT_SECONDS}"
+
+      - name: Download the build manifest
+        uses: ./.github/actions/download-build-manifest
+        with:
+          url: ${{ inputs.BUILD_MANIFEST_URL }}
+          path: ${{ env.BUILD_MANIFEST }}
+          job-name: ${{ env.BUILD_JOB_NAME }}
+
+      - name: Download the distribution artifacts
+        # integ-test.jenkinsfile:175-191 downloaded the artifacts once and stashed them; on Windows the download
+        # happened inside every branch instead. With one runner per component every entry downloads its own copy.
+        uses: ./.github/actions/download-from-s3
+        with:
+          bucket-name: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          download-path: ${{ needs.verify-parameters.outputs.artifact-path }}/
+          local-path: artifacts
+          aws-account: ${{ secrets.AWS_ACCOUNT_PUBLIC }}
+          role-name: opensearch-bundle
+
+      - name: Move the artifacts into the distribution directory
+        # integ-test.jenkinsfile:187 `rm -rf $WORKSPACE/$distribution && mv -v $WORKSPACE/artifacts/${artifactPath} $WORKSPACE`
+        shell: bash
+        run: |
+          set -euo pipefail
+          DISTRIBUTION='${{ needs.verify-parameters.outputs.distribution }}'
+          rm -rf "${DISTRIBUTION}" test-results
+          mv -v "artifacts/${{ needs.verify-parameters.outputs.artifact-path }}" "${DISTRIBUTION}"
+
+      - name: Run the integration tests
+        uses: ./.github/actions/run-integ-test-script
+        with:
+          component-name: ${{ matrix.component }}
+          test-manifest: manifests/${{ inputs.TEST_MANIFEST }}
+          build-manifest: ${{ env.BUILD_MANIFEST }}
+          job-name: ${{ env.BUILD_JOB_NAME }}
+          local-path: ${{ github.workspace }}/${{ needs.verify-parameters.outputs.distribution }}
+          test-run-id: ${{ github.run_number }}
+          switch-user-non-root: ${{ needs.verify-parameters.outputs.switch-user-non-root }}
+
+      - name: Upload the test results
+        # integ-test.jenkinsfile:265-272 ran uploadTestResults() in the `finally` block of every branch.
+        if: always()
+        uses: ./.github/actions/upload-test-results
+        with:
+          build-manifest: ${{ env.BUILD_MANIFEST }}
+          job-name: integ-test
+          build-number: ${{ github.run_number }}
+          artifact-bucket-name: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          aws-account-public: ${{ secrets.AWS_ACCOUNT_PUBLIC }}
+
+  test-report:
+    # integ-test.jenkinsfile:282-327 post { always }: generate and upload the test report manifest, then index the
+    # results into the metrics cluster. Jenkins wrapped both in `retry(5)`; GitHub Actions has no step-level retry, so
+    # the report generation is attempted once (docs/jenkins-to-actions.md).
+    name: test-report
+    needs: [verify-parameters, integ-test]
+    if: always() && needs.verify-parameters.result == 'success'
+    runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    # `null` disables the container entirely, which is what a windows build manifest needs.
+    container: ${{ needs.verify-parameters.outputs.platform == 'linux' && fromJSON(format('{{"image":"{0}","options":"{1}"}}', needs.verify-parameters.outputs.image, needs.verify-parameters.outputs.args)) || null }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Download the build manifest
+        uses: ./.github/actions/download-build-manifest
+        with:
+          url: ${{ inputs.BUILD_MANIFEST_URL }}
+          path: ${{ env.BUILD_MANIFEST }}
+          job-name: ${{ env.BUILD_JOB_NAME }}
+
+      - name: Create and upload the test report manifest
+        id: report
+        uses: ./.github/actions/create-upload-test-report-manifest
+        with:
+          test-manifest: manifests/${{ inputs.TEST_MANIFEST }}
+          build-manifest: ${{ env.BUILD_MANIFEST }}
+          test-run-id: ${{ github.run_number }}
+          test-type: integ-test
+          rc-number: ${{ inputs.RC_NUMBER }}
+          component-name: ${{ inputs.COMPONENT_NAME }}
+          job-name: integ-test
+          artifact-bucket-name: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          aws-account-public: ${{ secrets.AWS_ACCOUNT_PUBLIC }}
+
+      - name: Archive the test report
+        # integ-test.jenkinsfile:304 `archiveArtifacts artifacts: 'test-report.yml'`
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: test-report
+          path: test-report.yml
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish the integration test results
+        # integ-test.jenkinsfile:309-322. Jenkins re-downloaded the uploaded report from ci.opensearch.org; the local
+        # copy created above is the same file.
+        uses: ./.github/actions/publish-integ-test-results
+        with:
+          test-report-manifest-yml: test-report.yml
+          job-name: integ-test
+          distribution-build-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          test-run-id: ${{ github.run_number }}
+          test-run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          build-start-time: ${{ needs.verify-parameters.outputs.build-start-time }}
+          metrics-host-url: ${{ secrets.METRICS_HOST_URL }}
+          metrics-host-account: ${{ secrets.METRICS_HOST_ACCOUNT }}
+
+  notify:
+    # integ-test.jenkinsfile:330-346 post { always }: `build job: 'integ-test-notification', wait: false`. That
+    # pipeline is not part of this migration slice.
+    name: notify
+    needs: [verify-parameters, integ-test, test-report]
+    if: always() && needs.verify-parameters.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report the notification parameters
+        run: |
+          echo "::notice::Jenkins triggers integ-test-notification with INPUT_MANIFEST=${{ needs.verify-parameters.outputs.version }}/opensearch-${{ needs.verify-parameters.outputs.version }}.yml and DISTRIBUTION_NUMBER=${{ needs.verify-parameters.outputs.build-id }}; that pipeline is still Jenkins-only (docs/jenkins-to-actions.md)."

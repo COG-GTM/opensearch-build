@@ -1,0 +1,199 @@
+---
+# Reusable equivalent of the single-agent build stages of jenkins/opensearch/distribution-build.jenkinsfile:
+# build-and-test-linux-x64-tar (:239-321), build-and-test-linux-arm64-tar (:560-639) and
+# build-and-test-windows-x64-zip (:880-957). Those stages run buildAssembleUpload() on one agent, trigger the
+# downstream test jobs, and upload the index file in post { success } / post { unstable }.
+name: Distribution Build (archive)
+
+on:
+  workflow_call:
+    inputs:
+      input-manifest:
+        description: 'Input manifest under manifests/, e.g. 3.0.0/opensearch-3.0.0.yml'
+        required: true
+        type: string
+      platform:
+        required: true
+        type: string
+      architecture:
+        required: true
+        type: string
+      distribution:
+        description: 'tar or zip'
+        required: true
+        type: string
+      runs-on:
+        description: 'Runner label replacing the Jenkins agent label (distribution-build.jenkinsfile:30-32)'
+        required: true
+        type: string
+      image:
+        description: 'Container image resolved by detectDockerAgent()'
+        required: true
+        type: string
+      args:
+        description: 'Container options resolved by detectDockerAgent()'
+        required: false
+        default: ''
+        type: string
+      java-version:
+        description: 'Java version embedded in the container args, used by the Windows scoop reset'
+        required: false
+        default: 'openjdk-21'
+        type: string
+      component-name:
+        required: false
+        default: ''
+        type: string
+      job-name:
+        description: 'Artifact path prefix, the Jenkins JOB_NAME'
+        required: false
+        default: 'distribution-build-opensearch'
+        type: string
+      continue-on-error:
+        required: false
+        default: true
+        type: boolean
+      skip-artifact-check:
+        required: false
+        default: false
+        type: boolean
+      incremental:
+        required: false
+        default: true
+        type: boolean
+      previous-build-id:
+        required: false
+        default: 'latest'
+        type: string
+      parallel:
+        required: false
+        default: '4'
+        type: string
+      update-latest-url:
+        required: false
+        default: true
+        type: boolean
+      rc-number:
+        required: false
+        default: '0'
+        type: string
+      test-manifest:
+        required: false
+        default: ''
+        type: string
+      test-platform:
+        required: false
+        default: ''
+        type: string
+      test-distribution:
+        required: false
+        default: ''
+        type: string
+      integ-test-workflow:
+        description: 'Workflow triggered instead of the Jenkins INTEG_TEST_JOB_NAME job. Empty skips integ tests.'
+        required: false
+        default: 'integ-test.yml'
+        type: string
+    outputs:
+      artifact-url:
+        description: 'Public URL of the built artifact, the Jenkins ARTIFACT_URL_<platform>_<arch>_<distribution>'
+        value: ${{ jobs.build.outputs.artifact-url }}
+      build-manifest-url:
+        description: 'Public URL of the generated build manifest'
+        value: ${{ jobs.build.outputs.build-manifest-url }}
+
+permissions: {}
+
+# The caller passes the artifact bucket, AWS account and signing secrets with `secrets: inherit`, the equivalent of the
+# Jenkins withSecrets()/withCredentials() blocks. See docs/jenkins-to-actions.md for the full list.
+jobs:
+  build:
+    name: build-and-test-${{ inputs.platform }}-${{ inputs.architecture }}-${{ inputs.distribution }}
+    runs-on: ${{ inputs.runs-on }}
+    # distribution-build.jenkinsfile:24 timeout(time: 4, unit: 'HOURS')
+    timeout-minutes: 240
+    # The Jenkins stages ran on a docker agent on Linux; on Windows the stage ran a Windows container and reset the
+    # JDK with scoop (distribution-build.jenkinsfile:900-904), so the container is only used for linux here.
+    # `null` disables the container entirely, which is what the Windows zip stage needs.
+    container: ${{ inputs.platform == 'linux' && fromJSON(format('{{"image":"{0}","options":"{1}"}}', inputs.image, inputs.args)) || null }}
+    permissions:
+      contents: read
+      id-token: write
+      # trigger-downstream-tests runs `gh workflow run`, the equivalent of the Jenkins `build job:` step.
+      actions: write
+    outputs:
+      artifact-url: ${{ steps.build.outputs.artifact-url }}
+      build-manifest-url: ${{ steps.build.outputs.build-manifest-url }}
+      index-file-root: ${{ steps.build.outputs.index-file-root }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Switch the Windows JDK
+        # distribution-build.jenkinsfile:901-904, kept verbatim: the Windows image ships several JDKs and the build
+        # needs the one the manifest asks for.
+        if: inputs.platform == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          JAVA_VERSION_NUMBER=$(echo '${{ inputs.java-version }}' | tr -dc '0-9')
+          scoop reset "$(scoop list jdk | cut -d ' ' -f1 | grep "${JAVA_VERSION_NUMBER}" | head -1)"
+
+      - name: Build, assemble and upload
+        id: build
+        uses: ./.github/actions/build-assemble-upload
+        with:
+          input-manifest: manifests/${{ inputs.input-manifest }}
+          component-name: ${{ inputs.component-name }}
+          platform: ${{ inputs.platform }}
+          architecture: ${{ inputs.architecture }}
+          distribution: ${{ inputs.distribution }}
+          continue-on-error: ${{ inputs.continue-on-error }}
+          skip-artifact-check: ${{ inputs.skip-artifact-check }}
+          incremental: ${{ inputs.incremental }}
+          previous-build-id: ${{ inputs.previous-build-id }}
+          parallel: ${{ inputs.parallel }}
+          job-name: ${{ inputs.job-name }}
+          build-number: ${{ github.run_number }}
+          artifact-bucket-name: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          aws-account-public: ${{ secrets.AWS_ACCOUNT_PUBLIC }}
+          artifact-production-bucket-name: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+          aws-account-artifact: ${{ secrets.AWS_ACCOUNT_ARTIFACT }}
+          artifact-promotion-role-name: ${{ secrets.ARTIFACT_PROMOTION_ROLE_NAME }}
+          sign-rpm: 'false'
+          rpm-signing-account: ${{ secrets.RPM_SIGNING_ACCOUNT }}
+
+      - name: Upload the build log
+        # publishDistributionBuildResults() scraped the Jenkins console log; the post-build job reads these instead.
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: build-log-${{ inputs.platform }}-${{ inputs.architecture }}-${{ inputs.distribution }}
+          path: build-${{ inputs.platform }}-${{ inputs.architecture }}-${{ inputs.distribution }}.log
+          if-no-files-found: warn
+          retention-days: 5
+
+      - name: Upload the index file
+        # post { success } and post { unstable } of the stage (distribution-build.jenkinsfile:293-315).
+        if: success() && inputs.update-latest-url
+        uses: ./.github/actions/upload-index-file
+        with:
+          index-file-path: ${{ steps.build.outputs.index-file-root }}
+          build-number: ${{ github.run_number }}
+          artifact-bucket-name: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          aws-account-public: ${{ secrets.AWS_ACCOUNT_PUBLIC }}
+
+      - name: Trigger the downstream tests
+        # triggerIntegrationTests()/triggerSmokeTests()/triggerBWCTests() (distribution-build.jenkinsfile:1074-1131).
+        # Only the integ-test pipeline is in scope for this migration, so smoke and bwc are reported, not triggered.
+        if: success()
+        uses: ./.github/actions/trigger-downstream-tests
+        with:
+          integ-test-workflow: ${{ inputs.integ-test-workflow }}
+          test-manifest: ${{ inputs.test-manifest }}
+          build-manifest-url: ${{ steps.build.outputs.build-manifest-url }}
+          platform: ${{ inputs.platform }}
+          distribution: ${{ inputs.distribution }}
+          test-platform: ${{ inputs.test-platform }}
+          test-distribution: ${{ inputs.test-distribution }}
+          rc-number: ${{ inputs.rc-number }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}

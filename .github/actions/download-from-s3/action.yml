@@ -1,0 +1,50 @@
+---
+name: 'Download from S3'
+description: >-
+  Port of the shared-library step downloadFromS3() (opensearch-build-libraries vars/downloadFromS3.groovy), used by
+  integ-test.jenkinsfile:196-203 to pull the distribution artifacts of the build under test into the workspace.
+  Jenkins assumed the role with withAWS(); here the role is assumed through GitHub OIDC, so the calling job needs
+  `permissions: id-token: write`.
+
+inputs:
+  bucket-name:
+    description: 'S3 bucket to download from'
+    required: true
+  download-path:
+    description: 'Key prefix inside the bucket'
+    required: true
+  local-path:
+    description: 'Local directory to download into'
+    required: true
+  aws-account:
+    description: 'AWS account that owns the role to assume'
+    required: true
+  role-name:
+    description: 'Name of the role to assume in that account (Jenkins default for artifacts: opensearch-bundle)'
+    required: false
+    default: 'opensearch-bundle'
+  aws-region:
+    description: 'AWS region'
+    required: false
+    default: 'us-east-1'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Assume the artifact download role
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.aws-account }}:role/${{ inputs.role-name }}
+        role-duration-seconds: 900
+        role-session-name: github-actions-download-session
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Download from S3
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Jenkins s3Download(force: true) always overwrote the workspace copy; `aws s3 cp --recursive` does the same.
+        TARGET='${{ inputs.local-path }}/${{ inputs.download-path }}'
+        mkdir -p "${TARGET}"
+        echo "Downloading s3://${{ inputs.bucket-name }}/${{ inputs.download-path }} to ${TARGET}"
+        aws s3 cp --recursive --quiet "s3://${{ inputs.bucket-name }}/${{ inputs.download-path }}" "${TARGET}"

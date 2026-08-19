@@ -1,0 +1,81 @@
+---
+name: 'Trigger Downstream Tests'
+description: >-
+  Port of triggerIntegrationTests(), triggerSmokeTests() and triggerBWCTests()
+  (distribution-build.jenkinsfile:1074-1131). Jenkins used `build job: <name>, propagate: false, wait: false`, so the
+  downstream job ran independently of the build; the GitHub Actions equivalent is `gh workflow run`, which is likewise
+  fire and forget. The skip conditions are unchanged: an empty job/workflow name, an empty test manifest, an empty
+  build manifest URL, or a platform/distribution outside TEST_PLATFORM/TEST_DISTRIBUTION skips the trigger.
+  Only the integ-test pipeline is part of this migration; the smoke and bwc pipelines are still Jenkins-only, so this
+  action reports what Jenkins would have triggered for them instead of triggering anything.
+
+inputs:
+  integ-test-workflow:
+    description: 'Workflow file triggered in place of INTEG_TEST_JOB_NAME. Empty skips integration tests.'
+    required: false
+    default: 'integ-test.yml'
+  test-manifest:
+    description: 'Test manifest passed to the integ-test workflow'
+    required: true
+  build-manifest-url:
+    description: 'URL of the build manifest that was just uploaded'
+    required: true
+  platform:
+    description: 'Platform that was built'
+    required: true
+  distribution:
+    description: 'Distribution that was built'
+    required: true
+  test-platform:
+    description: 'TEST_PLATFORM parameter'
+    required: false
+    default: ''
+  test-distribution:
+    description: 'TEST_DISTRIBUTION parameter'
+    required: false
+    default: ''
+  rc-number:
+    description: 'RC_NUMBER parameter'
+    required: false
+    default: '0'
+  ref:
+    description: 'Ref the downstream workflow runs on'
+    required: false
+    default: ''
+  github-token:
+    description: 'Token used by gh workflow run'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Trigger the integ-test workflow
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        SKIP=false
+        if [ -z '${{ inputs.integ-test-workflow }}' ] || [ -z '${{ inputs.test-manifest }}' ] \
+          || [ -z '${{ inputs.build-manifest-url }}' ] \
+          || ! echo '${{ inputs.test-platform }}' | grep -qw '${{ inputs.platform }}' \
+          || ! echo '${{ inputs.test-distribution }}' | grep -qw '${{ inputs.distribution }}'; then
+          SKIP=true
+        fi
+
+        if [ "${SKIP}" = 'true' ]; then
+          echo 'Skipping INTEG tests as one of the values has empty or wrong string: integ-test-workflow, test-manifest, build-manifest-url, test-platform, test-distribution'
+        else
+          echo 'Running INTEG tests'
+          gh workflow run '${{ inputs.integ-test-workflow }}' \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref "${{ inputs.ref || github.ref_name }}" \
+            --field "TEST_MANIFEST=${{ inputs.test-manifest }}" \
+            --field "BUILD_MANIFEST_URL=${{ inputs.build-manifest-url }}" \
+            --field "RC_NUMBER=${{ inputs.rc-number }}" \
+            --field 'UPDATE_GITHUB_ISSUES=true'
+        fi
+
+        # triggerSmokeTests() and triggerBWCTests() are out of scope for this migration
+        # (see docs/jenkins-to-actions.md, 'Not migrated').
+        echo "::notice::Jenkins would also trigger the smoke-test and bwc-test jobs for ${{ inputs.platform }}/${{ inputs.distribution }} with build manifest ${{ inputs.build-manifest-url }}"

@@ -1,0 +1,39 @@
+---
+name: 'Upload Index File'
+description: >-
+  Port of the shared-library step uploadIndexFile() (opensearch-build-libraries vars/uploadIndexFile.groovy). Writes
+  index.json containing the current build number and uploads it to the given prefix so later incremental builds can
+  resolve `latest`.
+
+inputs:
+  index-file-path:
+    description: 'Prefix inside the artifact bucket that index.json is written to'
+    required: true
+  build-number:
+    description: 'Build number written as the `latest` value'
+    required: true
+  artifact-bucket-name:
+    description: 'Staging artifact bucket'
+    required: true
+  aws-account-public:
+    description: 'AWS account holding the staging bucket'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Write index.json
+      shell: bash
+      run: |
+        set -euo pipefail
+        printf '{"latest":"%s"}' '${{ inputs.build-number }}' > index.json
+        cat index.json
+
+    - name: Upload index.json
+      uses: ./.github/actions/upload-to-s3
+      with:
+        source-path: index.json
+        bucket: ${{ inputs.artifact-bucket-name }}
+        path: ${{ inputs.index-file-path }}/index.json
+        aws-account: ${{ inputs.aws-account-public }}
+        role-name: opensearch-bundle
