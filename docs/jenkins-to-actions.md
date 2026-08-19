@@ -130,7 +130,13 @@ OPTIONS: continue-on-error incremental update-latest-url update-github-issue par
 
 * A bare token sets the flag to `true`; prefixing it with `no-` sets it to `false` (`no-incremental`).
 * `key=value` tokens carry the string parameters.
-* An unknown token fails the run rather than being silently ignored.
+* An unknown token fails the run rather than being silently ignored, and `parallel`, `previous-build-id` and
+  `build-docker` values are checked against the shapes the Jenkins parameters allowed.
+* The parser starts from the **Jenkins defaults** (`distribution-build.jenkinsfile:104-137`: `continue-on-error`,
+  `incremental`, `update-latest-url` and `update-github-issue` on, `parallel=4`, `previous-build-id=latest`), so
+  dispatching `OPTIONS: parallel=8` changes only the worker count instead of quietly turning the other four off.
+* `sign-rpm` is the one flag with no Jenkins parameter behind it: `assembleManifest()` signed rpm packages
+  unconditionally, which a fork without signing keys cannot do, so it defaults to off and has to be requested.
 
 | Jenkins parameter | `distribution-build-opensearch.yml` |
 | --- | --- |
@@ -147,6 +153,7 @@ OPTIONS: continue-on-error incremental update-latest-url update-github-issue par
 | `UPDATE_LATEST_URL` | `OPTIONS: update-latest-url` |
 | `UPDATE_GITHUB_ISSUE` | `OPTIONS: update-github-issue` |
 | `BUILD_DOCKER` | `OPTIONS: build-docker=` |
+| no Jenkins equivalent (`assembleManifest()` always signed rpm) | `OPTIONS: sign-rpm`, default off |
 | `PARALLEL` / gradle workers | `OPTIONS: parallel=` |
 | `SMOKE_TEST_JOB_NAME`, `BWC_TEST_JOB_NAME` | not migrated, see [§5](#5-not-migrated--needs-decisions) |
 
@@ -221,6 +228,7 @@ the full distribution.
 | `build job: 'distribution-validation'` for `VALIDATE_ARTIFACTS` | `integ-test.jenkinsfile:108-135` | **Reported, not triggered.** The `validate-artifacts` job prints the parameters; migrating `distribution-validation` is a separate slice. |
 | `build job: 'integ-test-notification', wait: false` | `integ-test.jenkinsfile:330-345` | **Reported, not triggered.** Notifications depend on Jenkins-only credentials; the recommended pattern is a small `notify` job posting to Slack via a webhook secret. |
 | rpm signing | `distribution-build.jenkinsfile:397-404`, `vars/signArtifacts.groovy` | **Ported, disabled by default.** `sign-rpm` defaults to `false`, matching a fork that has no signing keys. The six 1Password values are exported as job-level `env` from repository secrets ([§4](#4-required-secrets-and-aws-configuration)); when `sign-rpm` is `true` and any of them is empty, `sign-artifacts` fails with an explicit error instead of producing unsigned-but-reported packages. The mac, windows, `jar_signer` and PGP branches of `signArtifacts()` are unreachable from these two pipelines and were not ported. |
+| Container options from the manifest | `manifests/*/opensearch-*-test.yml` `ci.image.args` | **Ported, needs a live dispatch.** The args are injected verbatim into `jobs.<id>.container.options`, and the test manifests carry `--entrypoint`, `--privileged`, `-u root` and cgroup bind mounts. Actions documents some of those as unsupported and treats others differently from Jenkins' `docker.image().inside()`, and a double quote in the args would break the `fromJSON(format(...))` container object. The rpm/deb integ-test containers cannot be validated statically. |
 | Metrics publication | `vars/publishDistributionBuildResults.groovy`, `vars/publishIntegTestResults.groovy` | **Ported, unverified against a live cluster.** The documents and index mappings were reconstructed from the Groovy sources (`.github/scripts/metrics_records.py`, `.github/mappings/*.json`); they cannot be validated without the metrics cluster, so treat the schema as proposed rather than confirmed. |
 | GitHub issue create/close | `vars/updateBuildFailureIssues.groovy`, `createGithubIssue.groovy`, `closeGithubIssue.groovy` | **Ported, unverified.** `update-build-failure-issues` queries the metrics cluster for component build failures and then uses `gh issue create/close`. Without the metrics cluster the query cannot be exercised, and the step is only enabled when `OPTIONS: update-github-issue` is set. |
 | Agent-specific state (workspace reuse, `postCleanup()`, `/tmp/workspace` sizing, docker-in-docker) | throughout both pipelines | **No equivalent needed, but capacity matters.** Every Actions job starts clean, so any implicit reliance on a warm workspace or a pre-pulled image becomes a fresh download. Self-hosted runners with a persistent gradle/maven cache (or `actions/cache`) are the recommended replacement for the warm Jenkins agents. |

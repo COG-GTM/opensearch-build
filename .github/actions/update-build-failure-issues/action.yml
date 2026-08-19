@@ -117,7 +117,7 @@ runs:
 
         while IFS=$'\t' read -r ACTION REPO_URL COMPONENT; do
           TITLE="[AUTOCUT] Distribution Build Failed for ${COMPONENT}-${VERSION}"
-          EXISTING=$(gh issue list --repo "${REPO_URL}" -S "${TITLE} in:title" --json number --jq '.[0].number' || true)
+          EXISTING=$(gh issue list --repo "${REPO_URL}" -S "${TITLE} in:title" --json number --jq '.[0].number // empty' || true)
 
           if [ "${ACTION}" = 'create' ]; then
             BODY="***Build Failed Error***: **${COMPONENT} failed during the distribution build for version: ${VERSION}.**
@@ -130,7 +130,7 @@ runs:
             else
               echo "Creating a new issue for ${COMPONENT}"
               for LABEL in autocut "v${VERSION}"; do
-                if [ "$(gh label list --repo "${REPO_URL}" -S "${LABEL}" --json name --jq '.[0].name' || true)" != "${LABEL}" ]; then
+                if [ "$(gh label list --repo "${REPO_URL}" -S "${LABEL}" --json name --jq '.[0].name // empty' || true)" != "${LABEL}" ]; then
                   gh label create "${LABEL}" --repo "${REPO_URL}" || true
                 fi
               done

@@ -62,9 +62,10 @@ on:
       OPTIONS:
         description: >-
           <Optional> Space separated flags for the remaining Jenkins parameters: continue-on-error,
-          skip-artifact-check, incremental, update-latest-url, update-github-issue, parallel=<workers>,
+          skip-artifact-check, incremental, update-latest-url, update-github-issue, sign-rpm, parallel=<workers>,
           previous-build-id=<id>, build-docker=<build_docker |
-          build_docker_with_build_number_tag | do_not_build_docker>. Prefix a flag with `no-` to turn it off.
+          build_docker_with_build_number_tag | do_not_build_docker>. Every flag starts from its Jenkins default, so
+          only the deviations have to be listed; prefix a flag with `no-` to turn it off.
         required: false
         default: 'continue-on-error incremental update-latest-url update-github-issue parallel=4 previous-build-id=latest'
         type: string
@@ -101,6 +102,7 @@ jobs:
       update-github-issue: ${{ steps.options.outputs.update-github-issue }}
       parallel: ${{ steps.options.outputs.parallel }}
       previous-build-id: ${{ steps.options.outputs.previous-build-id }}
+      sign-rpm: ${{ steps.options.outputs.sign-rpm }}
       integ-test-workflow: ${{ inputs.INTEG_TEST_WORKFLOW }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -147,10 +149,13 @@ jobs:
           OPTIONS: ${{ inputs.OPTIONS }}
         run: |
           set -euo pipefail
+          # Seeded with the Jenkins parameter defaults (distribution-build.jenkinsfile:104-137), so overriding one
+          # token of OPTIONS cannot silently turn the other Jenkins defaults off. `no-<flag>` negates a flag.
           declare -A OPT=(
-            [continue-on-error]=false [skip-artifact-check]=false [incremental]=false
-            [update-latest-url]=false [update-github-issue]=false
-            [parallel]=0 [previous-build-id]=latest
+            [continue-on-error]=true [skip-artifact-check]=false [incremental]=true
+            [update-latest-url]=true [update-github-issue]=true
+            [sign-rpm]=false
+            [parallel]=4 [previous-build-id]=latest
             [build-docker]=build_docker
           )
           # The tokens are validated below, so word splitting the input here is deliberate.
@@ -297,6 +302,9 @@ jobs:
       assemble-image: ${{ matrix['assemble-image'] }}
       assemble-args: ${{ matrix['assemble-args'] }}
       component-name: ${{ inputs.COMPONENT_NAME }}
+      # Jenkins signed rpm packages unconditionally in assembleManifest(); a fork has no signing keys, so it is an
+      # OPTIONS flag that defaults to off (docs/jenkins-to-actions.md).
+      sign-rpm: ${{ needs.verify-parameters.outputs.sign-rpm == 'true' }}
       continue-on-error: ${{ needs.verify-parameters.outputs.continue-on-error == 'true' }}
       skip-artifact-check: ${{ needs.verify-parameters.outputs.skip-artifact-check == 'true' }}
       incremental: ${{ needs.verify-parameters.outputs.incremental == 'true' }}
@@ -358,6 +366,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Download the build logs
+        # A cancelled or empty build matrix leaves no build-log artifact at all, and the post-build path still has to
+        # create the monthly index; publish-distribution-build-results warns when it finds no logs.
+        continue-on-error: true
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
           pattern: build-log-*
