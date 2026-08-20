@@ -1,0 +1,149 @@
+---
+name: gradle-check-flaky-test-detector
+
+# Migrated from jenkins/gradle/gradle-check-flaky-test-issue-creation.jenkinsfile
+# (Jenkins job name: gradle-check-flaky-test-detector). The Jenkins job remains
+# authoritative until a human cuts over; this workflow is manual-only for now.
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_labels:
+        description: 'Comma separated labels applied to created flaky test issues'
+        required: false
+        type: string
+        default: 'autocut,>test-failure,flaky-test'
+      time_frame:
+        description: 'Time frame of gradle-check runs to analyse, e.g. 30d'
+        required: false
+        type: string
+        default: '30d'
+      target_repository:
+        description: 'Repository (owner/name) the flaky test issues are filed against'
+        required: false
+        type: string
+        default: 'opensearch-project/OpenSearch'
+      flaky_tests_json:
+        description: >-
+          Optional JSON array of already-detected flaky tests, used to exercise
+          the issue-creation half while the datastore query is not yet ported.
+          Each entry: {"test_name": "...", "failure_count": 1, "total_runs": 1, "url": "..."}
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: 'Log the issues that would be created instead of creating them'
+        required: false
+        type: boolean
+        default: true
+
+  # enable at cutover; Jenkins job gradle-check-flaky-test-detector still runs this
+  # schedule:
+  #   # Jenkins: parameterizedCron('H */6 * * *')
+  #   - cron: '35 */6 * * *'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  detect-flaky-tests:
+    # Jenkins agent label was Jenkins-Agent-AL2023-X64-M54xlarge-Docker-Host running the
+    # opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-build-v1 image. The job is
+    # a datastore query plus GitHub API calls, so a hosted runner is sufficient; a reviewer
+    # can swap in a self-hosted label if the datastore is only reachable from CI networks.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Carried over from the Jenkins job environment block; kept so that any gradle
+      # tooling invoked by a future detector implementation behaves identically.
+      GRADLE_OPTS: '-Drepos.mavenLocal=true'
+      ISSUE_LABELS: ${{ inputs.issue_labels }}
+      TIME_FRAME: ${{ inputs.time_frame }}
+      TARGET_REPOSITORY: ${{ inputs.target_repository }}
+      FLAKY_TESTS_JSON: ${{ inputs.flaky_tests_json }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Query gradle-check results for flaky tests
+        id: query
+        run: |
+          set -euo pipefail
+          if [ -n "$FLAKY_TESTS_JSON" ]; then
+            echo "$FLAKY_TESTS_JSON" > flaky-tests.json
+            python3 -c "import json,sys; d=json.load(open('flaky-tests.json')); sys.exit(0) if isinstance(d, list) else sys.exit('flaky_tests_json must be a JSON array of flaky test objects')"
+            echo "Using flaky_tests_json input (${TIME_FRAME} time frame is ignored in this mode)."
+            exit 0
+          fi
+          # TODO(migration): the detection half of gradleCheckFlakyTestDetector is not ported.
+          # It lives in opensearch-project/opensearch-build-libraries (jenkins@12.0.0) and queries
+          # the gradle-check results datastore (the OpenSearch metrics cluster written by
+          # publishGradleCheckTestResults). Neither the endpoint, the index/schema, nor the
+          # credentials for it exist in this repository, so it cannot be reimplemented here.
+          # Porting it requires: the metrics cluster endpoint + auth (see decision (b) in
+          # docs/jenkins-to-github-actions-migration.md), the result index schema, and the
+          # flakiness threshold the library applies over the ${TIME_FRAME} window.
+          echo "::error::Flaky test detection is not ported yet. gradleCheckFlakyTestDetector queries the gradle-check results datastore via the opensearch-build-libraries shared library, which is not available to GitHub Actions. Re-run with the flaky_tests_json input to exercise issue creation, or implement the datastore query before enabling this workflow."
+          exit 1
+
+      - name: Create or update flaky test issues
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          github-token: ${{ secrets.OPENSEARCH_CI_BOT_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const [owner, repo] = process.env.TARGET_REPOSITORY.split('/');
+            const labels = process.env.ISSUE_LABELS.split(',').map(l => l.trim()).filter(Boolean);
+            const dryRun = process.env.DRY_RUN === 'true';
+            const tests = JSON.parse(fs.readFileSync('flaky-tests.json', 'utf8'));
+            const seen = new Set();
+
+            for (const test of tests) {
+              const name = test.test_name || test.name;
+              if (!name) {
+                core.setFailed(`Entry without a test_name: ${JSON.stringify(test)}`);
+                return;
+              }
+              // A double quote would break the quoted-title search query below.
+              if (name.includes('"')) {
+                core.setFailed(`test_name must not contain a double quote: ${name}`);
+                return;
+              }
+              // The search index is eventually consistent, so a repeated name in one run
+              // would not find the issue just created for it.
+              if (seen.has(name)) {
+                core.info(`Skipping duplicate entry for ${name}`);
+                continue;
+              }
+              seen.add(name);
+              const title = `[AUTOCUT] Gradle Check Flaky Test Report for ${name}`;
+              const body = [
+                `Flaky test detected over the last ${process.env.TIME_FRAME} of gradle-check runs.`,
+                '',
+                `- Test: \`${name}\``,
+                `- Failures: ${test.failure_count ?? 'unknown'} of ${test.total_runs ?? 'unknown'} runs`,
+                test.url ? `- Results: ${test.url}` : null,
+                '',
+                `Filed by the ${context.workflow} workflow ` +
+                `([run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})).`,
+              ].filter(l => l !== null).join('\n');
+
+              const existing = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${owner}/${repo} "${title}" in:title is:issue is:open`,
+              });
+              const match = existing.data.items.find(i => i.title === title);
+
+              if (dryRun) {
+                core.info(`[dry-run] ${match ? 'would comment on #' + match.number : 'would create'}: ${title}`);
+                continue;
+              }
+              if (match) {
+                await github.rest.issues.createComment({owner, repo, issue_number: match.number, body});
+                core.info(`Commented on existing issue #${match.number}: ${title}`);
+              } else {
+                const created = await github.rest.issues.create({owner, repo, title, body, labels});
+                core.info(`Created issue #${created.data.number}: ${title}`);
+              }
+            }
