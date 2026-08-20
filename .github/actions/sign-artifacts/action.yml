@@ -124,10 +124,10 @@ runs:
 
         echo 'Start signing rpm'
         if file "${ARTIFACT_PATH}" | grep -q directory; then
-          for rpm_file in $(ls "${ARTIFACT_PATH}"); do
-            if file "${ARTIFACT_PATH}/${rpm_file}" | grep -q RPM; then
-              rpm --addsign "${ARTIFACT_PATH}/${rpm_file}"
-              rpm -qip "${ARTIFACT_PATH}/${rpm_file}" | grep Signature
+          for rpm_file in "${ARTIFACT_PATH}"/*; do
+            if file "${rpm_file}" | grep -q RPM; then
+              rpm --addsign "${rpm_file}"
+              rpm -qip "${rpm_file}" | grep Signature
             fi
           done
         elif file "${ARTIFACT_PATH}" | grep -q RPM; then

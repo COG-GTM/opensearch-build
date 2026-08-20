@@ -252,6 +252,11 @@ Fidelity was preferred over cleanliness; these are ported as-is and flagged rath
   *tar* image but with the *package* docker args, and `:373-376` runs the assemble stage on the package image with no
   args at all. `manifest_paths.py` reproduces that pairing (`image`/`args` for the build job, `assemble-image`/empty
   `assemble-args` for the assemble job) rather than making the two stages consistent.
+* **A component with no security config counts as passed.** `publishIntegTestResults.groovy:67-69` defaults a
+  missing `with-security`/`without-security` status to `unknown`, which is not `fail`, so the component is recorded as
+  `passed`; `metrics_records.py` keeps that. The Groovy also compares the already-lowercased status against
+  `'Not Available'`, a comparison that can never be true — the port compares against `not available`, which is the only
+  place where it fixes an upstream bug instead of reproducing it.
 * **Release-candidate promotion is not gated on `RC_NUMBER`.** `uploadArtifacts.groovy:49-58` promotes the min
   tarball and the package into `release-candidates/` for every non-feature build, RC or not, and only skips feature
   builds. `upload-artifacts` keeps that behavior; the promotion steps additionally require the production bucket, the

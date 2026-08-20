@@ -92,8 +92,11 @@ jobs:
           set -euo pipefail
           # Every dispatch input reaches a shell or a container option somewhere downstream, so the character set is
           # constrained here once instead of being escaped in each of the composite actions.
+          # `[[ =~ ]]` instead of `grep -Eq`: grep sees no line at all for an empty value and exits 1, which rejected
+          # every optional input left at its empty default, and grep -q would also accept a value whose *second* line
+          # matches.
           check() {
-            if ! printf '%s' "$2" | grep -Eq "$3"; then
+            if ! [[ "$2" =~ $3 ]]; then
               echo "::error::$1 contains characters that are not allowed: $2"
               exit 1
             fi
