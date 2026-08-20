@@ -1,0 +1,112 @@
+---
+name: 'Create and Upload Test Report Manifest'
+description: >-
+  Port of the shared-library step createUploadTestReportManifest() (opensearch-build-libraries
+  vars/createUploadTestReportManifest.groovy). Runs ./report.sh to produce test-report.yml and uploads it next to the
+  test results of the run.
+
+inputs:
+  test-manifest:
+    description: 'Path to the test manifest'
+    required: true
+  build-manifest:
+    description: 'Path to the downloaded build manifest'
+    required: true
+  test-run-id:
+    description: 'Test run id, the Jenkins BUILD_NUMBER'
+    required: true
+  test-type:
+    description: 'Test type being reported, e.g. integ-test'
+    required: true
+  rc-number:
+    description: 'RC number of the distribution. 0 means the build is not a release candidate.'
+    required: false
+    default: '0'
+  component-name:
+    description: 'Components the workflow ran on'
+    required: false
+    default: ''
+  job-name:
+    description: 'Test job name used as the artifact path prefix, the Jenkins JOB_NAME (integ-test)'
+    required: false
+    default: 'integ-test'
+  public-artifact-url:
+    description: 'Public artifact URL used to build --base-path'
+    required: false
+    default: 'https://ci.opensearch.org/ci/dbc'
+  artifact-bucket-name:
+    description: 'Staging artifact bucket'
+    required: true
+  aws-account-public:
+    description: 'AWS account holding the staging bucket'
+    required: true
+
+outputs:
+  report-url:
+    description: 'Public URL of the uploaded test-report.yml'
+    value: ${{ steps.report.outputs.report-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Generate the test report manifest
+      id: report
+      shell: bash
+      env:
+        BUILD_MANIFEST: ${{ inputs.build-manifest }}
+        TEST_MANIFEST: ${{ inputs.test-manifest }}
+        PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+        JOB_NAME: ${{ inputs.job-name }}
+        TEST_RUN_ID: ${{ inputs.test-run-id }}
+        TEST_TYPE: ${{ inputs.test-type }}
+        RC_NUMBER: ${{ inputs.rc-number }}
+        COMPONENT_NAME: ${{ inputs.component-name }}
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        SCRIPT="${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py"
+        BUILD_ID=$(python3 -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['build']['id'])" "${BUILD_MANIFEST}")
+        # --artifact-paths points at the distribution build, --base-path at this test job
+        # (tests/jenkins/TestOpenSearchIntegTest.groovy:101).
+        PATHS=$(python3 "${SCRIPT}" integ-test-paths "${BUILD_MANIFEST}" \
+          --job-name distribution-build-opensearch --base-path-job-name "${JOB_NAME}" \
+          --public-artifact-url "${PUBLIC_ARTIFACT_URL}")
+        ARTIFACT_PATHS=$(echo "${PATHS}" | grep '^paths=' | cut -d= -f2-)
+        INFO=$(python3 "${SCRIPT}" build-manifest-info "${BUILD_MANIFEST}" \
+          --job-name "${JOB_NAME}" --build-number "${BUILD_ID}" \
+          --public-artifact-url "${PUBLIC_ARTIFACT_URL}")
+        ARTIFACT_ROOT=$(echo "${INFO}" | grep '^artifact-root=' | cut -d= -f2-)
+        ROOT_URL=$(echo "${INFO}" | grep '^artifact-root-url=' | cut -d= -f2-)
+        BASE_PATH=$(echo "${PATHS}" | grep '^base-path=' | cut -d= -f2-)
+
+        # report.sh parses --artifact-paths and --component with nargs='*' (src/report_workflow/report_args.py:28),
+        # so both are word split into one argument per value.
+        read -ra PATH_PAIRS <<< "${ARTIFACT_PATHS}"
+        ARGS=('./report.sh' "${TEST_MANIFEST}"
+              '--artifact-paths' ${PATH_PAIRS[@]+"${PATH_PAIRS[@]}"}
+              '--test-run-id' "${TEST_RUN_ID}"
+              '--test-type' "${TEST_TYPE}"
+              '--base-path' "${BASE_PATH}")
+        # createUploadTestReportManifest.groovy:74 - the release candidate and component flags are omitted when empty.
+        if [ -n "${RC_NUMBER}" ] && [ "${RC_NUMBER}" != '0' ]; then
+          ARGS+=('--release-candidate' "${RC_NUMBER}")
+        fi
+        if [ -n "${COMPONENT_NAME}" ]; then
+          read -ra COMPONENTS <<< "${COMPONENT_NAME}"
+          ARGS+=('--component' ${COMPONENTS[@]+"${COMPONENTS[@]}"})
+        fi
+        "${ARGS[@]}"
+
+        {
+          echo "upload-path=${ARTIFACT_ROOT}/test-results/${TEST_RUN_ID}/${TEST_TYPE}/test-report.yml"
+          echo "report-url=${ROOT_URL}/test-results/${TEST_RUN_ID}/${TEST_TYPE}/test-report.yml"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Upload the test report manifest
+      uses: ./.github/actions/upload-to-s3
+      with:
+        source-path: test-report.yml
+        bucket: ${{ inputs.artifact-bucket-name }}
+        path: ${{ steps.report.outputs.upload-path }}
+        aws-account: ${{ inputs.aws-account-public }}
+        role-name: opensearch-test

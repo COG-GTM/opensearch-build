@@ -1,0 +1,157 @@
+---
+name: 'Upload Artifacts'
+description: >-
+  Port of the shared-library step uploadArtifacts() (opensearch-build-libraries vars/uploadArtifacts.groovy). Uploads
+  <distribution>/builds and <distribution>/dist to the staging artifact bucket and, when the build is not a feature
+  build, promotes the min tarball and the package into the release-candidates prefix of the production bucket using a
+  second role. Both roles are assumed through GitHub OIDC, so the calling job needs `permissions: id-token: write`.
+
+inputs:
+  build-manifest:
+    description: 'Path to the build manifest'
+    required: true
+  job-name:
+    description: 'Artifact path prefix, equivalent to the Jenkins JOB_NAME'
+    required: false
+    default: 'distribution-build-opensearch'
+  build-number:
+    description: 'Build number, equivalent to the Jenkins BUILD_NUMBER'
+    required: true
+  build-feature:
+    description: 'Replaces build.version in the artifact path for feature builds. Empty means a regular build.'
+    required: false
+    default: ''
+  public-artifact-url:
+    description: 'Public artifact URL used to print the resulting manifest URLs'
+    required: false
+    default: 'https://ci.opensearch.org/ci/dbc'
+  artifact-bucket-name:
+    description: 'Staging artifact bucket (Jenkins: op://opensearch-release-secrets/aws-resource-arns/jenkins-artifact-bucket-name)'
+    required: true
+  aws-account-public:
+    description: 'AWS account holding the staging bucket (Jenkins: jenkins-aws-account-public)'
+    required: true
+  artifact-production-bucket-name:
+    description: 'Production artifact bucket used for release candidates'
+    required: false
+    default: ''
+  aws-account-artifact:
+    description: 'AWS account holding the production bucket (Jenkins: jenkins-aws-production-account)'
+    required: false
+    default: ''
+  artifact-promotion-role-name:
+    description: 'Role assumed to write into the production bucket (Jenkins: jenkins-artifact-promotion-role)'
+    required: false
+    default: ''
+
+outputs:
+  build-manifest-url:
+    description: 'URL of the uploaded build manifest, the value distribution-build.jenkinsfile passes to the downstream test jobs'
+    value: ${{ steps.info.outputs.build-manifest-url }}
+  index-file-root:
+    description: 'Index file path used by upload-index-file'
+    value: ${{ steps.info.outputs.index-file-root }}
+  artifact-root:
+    description: 'Artifact root path inside the bucket'
+    value: ${{ steps.info.outputs.artifact-root }}
+  artifact-url:
+    description: 'BuildManifest.getArtifactUrl(), the tarball URL the docker build stage consumes'
+    value: ${{ steps.info.outputs.artifact-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Read the build manifest
+      id: info
+      shell: bash
+      env:
+        BUILD_MANIFEST: ${{ inputs.build-manifest }}
+        JOB_NAME: ${{ inputs.job-name }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+        PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+        BUILD_FEATURE: ${{ inputs.build-feature }}
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        ARGS=('build-manifest-info' "${BUILD_MANIFEST}"
+              '--job-name' "${JOB_NAME}"
+              '--build-number' "${BUILD_NUMBER}"
+              '--public-artifact-url' "${PUBLIC_ARTIFACT_URL}")
+        if [ -n "${BUILD_FEATURE}" ]; then ARGS+=('--build-feature' "${BUILD_FEATURE}"); fi
+        python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" "${ARGS[@]}" | tee -a "$GITHUB_OUTPUT" > manifest-info.txt
+        ROOT_URL=$(grep '^artifact-root-url=' manifest-info.txt | cut -d= -f2-)
+        FILENAME=$(grep '^filename=' manifest-info.txt | cut -d= -f2)
+        PACKAGE_NAME=$(grep '^package-name=' manifest-info.txt | cut -d= -f2)
+        {
+          echo "build-manifest-url=${ROOT_URL}/builds/${FILENAME}/manifest.yml"
+          echo "bundle-manifest-url=${ROOT_URL}/dist/${FILENAME}/manifest.yml"
+          echo "artifact-url=${ROOT_URL}/dist/${FILENAME}/${PACKAGE_NAME}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Upload the build artifacts to the staging bucket
+      uses: ./.github/actions/upload-to-s3
+      with:
+        source-path: ${{ steps.info.outputs.distribution }}/builds
+        bucket: ${{ inputs.artifact-bucket-name }}
+        path: ${{ steps.info.outputs.artifact-root }}/builds
+        aws-account: ${{ inputs.aws-account-public }}
+        role-name: opensearch-bundle
+
+    - name: Upload the dist artifacts to the staging bucket
+      uses: ./.github/actions/upload-to-s3
+      with:
+        source-path: ${{ steps.info.outputs.distribution }}/dist
+        bucket: ${{ inputs.artifact-bucket-name }}
+        path: ${{ steps.info.outputs.artifact-root }}/dist
+        aws-account: ${{ inputs.aws-account-public }}
+        role-name: opensearch-bundle
+
+    - name: Assume the artifact promotion role
+      # uploadArtifacts.groovy:357 - feature builds skip the release candidate bucket.
+      if: ${{ inputs.build-feature == '' && inputs.artifact-production-bucket-name != '' && inputs.aws-account-artifact != '' && inputs.artifact-promotion-role-name != '' }}
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.aws-account-artifact }}:role/${{ inputs.artifact-promotion-role-name }}
+        role-duration-seconds: 900
+        role-session-name: github-actions-promotion-session
+        aws-region: us-east-1
+
+    - name: Promote the release candidate artifacts
+      if: ${{ inputs.build-feature == '' && inputs.artifact-production-bucket-name != '' && inputs.aws-account-artifact != '' && inputs.artifact-promotion-role-name != '' }}
+      shell: bash
+      env:
+        DISTRIBUTION: ${{ steps.info.outputs.distribution }}
+        FILENAME: ${{ steps.info.outputs.filename }}
+        VERSION: ${{ steps.info.outputs.version }}
+        BUCKET: ${{ inputs.artifact-production-bucket-name }}
+        MIN_ARTIFACT: ${{ steps.info.outputs.min-artifact }}
+        PACKAGE_NAME: ${{ steps.info.outputs.package-name }}
+      run: |
+        set -euo pipefail
+        # uploadArtifacts.groovy:60-64 interpolated getMinArtifact() unconditionally; it is empty when the build
+        # manifest has no core component (a COMPONENT_NAME dispatch), which makes the copy below a directory copy that
+        # the CLI rejects with a confusing message after the artifacts have already been uploaded.
+        if [ -z "${MIN_ARTIFACT}" ]; then
+          echo "::error::The build manifest has no ${DISTRIBUTION} core artifact, so there is nothing to promote to the release-candidates prefix. Dispatch a full build, or leave the production bucket secrets unset for component builds."
+          exit 1
+        fi
+        echo "Uploading to s3://${BUCKET}/release-candidates"
+        aws s3 cp --quiet "${DISTRIBUTION}/builds/${FILENAME}/${MIN_ARTIFACT}" \
+          "s3://${BUCKET}/release-candidates/core/${FILENAME}/${VERSION}/"
+        aws s3 cp --quiet "${DISTRIBUTION}/dist/${FILENAME}/${PACKAGE_NAME}" \
+          "s3://${BUCKET}/release-candidates/bundle/${FILENAME}/${VERSION}/"
+
+    - name: Publish the manifest URLs
+      shell: bash
+      env:
+        BUILD_MANIFEST_URL: ${{ steps.info.outputs.build-manifest-url }}
+        BUNDLE_MANIFEST_URL: ${{ steps.info.outputs.bundle-manifest-url }}
+      run: |
+        set -euo pipefail
+        # Jenkins collected these two URLs with lib.jenkins.Messages so the notification job could render them;
+        # the GitHub Actions equivalent is the job summary.
+        {
+          echo '### Artifacts'
+          echo "${BUILD_MANIFEST_URL}"
+          echo "${BUNDLE_MANIFEST_URL}"
+        } >> "$GITHUB_STEP_SUMMARY"

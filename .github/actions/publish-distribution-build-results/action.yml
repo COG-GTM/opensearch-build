@@ -1,0 +1,94 @@
+---
+name: 'Publish Distribution Build Results'
+description: >-
+  Port of the shared-library step publishDistributionBuildResults() (opensearch-build-libraries
+  vars/publishDistributionBuildResults.groovy) together with the buildMessage() calls that feed it
+  (distribution-build.jenkinsfile:1016-1017). Jenkins scraped the pipeline log through the Jenkins API for
+  'Error building' and 'Successfully built'; GitHub Actions has no equivalent log-scraping step inside the run, so the
+  build-manifest action tees ./build.sh output into a log file which the build jobs upload as an artifact and this
+  action reads back.
+
+inputs:
+  input-manifest:
+    description: 'Relative path to the input manifest'
+    required: true
+  build-logs-directory:
+    description: 'Directory containing the build logs downloaded from the build jobs'
+    required: false
+    default: 'build-logs'
+  build-number:
+    description: 'Build number, equivalent to the Jenkins BUILD_NUMBER'
+    required: true
+  build-url:
+    description: 'URL of this run, the equivalent of the Jenkins RUN_DISPLAY_URL'
+    required: true
+  build-start-time:
+    description: 'Run start time in epoch milliseconds'
+    required: true
+  rc-number:
+    description: 'RC number. 0 means the build is not a release candidate.'
+    required: false
+    default: '0'
+  component-category:
+    description: 'OpenSearch or OpenSearch Dashboards'
+    required: false
+    default: 'OpenSearch'
+  overall-build-result:
+    description: 'Result of the build jobs, the equivalent of currentBuild.result'
+    required: true
+  metrics-host-url:
+    description: 'Metrics cluster endpoint'
+    required: true
+  metrics-host-account:
+    description: 'AWS account of the metrics cluster'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Generate the build result records
+      id: records
+      shell: bash
+      env:
+        BUILD_LOGS_DIRECTORY: ${{ inputs.build-logs-directory }}
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+        BUILD_URL: ${{ inputs.build-url }}
+        BUILD_START_TIME: ${{ inputs.build-start-time }}
+        RC_NUMBER: ${{ inputs.rc-number }}
+        COMPONENT_CATEGORY: ${{ inputs.component-category }}
+        OVERALL_BUILD_RESULT: ${{ inputs.overall-build-result }}
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        # The `${arr[@]+...}` guard keeps an empty array expandable under `set -u` on the bash 4.2 the AL2 based CI
+        # images ship.
+        LOG_ARGS=()
+        LOG_COUNT=0
+        while IFS= read -r log; do
+          LOG_ARGS+=('--build-log' "${log}")
+          LOG_COUNT=$((LOG_COUNT + 1))
+        done < <(find "${BUILD_LOGS_DIRECTORY}" -type f -name '*.log' 2>/dev/null || true)
+        if [ "${LOG_COUNT}" -eq 0 ]; then
+          echo "::warning::No build logs found under ${BUILD_LOGS_DIRECTORY}; no component results can be derived."
+        fi
+        python3 "${GITHUB_WORKSPACE}/.github/scripts/metrics_records.py" distribution-build-results \
+          --input-manifest "${INPUT_MANIFEST}" \
+          ${LOG_ARGS[@]+"${LOG_ARGS[@]}"} \
+          --build-number "${BUILD_NUMBER}" \
+          --build-url "${BUILD_URL}" \
+          --build-start-time "${BUILD_START_TIME}" \
+          --rc-number "${RC_NUMBER}" \
+          --component-category "${COMPONENT_CATEGORY}" \
+          --overall-build-result "${OVERALL_BUILD_RESULT}" \
+          --output test-records.json | tee -a "$GITHUB_OUTPUT"
+
+    - name: Index the build result records
+      uses: ./.github/actions/index-metrics-records
+      with:
+        records-file: test-records.json
+        index: ${{ steps.records.outputs.index }}
+        alias: ${{ steps.records.outputs.alias }}
+        mapping-file: .github/mappings/opensearch-distribution-build-results.json
+        metrics-host-url: ${{ inputs.metrics-host-url }}
+        metrics-host-account: ${{ inputs.metrics-host-account }}

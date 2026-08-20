@@ -1,0 +1,227 @@
+---
+# Reusable equivalent of the two-agent package stages of jenkins/opensearch/distribution-build.jenkinsfile:
+# build-and-test-linux-x64-rpm (:322-440), build-and-test-linux-x64-deb (:441-559),
+# build-and-test-linux-arm64-rpm (:640-758) and build-and-test-linux-arm64-deb (:759-879).
+# Each of those was a `stages { }` block with an outer `agent { label ... }` and two nested stages: buildArchive() on
+# the tar image, then archiveAssembleUpload() on the rpm/deb image, handing the builds over with stash/unstash.
+name: Distribution Build (package)
+
+on:
+  workflow_call:
+    inputs:
+      input-manifest:
+        description: 'Input manifest under manifests/, e.g. 3.0.0/opensearch-3.0.0.yml'
+        required: true
+        type: string
+      platform:
+        required: true
+        type: string
+      architecture:
+        required: true
+        type: string
+      distribution:
+        description: 'rpm or deb'
+        required: true
+        type: string
+      runs-on:
+        description: 'Runner label replacing the Jenkins agent label (distribution-build.jenkinsfile:30-32)'
+        required: true
+        type: string
+      image:
+        description: 'Container image of the build stage, the linux tar image'
+        required: true
+        type: string
+      args:
+        required: false
+        default: ''
+        type: string
+      assemble-image:
+        description: 'Container image of the assemble stage, the rpm/deb image'
+        required: true
+        type: string
+      assemble-args:
+        required: false
+        default: ''
+        type: string
+      component-name:
+        required: false
+        default: ''
+        type: string
+      job-name:
+        required: false
+        default: 'distribution-build-opensearch'
+        type: string
+      continue-on-error:
+        required: false
+        default: true
+        type: boolean
+      skip-artifact-check:
+        required: false
+        default: false
+        type: boolean
+      incremental:
+        required: false
+        default: true
+        type: boolean
+      previous-build-id:
+        required: false
+        default: 'latest'
+        type: string
+      parallel:
+        required: false
+        default: '4'
+        type: string
+      update-latest-url:
+        required: false
+        default: true
+        type: boolean
+      sign-rpm:
+        description: 'Sign the rpm packages during assemble (assembleManifest signs when signArtifacts is requested)'
+        required: false
+        default: false
+        type: boolean
+      rc-number:
+        required: false
+        default: '0'
+        type: string
+      test-manifest:
+        required: false
+        default: ''
+        type: string
+      test-platform:
+        required: false
+        default: ''
+        type: string
+      test-distribution:
+        required: false
+        default: ''
+        type: string
+      integ-test-workflow:
+        required: false
+        default: 'integ-test.yml'
+        type: string
+    outputs:
+      artifact-url:
+        description: 'Public URL of the built package'
+        value: ${{ jobs.assemble.outputs.artifact-url }}
+      build-manifest-url:
+        description: 'Public URL of the generated build manifest'
+        value: ${{ jobs.assemble.outputs.build-manifest-url }}
+
+permissions: {}
+
+# The caller passes the artifact bucket, AWS account and signing secrets with `secrets: inherit`, the equivalent of the
+# Jenkins withSecrets()/withCredentials() blocks. See docs/jenkins-to-actions.md for the full list.
+jobs:
+  build-archive:
+    name: build-archive-${{ inputs.platform }}-${{ inputs.architecture }}-${{ inputs.distribution }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 240
+    container:
+      image: ${{ inputs.image }}
+      options: ${{ inputs.args }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Build the archive
+        uses: ./.github/actions/build-archive
+        with:
+          input-manifest: manifests/${{ inputs.input-manifest }}
+          component-name: ${{ inputs.component-name }}
+          platform: ${{ inputs.platform }}
+          architecture: ${{ inputs.architecture }}
+          distribution: ${{ inputs.distribution }}
+          continue-on-error: ${{ inputs.continue-on-error }}
+          skip-artifact-check: ${{ inputs.skip-artifact-check }}
+          incremental: ${{ inputs.incremental }}
+          previous-build-id: ${{ inputs.previous-build-id }}
+          parallel: ${{ inputs.parallel }}
+          job-name: ${{ inputs.job-name }}
+          build-number: ${{ github.run_number }}
+          artifact-bucket-name: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          aws-account-public: ${{ secrets.AWS_ACCOUNT_PUBLIC }}
+          stash-name: builds-${{ inputs.platform }}-${{ inputs.architecture }}-${{ inputs.distribution }}
+
+      - name: Upload the build log
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: build-log-${{ inputs.platform }}-${{ inputs.architecture }}-${{ inputs.distribution }}
+          path: build-${{ inputs.platform }}-${{ inputs.architecture }}-${{ inputs.distribution }}.log
+          if-no-files-found: warn
+          retention-days: 5
+
+  assemble:
+    name: assemble-archive-and-test-${{ inputs.platform }}-${{ inputs.architecture }}-${{ inputs.distribution }}
+    needs: build-archive
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 240
+    container:
+      image: ${{ inputs.assemble-image }}
+      options: ${{ inputs.assemble-args }}
+    permissions:
+      contents: read
+      id-token: write
+      # trigger-downstream-tests runs `gh workflow run`, the equivalent of the Jenkins `build job:` step.
+      actions: write
+    outputs:
+      artifact-url: ${{ steps.assemble.outputs.artifact-url }}
+      build-manifest-url: ${{ steps.assemble.outputs.build-manifest-url }}
+    # Jenkins wrapped the assemble stage in withSecrets(secrets: [rpm-signing/*]) (signArtifacts.groovy). A composite
+    # action cannot read secrets itself, so the seven rpm signing values are exported here, at the job level, where the
+    # sign-artifacts steps inherit them. Unset secrets stay empty and sign-artifacts fails loudly instead of signing
+    # with the wrong key - see docs/jenkins-to-actions.md for what has to be configured.
+    env:
+      RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN }}
+      RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+      RPM_RELEASE_SIGNING_KEY_ID: ${{ secrets.RPM_RELEASE_SIGNING_KEY_ID }}
+      RPM_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_SIGNING_PASSPHRASE_SECRETS_ARN }}
+      RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+      RPM_SIGNING_KEY_ID: ${{ secrets.RPM_SIGNING_KEY_ID }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Assemble and upload the package
+        id: assemble
+        uses: ./.github/actions/archive-assemble-upload
+        with:
+          input-manifest: manifests/${{ inputs.input-manifest }}
+          distribution: ${{ inputs.distribution }}
+          stash-name: builds-${{ inputs.platform }}-${{ inputs.architecture }}-${{ inputs.distribution }}
+          job-name: ${{ inputs.job-name }}
+          build-number: ${{ github.run_number }}
+          artifact-bucket-name: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          aws-account-public: ${{ secrets.AWS_ACCOUNT_PUBLIC }}
+          artifact-production-bucket-name: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+          aws-account-artifact: ${{ secrets.AWS_ACCOUNT_ARTIFACT }}
+          artifact-promotion-role-name: ${{ secrets.ARTIFACT_PROMOTION_ROLE_NAME }}
+          sign-rpm: ${{ inputs.sign-rpm }}
+          rpm-signing-account: ${{ secrets.RPM_SIGNING_ACCOUNT }}
+
+      - name: Upload the index file
+        # post { success } / post { unstable } of the assemble stage (distribution-build.jenkinsfile:413-432).
+        if: success() && inputs.update-latest-url
+        uses: ./.github/actions/upload-index-file
+        with:
+          index-file-path: ${{ steps.assemble.outputs.index-file-root }}
+          build-number: ${{ github.run_number }}
+          artifact-bucket-name: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          aws-account-public: ${{ secrets.AWS_ACCOUNT_PUBLIC }}
+
+      - name: Trigger the downstream tests
+        if: success()
+        uses: ./.github/actions/trigger-downstream-tests
+        with:
+          integ-test-workflow: ${{ inputs.integ-test-workflow }}
+          test-manifest: ${{ inputs.test-manifest }}
+          build-manifest-url: ${{ steps.assemble.outputs.build-manifest-url }}
+          platform: ${{ inputs.platform }}
+          distribution: ${{ inputs.distribution }}
+          test-platform: ${{ inputs.test-platform }}
+          test-distribution: ${{ inputs.test-distribution }}
+          rc-number: ${{ inputs.rc-number }}
+          distribution-build-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}

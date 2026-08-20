@@ -1,0 +1,91 @@
+---
+name: 'Assemble and Upload'
+description: >-
+  Port of the shared-library step assembleUpload() (opensearch-build-libraries vars/assembleUpload.groovy), which is
+  assembleManifest() followed by uploadArtifacts().
+
+inputs:
+  build-manifest:
+    description: 'Path to the build manifest'
+    required: true
+  job-name:
+    description: 'Artifact path prefix, equivalent to the Jenkins JOB_NAME'
+    required: false
+    default: 'distribution-build-opensearch'
+  build-number:
+    description: 'Build number, equivalent to the Jenkins BUILD_NUMBER'
+    required: true
+  build-feature:
+    description: 'Replaces build.version in the artifact path for feature builds'
+    required: false
+    default: ''
+  public-artifact-url:
+    description: 'Public artifact URL'
+    required: false
+    default: 'https://ci.opensearch.org/ci/dbc'
+  artifact-bucket-name:
+    description: 'Staging artifact bucket'
+    required: true
+  aws-account-public:
+    description: 'AWS account holding the staging bucket'
+    required: true
+  artifact-production-bucket-name:
+    description: 'Production artifact bucket used for release candidates'
+    required: false
+    default: ''
+  aws-account-artifact:
+    description: 'AWS account holding the production bucket'
+    required: false
+    default: ''
+  artifact-promotion-role-name:
+    description: 'Role assumed to write into the production bucket'
+    required: false
+    default: ''
+  sign-rpm:
+    description: 'Sign rpm packages during assemble'
+    required: false
+    default: 'false'
+  rpm-signing-account:
+    description: 'AWS account holding the rpm signing role'
+    required: false
+    default: ''
+
+outputs:
+  build-manifest-url:
+    description: 'URL of the uploaded build manifest'
+    value: ${{ steps.upload.outputs.build-manifest-url }}
+  index-file-root:
+    description: 'Index file path used by upload-index-file'
+    value: ${{ steps.upload.outputs.index-file-root }}
+  artifact-url:
+    description: 'BuildManifest.getArtifactUrl(), the tarball URL the docker build stage consumes'
+    value: ${{ steps.upload.outputs.artifact-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Assemble the distribution
+      uses: ./.github/actions/assemble-manifest
+      with:
+        build-manifest: ${{ inputs.build-manifest }}
+        job-name: ${{ inputs.job-name }}
+        build-number: ${{ inputs.build-number }}
+        build-feature: ${{ inputs.build-feature }}
+        public-artifact-url: ${{ inputs.public-artifact-url }}
+        sign-rpm: ${{ inputs.sign-rpm }}
+        rpm-signing-account: ${{ inputs.rpm-signing-account }}
+
+    - name: Upload the artifacts
+      id: upload
+      uses: ./.github/actions/upload-artifacts
+      with:
+        build-manifest: ${{ inputs.build-manifest }}
+        job-name: ${{ inputs.job-name }}
+        build-number: ${{ inputs.build-number }}
+        build-feature: ${{ inputs.build-feature }}
+        public-artifact-url: ${{ inputs.public-artifact-url }}
+        artifact-bucket-name: ${{ inputs.artifact-bucket-name }}
+        aws-account-public: ${{ inputs.aws-account-public }}
+        artifact-production-bucket-name: ${{ inputs.artifact-production-bucket-name }}
+        aws-account-artifact: ${{ inputs.aws-account-artifact }}
+        artifact-promotion-role-name: ${{ inputs.artifact-promotion-role-name }}

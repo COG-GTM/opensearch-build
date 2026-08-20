@@ -1,0 +1,71 @@
+---
+name: 'Upload to S3'
+description: >-
+  Port of the shared-library step uploadToS3() (opensearch-build-libraries vars/uploadToS3.groovy). Jenkins wrapped the
+  upload in withAWS(role: 'opensearch-bundle', roleAccount: AWS_ACCOUNT_PUBLIC) plus the s3Upload() step; here the role
+  is assumed through GitHub OIDC and the copy is done with the AWS CLI. The calling job needs `permissions: id-token: write`.
+
+inputs:
+  source-path:
+    description: 'Local file or directory to upload'
+    required: true
+  bucket:
+    description: 'Target S3 bucket name (Jenkins read this from op://opensearch-release-secrets/aws-resource-arns/jenkins-artifact-bucket-name)'
+    required: true
+  path:
+    description: 'Key prefix inside the bucket'
+    required: true
+  aws-account:
+    description: 'AWS account that owns the role to assume (Jenkins: op://opensearch-release-secrets/aws-accounts/jenkins-aws-account-public)'
+    required: true
+  role-name:
+    description: 'Name of the role to assume in that account'
+    required: false
+    default: 'opensearch-bundle'
+  aws-region:
+    description: 'AWS region'
+    required: false
+    default: 'us-east-1'
+  tolerate-missing:
+    description: >-
+      Skip the upload instead of failing when source-path does not exist. Only uploadTestResults() needs this, because
+      it ran from the `finally` of every Jenkins branch; for artifact and index uploads a missing source means the
+      build produced nothing and has to fail.
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Assume the artifact upload role
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.aws-account }}:role/${{ inputs.role-name }}
+        role-duration-seconds: 900
+        role-session-name: github-actions-upload-session
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Upload to S3
+      shell: bash
+      env:
+        SOURCE: ${{ inputs.source-path }}
+        BUCKET: ${{ inputs.bucket }}
+        UPLOAD_PATH: ${{ inputs.path }}
+        TOLERATE_MISSING: ${{ inputs.tolerate-missing }}
+      run: |
+        set -euo pipefail
+        if [ ! -e "${SOURCE}" ]; then
+          if [ "${TOLERATE_MISSING}" = 'true' ]; then
+            echo "::warning::${SOURCE} does not exist, nothing to upload."
+            exit 0
+          fi
+          echo "::error::${SOURCE} does not exist, nothing to upload."
+          exit 1
+        fi
+        DESTINATION="s3://${BUCKET}/${UPLOAD_PATH}"
+        echo "Uploading ${SOURCE} to ${DESTINATION}"
+        if [ -d "${SOURCE}" ]; then
+          aws s3 cp --recursive --quiet "${SOURCE}" "${DESTINATION}/"
+        else
+          aws s3 cp --quiet "${SOURCE}" "${DESTINATION}"
+        fi

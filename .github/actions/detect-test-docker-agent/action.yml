@@ -1,0 +1,49 @@
+---
+name: 'Detect Test Docker Agent'
+description: >-
+  Port of the shared-library step detectTestDockerAgent() (opensearch-build-libraries
+  vars/detectTestDockerAgent.groovy). Identical to detect-docker-agent except that the schema-version cut-over for the
+  per platform/distribution `ci.images` map is 1.1 instead of 1.2. Called from integ-test.jenkinsfile:100-103.
+
+inputs:
+  test-manifest:
+    description: 'Path to the test manifest, e.g. manifests/3.0.0/opensearch-3.0.0-test.yml'
+    required: true
+  platform:
+    description: 'Platform the image is looked up for (schema-version >= 1.1 manifests)'
+    required: false
+    default: 'linux'
+  distribution:
+    description: 'Distribution the image is looked up for (schema-version >= 1.1 manifests)'
+    required: false
+    default: 'tar'
+
+outputs:
+  image:
+    description: 'CI runner image used for tests'
+    value: ${{ steps.detect.outputs.image }}
+  args:
+    description: 'Docker arguments the Jenkins test agent used'
+    value: ${{ steps.detect.outputs.args }}
+  java-version:
+    description: 'Java version parsed out of the image arguments, e.g. openjdk-21'
+    value: ${{ steps.detect.outputs.java-version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect docker agent from test manifest
+      id: detect
+      shell: bash
+      env:
+        TEST_MANIFEST: ${{ inputs.test-manifest }}
+        PLATFORM: ${{ inputs.platform }}
+        DISTRIBUTION: ${{ inputs.distribution }}
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" ci-image \
+          "${TEST_MANIFEST}" \
+          --kind test \
+          --platform "${PLATFORM}" \
+          --distribution "${DISTRIBUTION}" | tee -a "$GITHUB_OUTPUT"

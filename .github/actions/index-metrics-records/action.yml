@@ -1,0 +1,114 @@
+---
+name: 'Index Metrics Records'
+description: >-
+  Port of the indexFailedTestData()/indexTestFailuresData() helpers shared by
+  publishDistributionBuildResults.groovy and publishIntegTestResults.groovy: create the monthly index from the mapping
+  in .github/mappings/ if it does not exist yet, point the stable alias at it, then bulk index the ndjson records. The
+  request signing is unchanged (curl --aws-sigv4 aws:amz:us-east-1:es), only the credentials now come from an OIDC role
+  assumption instead of the Jenkins withAWS wrapper, so the calling job needs `permissions: id-token: write`.
+  Like Jenkins, a failed bulk request is reported but does not fail the job; a failed index creation does.
+
+inputs:
+  records-file:
+    description: 'ndjson file produced by .github/scripts/metrics_records.py'
+    required: true
+  index:
+    description: 'Monthly index name, e.g. opensearch-integration-test-results-08-2026'
+    required: true
+  alias:
+    description: 'Stable alias the index is added to'
+    required: true
+  mapping-file:
+    description: 'Index mapping to create the index with'
+    required: true
+  metrics-host-url:
+    description: 'Metrics cluster endpoint (Jenkins: op://opensearch-release-secrets/metrics-cluster/jenkins-health-metrics-cluster-endpoint)'
+    required: true
+  metrics-host-account:
+    description: 'AWS account of the metrics cluster (Jenkins: jenkins-health-metrics-account-number)'
+    required: true
+  metrics-role-name:
+    description: 'Role assumed to reach the metrics cluster'
+    required: false
+    default: 'OpenSearchJenkinsAccessRole'
+  aws-region:
+    description: 'Region used for SigV4 signing'
+    required: false
+    default: 'us-east-1'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Assume the metrics cluster role
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.metrics-host-account }}:role/${{ inputs.metrics-role-name }}
+        role-duration-seconds: 900
+        role-session-name: github-actions-metrics-session
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Index the records
+      shell: bash
+      env:
+        METRICS_HOST_URL: ${{ inputs.metrics-host-url }}
+        INDEX: ${{ inputs.index }}
+        ALIAS: ${{ inputs.alias }}
+        MAPPING_FILE: ${{ inputs.mapping-file }}
+        RECORDS_FILE: ${{ inputs.records-file }}
+        REGION: ${{ inputs.aws-region }}
+      run: |
+        set -uo pipefail
+        set +x
+        # The signing credentials go into a 0600 curl config file instead of the command line, so they never appear in
+        # the process table of a runner that is also executing build and test code.
+        CURL_CONFIG=$(mktemp)
+        chmod 600 "${CURL_CONFIG}"
+        trap 'rm -f "${CURL_CONFIG}"' EXIT
+        {
+          echo "aws-sigv4 = \"aws:amz:${REGION}:es\""
+          echo "user = \"${AWS_ACCESS_KEY_ID}:${AWS_SECRET_ACCESS_KEY}\""
+          echo "header = \"x-amz-security-token:${AWS_SESSION_TOKEN}\""
+        } > "${CURL_CONFIG}"
+        SIGV4=(--config "${CURL_CONFIG}")
+
+        # `-w '%{http_code}'` instead of piping the headers into `grep -q`, which can kill curl with SIGPIPE and make
+        # the pipeline status non-zero under `pipefail` even though the index exists.
+        INDEX_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -I "${METRICS_HOST_URL}/${INDEX}" "${SIGV4[@]}")
+        if [ "${INDEX_STATUS}" = '200' ]; then
+          echo "Index ${INDEX} already exists. Indexing results."
+        else
+          echo "Index ${INDEX} does not exist. Creating..."
+          CREATE_RESPONSE=$(curl -s -XPUT "${METRICS_HOST_URL}/${INDEX}" "${SIGV4[@]}" \
+            -H 'Content-Type: application/json' --data-binary "@${MAPPING_FILE}")
+          case "${CREATE_RESPONSE}" in
+            *'"acknowledged":true'*)
+              echo 'Index created successfully. Updating alias...'
+              ALIAS_RESPONSE=$(curl -s -XPOST "${METRICS_HOST_URL}/_aliases" "${SIGV4[@]}" \
+                -H 'Content-Type: application/json' \
+                -d "{\"actions\":[{\"add\":{\"index\":\"${INDEX}\",\"alias\":\"${ALIAS}\"}}]}")
+              case "${ALIAS_RESPONSE}" in
+                *'"acknowledged":true'*) echo 'Alias updated successfully.' ;;
+                *) echo "Failed to update alias. Error message: ${ALIAS_RESPONSE}" ;;
+              esac
+              ;;
+            *)
+              echo "Failed to create index. Error message: ${CREATE_RESPONSE}"
+              exit 1
+              ;;
+          esac
+        fi
+
+        if [ -s "${RECORDS_FILE}" ]; then
+          BULK_HTTP_CODE=$(curl -s -o bulk-response.json -w '%{http_code}' -XPOST "${METRICS_HOST_URL}/${INDEX}/_bulk" \
+            "${SIGV4[@]}" -H 'Content-Type: application/x-ndjson' --data-binary "@${RECORDS_FILE}")
+          echo "Bulk indexing response code: ${BULK_HTTP_CODE}"
+          if [ "${BULK_HTTP_CODE}" -lt 200 ] || [ "${BULK_HTTP_CODE}" -gt 299 ]; then
+            echo "::warning::Bulk indexing failed with HTTP ${BULK_HTTP_CODE}"
+          # A _bulk request answers 200 even when individual documents were rejected, so the response body decides.
+          elif grep -q '"errors":[[:space:]]*true' bulk-response.json; then
+            echo "::warning::Bulk indexing rejected at least one document: $(head -c 2000 bulk-response.json)"
+          fi
+          rm -f bulk-response.json
+        else
+          echo "::warning::${RECORDS_FILE} does not exist or is empty. No records to index."
+        fi

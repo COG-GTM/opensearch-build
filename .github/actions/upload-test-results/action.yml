@@ -1,0 +1,61 @@
+---
+name: 'Upload Test Results'
+description: >-
+  Port of the shared-library step uploadTestResults() (opensearch-build-libraries vars/uploadTestResults.groovy).
+  Uploads the test-results directory of one component run under the artifact root of the build being tested.
+
+inputs:
+  build-manifest:
+    description: 'Path to the downloaded build manifest'
+    required: true
+  job-name:
+    description: 'Test job name used as the artifact path prefix, the Jenkins JOB_NAME (integ-test)'
+    required: false
+    default: 'integ-test'
+  build-number:
+    description: >-
+      Extra path segment appended to `<artifact-root>/test-results`, as uploadTestResults(buildNumber:) did. Leave it
+      empty when the results were produced by ./test.sh, which already nests them under the test run id; the integ-test
+      pipeline did.
+    required: false
+    default: ''
+  artifact-bucket-name:
+    description: 'Staging artifact bucket'
+    required: true
+  aws-account-public:
+    description: 'AWS account holding the staging bucket'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve the upload path
+      id: path
+      shell: bash
+      env:
+        BUILD_MANIFEST: ${{ inputs.build-manifest }}
+        JOB_NAME: ${{ inputs.job-name }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+        BUILD_ID=$(python3 -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['build']['id'])" "${BUILD_MANIFEST}")
+        INFO=$(python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" build-manifest-info \
+          "${BUILD_MANIFEST}" --job-name "${JOB_NAME}" --build-number "${BUILD_ID}")
+        ARTIFACT_ROOT=$(echo "${INFO}" | grep '^artifact-root=' | cut -d= -f2-)
+        UPLOAD_PATH="${ARTIFACT_ROOT}/test-results"
+        if [ -n "${BUILD_NUMBER}" ]; then
+          UPLOAD_PATH="${UPLOAD_PATH}/${BUILD_NUMBER}"
+        fi
+        echo "upload-path=${UPLOAD_PATH}" >> "$GITHUB_OUTPUT"
+
+    - name: Upload the test results
+      uses: ./.github/actions/upload-to-s3
+      with:
+        source-path: test-results
+        # The Jenkins step ran from the `finally` of every test branch, so the directory may not exist.
+        tolerate-missing: 'true'
+        bucket: ${{ inputs.artifact-bucket-name }}
+        path: ${{ steps.path.outputs.upload-path }}
+        aws-account: ${{ inputs.aws-account-public }}
+        role-name: opensearch-test
