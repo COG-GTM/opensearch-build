@@ -8,9 +8,18 @@ they load, the Groovy regression suite under `tests/jenkins/`, and the lessons f
 migration in [PR #1](https://github.com/COG-GTM/opensearch-build/pull/1)
 (`distribution-build` + `integ-test`, 24 composite actions, `docs/jenkins-to-actions.md`).
 
-Every claim below is grounded in a file path (line numbers refer to the current `main` of this fork
-and shared-library tag `jenkins@12.0.0`–`13.7.1` as pinned by the pipelines). Where something is an
-inference rather than a verified fact, it is explicitly marked **(inferred)**.
+Every claim below is grounded in a file path. Line numbers refer to commit `4372bf7` of this fork
+(the `main` HEAD this plan was written against) and to the shared-library tags
+`jenkins@12.0.0`–`13.7.1` as pinned by the pipelines; resolve citations against that commit, since
+they will drift as the Jenkinsfiles and manifests roll forward. Where something is an inference
+rather than a verified fact, it is explicitly marked **(inferred)**.
+
+GitHub-platform limits quoted in this document (6 h hosted-job cap, 5-day self-hosted job cap,
+35-day workflow-run cap, 256-job matrix cap, 10 `workflow_dispatch` inputs, environment-approval
+and schedule-deactivation windows, retention ceilings) are taken from GitHub's published
+documentation as of the writing date; they are platform policy, not repo facts, and must be
+re-verified against [GitHub's usage-limit docs](https://docs.github.com/en/actions/reference/limits)
+at implementation time.
 
 Scope notes:
 
