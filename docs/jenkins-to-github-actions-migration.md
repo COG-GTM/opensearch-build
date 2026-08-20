@@ -318,11 +318,13 @@ Legend: **(a)** runner strategy · **(b)** secret management · **(c)** shared-l
 
 ### Not to be migrated
 
-`jenkins/legacy/build.ci.backups/**` (9 files: docker ×4, smoke-test, packer-build, promote-docker-ecr, publish-to-maven, release-manifest-commit-lock, release-notes-check, validate-artifacts) are backups of pipelines that already exist in their current form elsewhere in `jenkins/`. They should be confirmed dead and deleted rather than migrated.
+`jenkins/legacy/build.ci.backups/**` (11 files: docker ×4, smoke-test, packer-build, promote-docker-ecr, publish-to-maven, release-manifest-commit-lock, release-notes-check, validate-artifacts) are backups of pipelines that already exist in their current form elsewhere in `jenkins/`. They should be confirmed dead and deleted rather than migrated.
 
 ### Where the decisions bite hardest
 
-- **(a) runner strategy** blocks 26 pipelines, including everything that produces a release artifact. It is the critical path.
-- **(c) shared library** blocks 22 pipelines and is the only blocker that cannot be resolved inside this repository.
-- **(e) artifact identity** blocks 19 pipelines and, unlike the others, is externally visible: it fixes the `ci.opensearch.org` URL layout.
-- **(b) secrets** blocks 20 pipelines but is mostly mechanical once the pattern is chosen; the exception is the production promotion role.
+Of the 45 live pipelines (56 files minus the 11 backups), 40 are blocked on at least one decision and 5 are ready:
+
+- **(b) secrets** blocks 24 pipelines — the widest, but mostly mechanical once the pattern is chosen; the exception is the production promotion role.
+- **(a) runner strategy** blocks 23 pipelines, including everything that produces a release artifact. It is the critical path.
+- **(c) shared library** blocks 21 pipelines and is the only blocker that cannot be resolved inside this repository.
+- **(e) artifact identity** blocks 21 pipelines and, unlike the others, is externally visible: it fixes the `ci.opensearch.org` URL layout.
