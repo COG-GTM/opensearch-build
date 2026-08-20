@@ -98,6 +98,7 @@ jobs:
             const labels = process.env.ISSUE_LABELS.split(',').map(l => l.trim()).filter(Boolean);
             const dryRun = process.env.DRY_RUN === 'true';
             const tests = JSON.parse(fs.readFileSync('flaky-tests.json', 'utf8'));
+            const seen = new Set();
 
             for (const test of tests) {
               const name = test.test_name || test.name;
@@ -110,6 +111,13 @@ jobs:
                 core.setFailed(`test_name must not contain a double quote: ${name}`);
                 return;
               }
+              // The search index is eventually consistent, so a repeated name in one run
+              // would not find the issue just created for it.
+              if (seen.has(name)) {
+                core.info(`Skipping duplicate entry for ${name}`);
+                continue;
+              }
+              seen.add(name);
               const title = `[AUTOCUT] Gradle Check Flaky Test Report for ${name}`;
               const body = [
                 `Flaky test detected over the last ${process.env.TIME_FRAME} of gradle-check runs.`,
