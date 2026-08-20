@@ -1,0 +1,356 @@
+---
+# GitHub Actions port of jenkins/validate-artifacts/validate-artifacts-lf.jenkinsfile.
+# Jenkins parameters are lines 50-126, parameter normalization is lines 128-178, and the parallel
+# distribution stages/retry(2) are lines 186-295. Actions dispatch is limited to ten inputs, so the
+# remaining Jenkins values are packed into OPTIONS; see the OPTIONS description below.
+name: Validate Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      OPENSEARCH_ARTIFACT_URL:
+        description: '<Conditionally-Required> OpenSearch artifact URL.'
+        required: false
+        default: ''
+        type: string
+      OPENSEARCH_DASHBOARDS_ARTIFACT_URL:
+        description: '<Conditionally-Required> OpenSearch Dashboards artifact URL.'
+        required: false
+        default: ''
+        type: string
+      VERSION:
+        description: '<Conditionally-Required> Version when artifact URLs are not provided.'
+        required: false
+        default: ''
+        type: string
+      DISTRIBUTION:
+        description: '<Optional> Space-separated distributions. Defaults to tar rpm yum deb zip docker.'
+        required: false
+        default: tar rpm yum deb zip docker
+        type: string
+      ARCHITECTURE:
+        description: '<Optional> Space-separated architectures. Defaults to x64 arm64.'
+        required: false
+        default: x64 arm64
+        type: string
+      PROJECTS:
+        description: '<Optional> Project to validate.'
+        required: false
+        default: opensearch
+        type: choice
+        options:
+          - opensearch
+          - Both
+      ARTIFACT_TYPE:
+        description: '<Optional> Artifact type.'
+        required: false
+        default: production
+        type: choice
+        options:
+          - production
+          - staging
+      DOCKER_SOURCE:
+        description: '<Optional> Docker source.'
+        required: false
+        default: dockerhub
+        type: choice
+        options:
+          - dockerhub
+          - ecr
+          - Both
+      OPTIONS:
+        description: >-
+          '<Optional> Space-separated packed values because workflow_dispatch allows at most ten inputs:
+          os-build-number=<n> osd-build-number=<n> optional-args=<using-staging-artifact-only|validate-digest-only,
+          default using-staging-artifact-only>
+          skip-core-plugins=<csv, default arrow-base,arrow-flight-rpc; None installs all, an empty value
+          skips all> allow-http platform=<linux,windows> (accepted for Jenkins parameter parity but unused:
+          Jenkins derives the platform from the distribution and never filters on PLATFORM).'
+        required: false
+        default: 'optional-args=using-staging-artifact-only skip-core-plugins=arrow-base,arrow-flight-rpc platform=linux,windows'
+        type: string
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify-parameters:
+    name: verify-parameters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {}
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      has-legs: ${{ steps.matrix.outputs.has-legs }}
+      version: ${{ steps.normalized.outputs.version }}
+      file-path: ${{ steps.normalized.outputs.file-path }}
+      distribution: ${{ steps.normalized.outputs.distribution }}
+      architecture: ${{ steps.normalized.outputs.architecture }}
+      platform: ${{ steps.normalized.outputs.platform }}
+      projects: ${{ steps.normalized.outputs.projects }}
+      docker-source: ${{ steps.normalized.outputs.docker-source }}
+      artifact-type: ${{ steps.normalized.outputs.artifact-type }}
+      os-build-number: ${{ steps.options.outputs.os-build-number }}
+      osd-build-number: ${{ steps.options.outputs.osd-build-number }}
+      optional-args: ${{ steps.options.outputs.optional-args }}
+      skip-core-plugins: ${{ steps.options.outputs.skip-core-plugins }}
+      allow-http: ${{ steps.options.outputs.allow-http }}
+    steps:
+      - name: Unpack OPTIONS
+        id: options
+        env:
+          OPTIONS: ${{ inputs.OPTIONS }}
+        run: |
+          set -euo pipefail
+          os_build_number=''
+          osd_build_number=''
+          optional_args='using-staging-artifact-only'
+          skip_core_plugins='arrow-base,arrow-flight-rpc'
+          allow_http='false'
+          platform='linux windows'
+          for option in ${OPTIONS}; do
+            case "${option}" in
+              os-build-number=*) os_build_number="${option#*=}" ;;
+              osd-build-number=*) osd_build_number="${option#*=}" ;;
+              optional-args=*) optional_args="${option#*=}" ;;
+              # skip-core-plugins= with an empty value maps to '__skip_all__': Jenkins passes the
+              # empty string through to a bare --skip-core-plugins flag (skip all core plugins).
+              skip-core-plugins=*)
+                skip_core_plugins="${option#*=}"
+                [[ -z "${skip_core_plugins}" ]] && skip_core_plugins='__skip_all__'
+                ;;
+              allow-http|allow-http=true|allow-http=1) allow_http='true' ;;
+              allow-http=false|allow-http=0) allow_http='false' ;;
+              platform=*) platform="${option#*=}"; platform="${platform//,/ }" ;;
+              '') ;;
+              *) echo "::error::Unsupported OPTIONS value: ${option}"; exit 1 ;;
+            esac
+          done
+          {
+            printf 'os-build-number=%s\n' "${os_build_number}"
+            printf 'osd-build-number=%s\n' "${osd_build_number}"
+            printf 'optional-args=%s\n' "${optional_args}"
+            printf 'skip-core-plugins=%s\n' "${skip_core_plugins}"
+            printf 'allow-http=%s\n' "${allow_http}"
+            printf 'platform=%s\n' "${platform}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Verify parameters
+        id: normalized
+        env:
+          OPENSEARCH_ARTIFACT_URL: ${{ inputs.OPENSEARCH_ARTIFACT_URL }}
+          OPENSEARCH_DASHBOARDS_ARTIFACT_URL: ${{ inputs.OPENSEARCH_DASHBOARDS_ARTIFACT_URL }}
+          VERSION: ${{ inputs.VERSION }}
+          DISTRIBUTION: ${{ inputs.DISTRIBUTION }}
+          ARCHITECTURE: ${{ inputs.ARCHITECTURE }}
+          PROJECTS: ${{ inputs.PROJECTS }}
+          DOCKER_SOURCE: ${{ inputs.DOCKER_SOURCE }}
+          ARTIFACT_TYPE: ${{ inputs.ARTIFACT_TYPE }}
+          PLATFORM: ${{ steps.options.outputs.platform }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${OPENSEARCH_DASHBOARDS_ARTIFACT_URL}" && -z "${OPENSEARCH_ARTIFACT_URL}" ]]; then
+            echo "::error::Provide OPENSEARCH_ARTIFACT_URL to validate"
+            exit 1
+          fi
+          if [[ -z "${VERSION}" && -z "${OPENSEARCH_ARTIFACT_URL}" ]]; then
+            echo "::error::Both VERSION and OPENSEARCH_ARTIFACT_URL cannot be empty. Please provide either value"
+            exit 1
+          fi
+          projects="${PROJECTS}"
+          [[ "${projects}" == Both ]] && projects='opensearch opensearch-dashboards'
+          docker_source="${DOCKER_SOURCE}"
+          [[ "${docker_source}" == Both ]] && docker_source='dockerhub ecr'
+          distribution="${DISTRIBUTION}"
+          architecture="${ARCHITECTURE}"
+          file_path=''
+          if [[ -n "${OPENSEARCH_ARTIFACT_URL}" ]]; then
+            if [[ "${OPENSEARCH_ARTIFACT_URL} ${OPENSEARCH_DASHBOARDS_ARTIFACT_URL}" == *x64* ]]; then
+              architecture='x64'
+            else
+              architecture='arm64'
+            fi
+            distribution=''
+            for keyword in 'tar.gz:tar' 'zip:zip' 'rpm:rpm' 'repo:yum' 'deb:deb'; do
+              if [[ "${OPENSEARCH_ARTIFACT_URL} ${OPENSEARCH_DASHBOARDS_ARTIFACT_URL}" == *"${keyword%%:*}"* ]]; then
+                distribution="${keyword##*:}"
+                break
+              fi
+            done
+            if [[ -z "${distribution}" ]]; then
+              echo "::error::The provided distribution type is not supported"
+              exit 1
+            fi
+            file_path="opensearch=${OPENSEARCH_ARTIFACT_URL}"
+            if [[ -n "${OPENSEARCH_DASHBOARDS_ARTIFACT_URL}" ]]; then
+              file_path+=" opensearch-dashboards=${OPENSEARCH_DASHBOARDS_ARTIFACT_URL}"
+            fi
+          fi
+          {
+            printf 'version=%s\n' "${VERSION}"
+            printf 'file-path=%s\n' "${file_path}"
+            printf 'distribution=%s\n' "${distribution}"
+            printf 'architecture=%s\n' "${architecture}"
+            printf 'platform=%s\n' "${PLATFORM}"
+            printf 'projects=%s\n' "${projects}"
+            printf 'docker-source=%s\n' "${docker_source}"
+            printf 'artifact-type=%s\n' "${ARTIFACT_TYPE}"
+          } >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Artifact validation"
+            echo "- Projects: ${projects}"
+            echo "- Distribution: ${distribution}"
+            echo "- Architecture: ${architecture}"
+            echo "- Platform: ${PLATFORM}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Generate validation matrix
+        id: matrix
+        env:
+          DISTRIBUTION: ${{ steps.normalized.outputs.distribution }}
+          ARCHITECTURE: ${{ steps.normalized.outputs.architecture }}
+          PLATFORM: ${{ steps.options.outputs.platform }}
+        run: |
+          set -euo pipefail
+          export DISTRIBUTION ARCHITECTURE PLATFORM
+          python3 > "${RUNNER_TEMP}/matrix.json" <<'PY'
+          import json
+          import os
+
+          images = {
+              "tar": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-dashboards-integtest-v1",
+              "rpm": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-almalinux8-systemd-base-integtest-v1",
+              "yum": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-almalinux8-systemd-base-integtest-v1",
+              "zip": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-windows2019-opensearch-build-v1",
+              "deb": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-ubuntu2404-systemd-base-integtest-v1",
+          }
+          # Job containers cannot override --entrypoint, so rpm/yum/deb run systemd via
+          # `docker run` in a dedicated step instead of a job container.
+          options = {
+              "tar": "-u 1000",
+          }
+          systemd_distributions = ("rpm", "yum", "deb")
+          matrix = []
+          for distribution in os.environ["DISTRIBUTION"].split():
+              for architecture in os.environ["ARCHITECTURE"].split():
+                  if distribution == "zip" and architecture == "arm64":
+                      continue
+                  # Jenkins derives the platform from the distribution (mapDistributionToPlatform,
+                  # validate-artifacts-lf.jenkinsfile:192-205); the PLATFORM parameter never filters legs.
+                  platform = "windows" if distribution == "zip" else "linux"
+                  runner = "windows-2022" if platform == "windows" else (
+                      "ubuntu-24.04-arm" if architecture == "arm64" else "ubuntu-24.04"
+                  )
+                  container = "" if distribution in ("docker", "zip") or distribution in systemd_distributions else images[distribution]
+                  matrix.append({
+                      "distribution": distribution,
+                      "architecture": architecture,
+                      "platform": platform,
+                      "runner": runner,
+                      "container": container,
+                      "container_options": options.get(distribution, ""),
+                      "systemd_image": images[distribution] if distribution in systemd_distributions else "",
+                  })
+          print(json.dumps(matrix, separators=(",", ":")))
+          PY
+          matrix_json="$(cat "${RUNNER_TEMP}/matrix.json")"
+          if [[ "${matrix_json}" == '[]' ]]; then
+            echo "::warning::Validation matrix is empty; matching Jenkins, validation completes with no legs."
+            echo "### Artifact validation ran with NO legs (empty matrix); nothing was validated." >> "${GITHUB_STEP_SUMMARY}"
+            # Keep matrix expansion valid even if GitHub evaluates it before the job-level guard.
+            matrix_json='[{"distribution":"none","architecture":"none","platform":"linux","runner":"ubuntu-24.04","container":"","container_options":"","systemd_image":""}]'
+            printf 'has-legs=false\n' >> "${GITHUB_OUTPUT}"
+          else
+            printf 'has-legs=true\n' >> "${GITHUB_OUTPUT}"
+          fi
+          printf 'matrix=%s\n' "${matrix_json}" >> "${GITHUB_OUTPUT}"
+
+  validate:
+    name: validate-${{ matrix.distribution }}-${{ matrix.architecture }}
+    needs: verify-parameters
+    # Jenkins treats an empty parallel map as a successful no-op; skip the matrix job in that case.
+    if: ${{ needs.verify-parameters.result == 'success' && needs.verify-parameters.outputs.has-legs == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.verify-parameters.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    # docker and zip intentionally have no job container. Jenkins used a Windows ci-runner container for zip,
+    # but GitHub Actions cannot run Windows job containers with that Docker setup.
+    # rpm/yum/deb also have no job container: job containers cannot override the entrypoint, so those
+    # legs start a systemd container with `docker run` below (the port of Jenkins docker.image().inside
+    # with the systemd/privileged args) and run validation inside it via docker exec.
+    container: ${{ matrix.container != '' && fromJSON(format('{{"image":"{0}","options":"{1}"}}', matrix.container, matrix.container_options)) || null }}
+    steps:
+      - name: Checkout validation workspace
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      # docker and zip legs run directly on hosted runners without the ci-runner image, so
+      # run.sh's python3/pip/pipenv prerequisites must be installed (setup-python also provides
+      # a python3 shim on windows-2022 for the bash invocation).
+      - name: Set up Python for container-less runners
+        if: ${{ matrix.container == '' && matrix.systemd_image == '' }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: '3.9'
+
+      - name: Install pipenv for container-less runners
+        if: ${{ matrix.container == '' && matrix.systemd_image == '' }}
+        run: python -m pip install pipenv
+
+      # Port of Jenkins docker.image().inside('--entrypoint=/usr/lib/systemd/systemd -u root --privileged
+      # -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host') for rpm/yum/deb: systemd must be PID 1 for
+      # systemctl-based validation, which a GitHub Actions job container cannot provide.
+      - name: Start systemd validation container
+        if: ${{ matrix.systemd_image != '' }}
+        env:
+          SYSTEMD_IMAGE: ${{ matrix.systemd_image }}
+        run: |
+          set -euo pipefail
+          docker pull "${SYSTEMD_IMAGE}"
+          docker run -d --name validate --privileged -u root \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work \
+            "${SYSTEMD_IMAGE}" /usr/lib/systemd/systemd
+
+      - name: Wait for systemd in validation container
+        if: ${{ matrix.systemd_image != '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$(docker inspect --format '{{.State.Running}}' validate)" != 'true' ]]; then
+            echo "::error::systemd validation container failed to start"
+            docker logs validate || true
+            exit 1
+          fi
+          # A degraded state is acceptable: some units may fail inside a container,
+          # but systemd is up as PID 1 and systemctl is usable.
+          timeout 180 docker exec validate systemctl is-system-running --wait || true
+
+      - name: Validate artifacts
+        uses: ./.github/actions/validate-artifacts
+        # Match validate-artifacts-lf.jenkinsfile:220-232 (docker), :251-263 (version), and :264-268 (file path).
+        with:
+          version: ${{ matrix.distribution == 'docker' && needs.verify-parameters.outputs.version || (matrix.distribution != 'docker' && needs.verify-parameters.outputs.version != '' && needs.verify-parameters.outputs.version) || '' }}
+          file-path: ${{ matrix.distribution != 'docker' && needs.verify-parameters.outputs.version == '' && needs.verify-parameters.outputs.file-path || '' }}
+          distribution: ${{ matrix.distribution == 'docker' && matrix.distribution || (matrix.distribution != 'docker' && needs.verify-parameters.outputs.version != '' && matrix.distribution) || '' }}
+          platform: ${{ matrix.distribution != 'docker' && needs.verify-parameters.outputs.version != '' && matrix.platform || '' }}
+          arch: ${{ (matrix.distribution == 'docker' || needs.verify-parameters.outputs.version != '') && matrix.architecture || '' }}
+          projects: ${{ (matrix.distribution == 'docker' || needs.verify-parameters.outputs.version != '') && needs.verify-parameters.outputs.projects || '' }}
+          docker-source: ${{ matrix.distribution == 'docker' && needs.verify-parameters.outputs.docker-source || '' }}
+          os-build-number: ${{ (matrix.distribution == 'docker' || needs.verify-parameters.outputs.version != '') && needs.verify-parameters.outputs.os-build-number || '' }}
+          osd-build-number: ${{ (matrix.distribution == 'docker' || needs.verify-parameters.outputs.version != '') && needs.verify-parameters.outputs.osd-build-number || '' }}
+          artifact-type: ${{ matrix.distribution != 'docker' && needs.verify-parameters.outputs.version != '' && needs.verify-parameters.outputs.artifact-type || '' }}
+          allow-http: ${{ matrix.distribution != 'docker' && needs.verify-parameters.outputs.allow-http || '' }}
+          docker-args: ${{ matrix.distribution == 'docker' && needs.verify-parameters.outputs.optional-args || '' }}
+          skip-core-plugins: ${{ (matrix.distribution == 'docker' || needs.verify-parameters.outputs.version != '') && needs.verify-parameters.outputs.skip-core-plugins || '' }}
+          docker-exec-container: ${{ matrix.systemd_image != '' && 'validate' || '' }}
+
+      - name: Cleanup systemd validation container
+        if: ${{ always() && matrix.systemd_image != '' }}
+        run: docker rm -f validate || true

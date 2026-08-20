@@ -1,0 +1,137 @@
+---
+# GitHub Actions port of jenkins/docker/docker-re-release-lf.jenkinsfile:18-74.
+# patchDockerImage/buildDockerImage behavior is split into a prepare composite and reusable workflow calls.
+# This is dispatch-only: the Jenkins parameterizedCron at lines 23-29 is documented below and not enabled.
+name: Docker Re-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      PRODUCT:
+        description: '<Required> Product to re-release.'
+        required: true
+        default: opensearch
+        type: choice
+        options:
+          - opensearch
+          - opensearch-dashboards
+      TAG:
+        description: '<Required> Product tag.'
+        required: true
+        default: '2'
+        type: choice
+        options:
+          - '2'
+          - '3'
+
+# Equivalent Jenkins schedule (parameterizedCron cannot express dispatch input values in Actions):
+# on:
+#   schedule:
+#     - cron: 'H 19 15 * *'  # PRODUCT=opensearch;TAG=3
+#     - cron: 'H 19 15 * *'  # PRODUCT=opensearch-dashboards;TAG=3
+#     - cron: 'H 19 15 * *'  # PRODUCT=opensearch;TAG=2
+#     - cron: 'H 19 15 * *'  # PRODUCT=opensearch-dashboards;TAG=2
+
+permissions: {}
+
+# docker-promotion is outside this migration slice. Once it lands, dispatch or call it with:
+# SOURCE_IMAGES=${{ needs.prepare.outputs.source-images }}
+# RELEASE_VERSION=${{ needs.prepare.outputs.version }}
+# TAG_LATEST=${{ needs.prepare.outputs.tag-latest }}
+# docker-promotion:
+#   needs: [prepare, docker-copy, docker-scan]
+#   uses: ./.github/workflows/docker-promotion.yml
+#   with:
+#     SOURCE_IMAGES: ${{ needs.prepare.outputs.source-images }}
+#     RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+#     TAG_LATEST: ${{ needs.prepare.outputs.tag-latest }}
+#   secrets: inherit
+
+jobs:
+  prepare:
+    name: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    container:
+      image: public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1
+      options: -u root -v /var/run/docker.sock:/var/run/docker.sock
+    outputs:
+      version: ${{ steps.patch.outputs.version }}
+      build-version: ${{ steps.patch.outputs.build-version }}
+      build-number: ${{ steps.patch.outputs.build-number }}
+      build-date: ${{ steps.patch.outputs.build-date }}
+      filename: ${{ steps.patch.outputs.filename }}
+      base-os: ${{ steps.patch.outputs.base-os }}
+      build-qualifier: ${{ steps.patch.outputs.build-qualifier }}
+      docker-build-script: ${{ steps.patch.outputs.docker-build-script }}
+      source-images: ${{ steps.patch.outputs.source-images }}
+      tag-latest: ${{ steps.patch.outputs.tag-latest }}
+    steps:
+      - name: Checkout manifests
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: '3.x'
+
+      - name: Patch Docker image
+        id: patch
+        uses: ./.github/actions/patch-docker-image
+        with:
+          product: ${{ inputs.PRODUCT }}
+          tag: ${{ inputs.TAG }}
+
+      - name: Report prepared release
+        env:
+          PRODUCT: ${{ inputs.PRODUCT }}
+          TAG: ${{ inputs.TAG }}
+          VERSION: ${{ steps.patch.outputs.version }}
+          BUILD_NUMBER: ${{ steps.patch.outputs.build-number }}
+        run: |
+          {
+            echo "### Docker re-release"
+            echo "- Product: ${PRODUCT}"
+            echo "- Tag: ${TAG}"
+            echo "- Version: ${VERSION}"
+            echo "- Build number: ${BUILD_NUMBER}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  docker-build:
+    name: docker-build
+    needs: prepare
+    permissions:
+      contents: read
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      DOCKER_BUILD_GIT_REPOSITORY: https://github.com/opensearch-project/opensearch-build
+      DOCKER_BUILD_GIT_REPOSITORY_REFERENCE: ${{ needs.prepare.outputs.version }}
+      DOCKER_BUILD_SCRIPT_WITH_COMMANDS: ${{ needs.prepare.outputs.docker-build-script }}
+      DOCKER_BUILD_OS: linux
+    secrets: inherit
+
+  docker-copy:
+    name: docker-copy
+    needs: [prepare, docker-build]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/docker-copy.yml
+    with:
+      SOURCE_IMAGE_REGISTRY: opensearchstaging
+      SOURCE_IMAGE: ${{ needs.prepare.outputs.filename }}:${{ needs.prepare.outputs.build-version }}${{ needs.prepare.outputs.build-qualifier }}
+      DESTINATION_IMAGE_REGISTRY: opensearchstaging
+      DESTINATION_IMAGE: ${{ needs.prepare.outputs.filename }}:${{ needs.prepare.outputs.build-version }}${{ needs.prepare.outputs.build-qualifier }}.${{ needs.prepare.outputs.build-number }}.${{ needs.prepare.outputs.build-date }}
+      ALL_TAGS: false
+    secrets: inherit
+
+  docker-scan:
+    name: docker-scan
+    needs: [prepare, docker-build, docker-copy]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/docker-scan.yml
+    with:
+      IMAGE_FULL_NAME: opensearchstaging/${{ needs.prepare.outputs.filename }}:${{ needs.prepare.outputs.build-version }}${{ needs.prepare.outputs.build-qualifier }}

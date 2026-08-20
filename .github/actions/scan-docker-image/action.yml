@@ -1,0 +1,44 @@
+---
+# Composite port of opensearch-build-libraries/vars/scanDockerImage.groovy.
+# The command sequence is copied from scanDockerImage.groovy:11-17.
+name: Scan Docker image
+description: Run the shared-library Trivy scan and emit table and JSON results (vars/scanDockerImage.groovy).
+inputs:
+  image-full-name:
+    description: Full image name to scan.
+    required: true
+  image-result-file:
+    description: Result file prefix.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install Trivy
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v trivy >/dev/null 2>&1; then
+          exit 0
+        fi
+        tool_dir="${RUNNER_TEMP}/trivy"
+        mkdir -p "${tool_dir}"
+        version='0.58.2'
+        curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${version}/trivy_${version}_Linux-64bit.tar.gz" \
+          | tar -xz -C "${tool_dir}" trivy
+        echo "${tool_dir}" >> "${GITHUB_PATH}"
+
+    - name: Scan image
+      shell: bash
+      env:
+        IMAGE_FULL_NAME: ${{ inputs.image-full-name }}
+        IMAGE_RESULT_FILE: ${{ inputs.image-result-file }}
+      run: |
+        set -e
+        touch "${IMAGE_RESULT_FILE}.txt" "${IMAGE_RESULT_FILE}.json"
+        trivy clean --all
+        # Jenkins word-split the unquoted command substitution into one argument per image id.
+        # shellcheck disable=SC2046
+        docker rmi $(docker images -f "dangling=true" -q) || echo
+        docker rmi "${IMAGE_FULL_NAME}" || echo
+        trivy image --format table --table-mode detailed --output "${IMAGE_RESULT_FILE}.txt" "${IMAGE_FULL_NAME}"
+        trivy image --format json --output "${IMAGE_RESULT_FILE}.json" "${IMAGE_FULL_NAME}"
