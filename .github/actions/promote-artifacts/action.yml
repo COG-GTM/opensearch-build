@@ -129,18 +129,16 @@ runs:
           build_root="${local_root}/${artifact_path}/builds/${FILENAME}"
           build_manifest="${build_root}/manifest.yml"
           core_plugins="${build_root}/core-plugins"
-          # Composite actions cannot be invoked from inside a shell loop, so the matched
-          # artifacts are staged into flat directories and the checksum/signing actions run
-          # once over each. Two directories are needed because Jenkins applies both closures
-          # per file (promoteArtifacts.groovy:80-88), so the signer never sees a .sha512:
-          # checksums are produced in one copy, signatures in the other.
-          matched_dir="${RUNNER_TEMP}/promote-artifacts-checksums"
-          sign_dir="${RUNNER_TEMP}/promote-artifacts-signing"
-          # The mapping file lives outside both staged directories: those are handed to
-          # the checksum and signing actions as artifact sets.
+          # Composite actions cannot be invoked from inside a shell loop, so matched artifacts
+          # are staged into one flat directory and the checksum/signing actions run once over it.
+          # The signer skips .sha512 by extension (src/sign_workflow/signer_pgp.py), so one copy
+          # is sufficient while preserving Jenkins' checksum-then-sign ordering.
+          staged_dir="${RUNNER_TEMP}/promote-artifacts-staged"
+          # The mapping file lives outside the staged directory handed to the checksum
+          # and signing actions as an artifact set.
           mapping="${RUNNER_TEMP}/promote-artifacts-mapping"
-          rm -rf "${matched_dir}" "${sign_dir}"
-          mkdir -p "${matched_dir}" "${sign_dir}"
+          rm -rf "${staged_dir}"
+          mkdir -p "${staged_dir}"
           : > "${mapping}"
           index=0
           while IFS= read -r -d '' file; do
@@ -148,18 +146,16 @@ runs:
             if [[ "${base}" == "${FILENAME}-min-${REVISION}"*".${distribution}"* ||
                   "${base}" == "${FILENAME}-${REVISION}"*".${distribution}"* ]]; then
               # Stage under the original basename so the .sha512 body names the published file.
-              if [[ -e "${matched_dir}/${base}" ]]; then
+              if [[ -e "${staged_dir}/${base}" ]]; then
                 echo "::error::Duplicate artifact basename ${base}; cannot stage it for signing."
                 exit 1
               fi
-              cp -- "${file}" "${matched_dir}/${base}"
-              cp -- "${file}" "${sign_dir}/${base}"
+              cp -- "${file}" "${staged_dir}/${base}"
               printf '%s\t%s\n' "${base}" "${file}" >> "${mapping}"
               index=$((index + 1))
             fi
           done < <(find "${local_root}/${artifact_path}" -type f -print0)
-          echo "checksum-path=${matched_dir}" >> "${GITHUB_OUTPUT}"
-          echo "sign-path=${sign_dir}" >> "${GITHUB_OUTPUT}"
+          echo "staged-path=${staged_dir}" >> "${GITHUB_OUTPUT}"
           echo "mapping=${mapping}" >> "${GITHUB_OUTPUT}"
           if [[ "${distribution}" == tar && -d "${core_plugins}" ]]; then
             echo 'has-core=true' >> "${GITHUB_OUTPUT}"
@@ -208,14 +204,14 @@ runs:
       if: ${{ steps.prepare.outputs.has-matched == 'true' }}
       uses: ./.github/actions/create-sha512-checksums
       with:
-        artifact-path: ${{ steps.prepare.outputs.checksum-path }}
+        artifact-path: ${{ steps.prepare.outputs.staged-path }}
 
-    # Signs the artifact-only copies: Jenkins never submits a .sha512 to the signer.
+    # The signer skips the generated .sha512 by extension, so it can use the same staged directory.
     - name: Sign distribution artifacts
       if: ${{ steps.prepare.outputs.has-matched == 'true' }}
       uses: ./.github/actions/sign-artifacts-client
       with:
-        artifact-path: ${{ steps.prepare.outputs.sign-path }}
+        artifact-path: ${{ steps.prepare.outputs.staged-path }}
         sigtype: '.sig'
         # promoteArtifacts.groovy:62-88 passes only sigtype/email/artifactPath to the
         # signer closures; the signer platform stays on the PGP path, not the build platform.
@@ -233,16 +229,15 @@ runs:
       shell: bash
       env:
         MAPPING: ${{ steps.prepare.outputs.mapping }}
-        CHECKSUM_DIR: ${{ steps.prepare.outputs.checksum-path }}
-        SIGN_DIR: ${{ steps.prepare.outputs.sign-path }}
+        STAGED_DIR: ${{ steps.prepare.outputs.staged-path }}
       run: |
         set -euo pipefail
         while IFS=$'\t' read -r base original; do
-          if [[ -f "${CHECKSUM_DIR}/${base}.sha512" ]]; then
-            cp -- "${CHECKSUM_DIR}/${base}.sha512" "${original}.sha512"
+          if [[ -f "${STAGED_DIR}/${base}.sha512" ]]; then
+            cp -- "${STAGED_DIR}/${base}.sha512" "${original}.sha512"
           fi
-          if [[ -f "${SIGN_DIR}/${base}.sig" ]]; then
-            cp -- "${SIGN_DIR}/${base}.sig" "${original}.sig"
+          if [[ -f "${STAGED_DIR}/${base}.sig" ]]; then
+            cp -- "${STAGED_DIR}/${base}.sig" "${original}.sig"
           fi
         done < "${MAPPING}"
 
