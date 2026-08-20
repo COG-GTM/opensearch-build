@@ -259,6 +259,7 @@ jobs:
           matrix_json="$(cat "${RUNNER_TEMP}/matrix.json")"
           if [[ "${matrix_json}" == '[]' ]]; then
             echo "::warning::Validation matrix is empty; matching Jenkins, validation completes with no legs."
+            echo "### Artifact validation ran with NO legs (empty matrix); nothing was validated." >> "${GITHUB_STEP_SUMMARY}"
             # Keep matrix expansion valid even if GitHub evaluates it before the job-level guard.
             matrix_json='[{"distribution":"none","architecture":"none","platform":"linux","runner":"ubuntu-24.04","container":"","container_options":"","systemd_image":""}]'
             printf 'has-legs=false\n' >> "${GITHUB_OUTPUT}"
@@ -329,7 +330,7 @@ jobs:
           fi
           # A degraded state is acceptable: some units may fail inside a container,
           # but systemd is up as PID 1 and systemctl is usable.
-          docker exec validate systemctl is-system-running --wait || true
+          timeout 180 docker exec validate systemctl is-system-running --wait || true
 
       - name: Validate artifacts
         uses: ./.github/actions/validate-artifacts
