@@ -175,8 +175,9 @@ runs:
         fi
 
     # promoteArtifacts.groovy:72-77 passes the whole core-plugins directory to both
-    # closures, so unlike the per-file branch below the signer does see the freshly
-    # created .sha512 files here. That is faithful; do not split this into two dirs.
+    # closures rather than iterating files, so the checksum and signing actions run
+    # over the directory as-is. Generated .sha512 files are skipped by the signer's
+    # extension filter (src/sign_workflow/signer_pgp.py ACCEPTED_FILE_TYPES).
     - name: Create core-plugin checksums
       if: ${{ steps.prepare.outputs.has-core == 'true' }}
       uses: ./.github/actions/create-sha512-checksums
