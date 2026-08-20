@@ -129,9 +129,9 @@ source.
 
 | Name | Used by | Jenkins 1Password reference |
 | --- | --- | --- |
-| `AWS_ACCOUNT_PUBLIC` | Artifact/repository promotion S3 staging downloads | `op://opensearch-release-secrets/aws-accounts/jenkins-aws-account-public` |
+| `AWS_ACCOUNT_PUBLIC` | Artifact promotion S3 staging downloads | `op://opensearch-release-secrets/aws-accounts/jenkins-aws-account-public` |
 | `AWS_ACCOUNT_PUBLIC_LF` | Maven promotion S3 staging downloads | `op://opensearch-release-secrets/aws-accounts/jenkins-aws-account-public-lf` (`publish-to-maven-lf.jenkinsfile:60`) |
-| `ARTIFACT_BUCKET_NAME` | Artifact/repository promotion S3 staging bucket | `op://opensearch-release-secrets/aws-resource-arns/jenkins-artifact-bucket-name` |
+| `ARTIFACT_BUCKET_NAME` | Artifact promotion S3 staging bucket | `op://opensearch-release-secrets/aws-resource-arns/jenkins-artifact-bucket-name` |
 | `ARTIFACT_BUCKET_NAME_LF` | Maven promotion S3 staging bucket | `op://opensearch-release-secrets/aws-resource-arns/jenkins-artifact-bucket-name-lf` (`publish-to-maven-lf.jenkinsfile:18-20`) |
 | `ARTIFACT_PROMOTION_ROLE_NAME` | Production S3/ECR role | `op://opensearch-release-secrets/aws-iam-roles/jenkins-artifact-promotion-role` |
 | `AWS_ACCOUNT_ARTIFACT` | Production S3/ECR account | `op://opensearch-release-secrets/aws-accounts/jenkins-aws-production-account` |
@@ -205,6 +205,12 @@ production-release-tags` on its `create-tags` matrix job, which fans out over
 `opensearch` and `opensearch-dashboards`; a run covering both products therefore
 prompts for one approval per matrix leg (two approvals), rather than the single
 Jenkins `input` step it replaces.
+`docker-promotion.yml` places `environment: production-containers` on its
+`promote` matrix job, which fans out over the user-supplied `SOURCE_IMAGES`;
+three images therefore require three approvals. Its `fail-fast: true` cannot
+reproduce the serial Jenkins loop (`promote-docker-ecr-lf.jenkinsfile:78-89`):
+parallel legs may already have pushed `latest` or major-version tags before
+cancellation lands, so a mid-run failure can leave a partially promoted set.
 
 ## 7. Not migrated / needs a decision
 
@@ -220,6 +226,11 @@ Jenkins `input` step it replaces.
   a notice with `RELEASE_VERSION` and `MANIFEST_LOCK_ACTION=UPDATE_TO_TAGS` when
   no workflow is supplied, or dispatches and waits for the explicitly supplied
   workflow.
+* The production upload in `promote-artifacts` has no post-condition check that
+  every published artifact has a matching `.sig` and `.sha512`. A partial
+  signing pass fails via `set -euo pipefail` before upload, but an AWS CLI-level
+  partial success is not guarded; adding a per-artifact check would be a safety
+  gate Jenkins never had and therefore needs a release-owner decision.
 * `docker-copy` is out of scope and owned by another migration. This branch
   duplicates its needed copy behavior locally; once that workflow lands,
   `promote-container` should probably call its reusable workflow instead.
