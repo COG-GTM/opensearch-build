@@ -8,7 +8,7 @@ This document is a plan, not a decision. It inventories the CI that exists in th
 
 `opensearch-build` runs on two CI systems at once.
 
-**Jenkins** (`jenkins/**/*.jenkinsfile`, 56 pipelines) runs everything that needs long timeouts, large or non-Linux hardware, credentials, or artifact publishing:
+**Jenkins** (`jenkins/**`, 58 pipeline files — 56 named `*.jenkinsfile` plus two named `*.jenkinsFile` with a capital F: `jenkins/manifests-update-lf.jenkinsFile` and one backup) runs everything that needs long timeouts, large or non-Linux hardware, credentials, or artifact publishing:
 
 | Area | Files | Notes |
 | --- | --- | --- |
@@ -284,6 +284,7 @@ Legend: **(a)** runner strategy · **(b)** secret management · **(c)** shared-l
 | `legacy/maven-publish-1.3.x.jenkinsfile` | (c) | `detectDockerAgent`; likely retire (1.3.x line) |
 | `release-workflows/release-notes-generate.jenkinsfile` | (e) | writes release notes artifacts keyed by build |
 | `release-workflows/promote-repos.jenkinsfile` | (e) | yum/apt repo paths derived from the artifact layout |
+| `manifests-update-lf.jenkinsFile` | (b) | daily cron, GitHub bot credentials; auto-generates input manifests |
 
 ### Blocked on two or more decisions
 
@@ -318,13 +319,13 @@ Legend: **(a)** runner strategy · **(b)** secret management · **(c)** shared-l
 
 ### Not to be migrated
 
-`jenkins/legacy/build.ci.backups/**` (11 files: docker ×4, smoke-test, packer-build, promote-docker-ecr, publish-to-maven, release-manifest-commit-lock, release-notes-check, validate-artifacts) are backups of pipelines that already exist in their current form elsewhere in `jenkins/`. They should be confirmed dead and deleted rather than migrated.
+`jenkins/legacy/build.ci.backups/**` (12 files: docker ×4, manifests-update, smoke-test, packer-build, promote-docker-ecr, publish-to-maven, release-manifest-commit-lock, release-notes-check, validate-artifacts) are backups of pipelines that already exist in their current form elsewhere in `jenkins/`. They should be confirmed dead and deleted rather than migrated.
 
 ### Where the decisions bite hardest
 
-Of the 45 live pipelines (56 files minus the 11 backups), 40 are blocked on at least one decision and 5 are ready:
+Of the 46 live pipelines (58 files minus the 12 backups), 41 are blocked on at least one decision and 5 are ready:
 
-- **(b) secrets** blocks 24 pipelines — the widest, but mostly mechanical once the pattern is chosen; the exception is the production promotion role.
-- **(a) runner strategy** blocks 23 pipelines, including everything that produces a release artifact. It is the critical path.
+- **(b) secrets** blocks 25 pipelines — the widest, but mostly mechanical once the pattern is chosen; the exception is the production promotion role.
+- **(a) runner strategy** blocks 22 pipelines, including everything that produces a release artifact. It is the critical path.
 - **(c) shared library** blocks 21 pipelines and is the only blocker that cannot be resolved inside this repository.
 - **(e) artifact identity** blocks 21 pipelines and, unlike the others, is externally visible: it fixes the `ci.opensearch.org` URL layout.
