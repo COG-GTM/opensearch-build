@@ -5,8 +5,8 @@
 # this file be licensed under the Apache-2.0 license or a
 # compatible open source license.
 
+import logging
 import re
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from bs4 import BeautifulSoup
@@ -80,11 +80,13 @@ class ReleaseScheduleParser:
 
                 version = self.__text(cells[0])
                 if not re.match(r"^\d+\.\d+\.\d+$", version):
+                    logging.debug(f"Skipping row, {version} is not a release version.")
                     continue
 
                 rc_date = self.__date(cells[1])
                 release_date = self.__date(cells[2])
                 if rc_date is None or release_date is None:
+                    logging.warning(f"Skipping {version}, could not parse a date out of {self.__text(cells[1])!r} and {self.__text(cells[2])!r}.")
                     continue
 
                 release_manager = self.__text(cells[3]) if len(cells) > 3 else ""
@@ -115,4 +117,4 @@ class ReleaseScheduleParser:
             return None
 
         month, day, year = match.group(1), match.group(2), match.group(3)
-        return datetime.strptime(f"{month.lower()} {day} {year}", "%B %d %Y").strftime("%Y-%m-%d")
+        return f"{year}-{MONTHS.index(month.lower()) + 1:02d}-{int(day):02d}"
