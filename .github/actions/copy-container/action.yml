@@ -64,7 +64,7 @@ runs:
         DESTINATION_IMAGE: ${{ inputs.destination-image }}
       run: |
         set -euo pipefail
-        if [[ "${DESTINATION_REGISTRY}" != *opensearchstaging* || "${DESTINATION_IMAGE%%:*}" != ci-runner ]]; then
+        if [[ "${DESTINATION_REGISTRY}" != *opensearchstaging || "${DESTINATION_IMAGE%%:*}" != ci-runner ]]; then
           echo "::error::'destination_registry' must be opensearchstaging registry and 'destination_image' must be ci-runner"
           exit 1
         fi

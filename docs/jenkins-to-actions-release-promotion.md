@@ -178,9 +178,12 @@ from the wrong source registry.
 OIDC setup follows the PR #1 model:
 
 1. Add `token.actions.githubusercontent.com` as an AWS OIDC provider.
-2. Create a role per AWS account and allow the repository subject
-   `repo:COG-GTM/opensearch-build:*` (tighten it to the protected branch or
-   environment before production use).
+2. Create each production role with only its environment-scoped subject:
+   `repo:COG-GTM/opensearch-build:environment:<name>` for
+   `production-artifacts`, `production-repositories`, `production-containers`,
+   `production-maven`, and `production-release-tags`. A wildcard subject lets
+   any branch, tag, or PR ref assume the role directly, making environment
+   approvals cosmetic.
 3. Grant each role only the Jenkins-equivalent permissions: `opensearch-bundle`
    for staging reads, the artifact-promotion role for production S3/ECR, and
    `jenkins-prod-rpm-signing-assume-role` for apt signing.
@@ -287,9 +290,9 @@ cancellation lands, so a mid-run failure can leave a partially promoted set.
   `promote-container` invokes the copy action twice in one job, so the stale
   entry persists across both invocations. Aligning logout with the login string
   would diverge from the shared library.
-* The registry conditions in `copy-container` compare registries with exact
-  equality while the `allTags` guard uses substring matching. The asymmetry is
-  Jenkins': `copyContainer.groovy:44-66` versus `:73`.
+* The registry conditions in `copy-container` use exact equality while the
+  `allTags` guard uses a suffix match. This asymmetry is Jenkins' behavior:
+  `lf-jenkins:vars/copyContainer.groovy:46-63` versus `:72-74`.
 * `create-release-tag` compares the output of `git ls-remote --tags` with the
   component commit id. For an **annotated** tag `ls-remote` returns the tag
   object SHA, not the commit SHA, so an already-correct tag takes the
