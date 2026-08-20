@@ -1,0 +1,118 @@
+---
+name: rpm-validation
+
+# Ported from jenkins/legacy/rpm-validation.jenkinsfile.
+# The Jenkins job stays authoritative until a human cuts over, so this workflow is
+# workflow_dispatch-only. The Jenkins pipeline itself declares no cron/webhook trigger
+# (it is started manually or from another job), so there is no schedule to enable; the
+# only automatic trigger to add at cutover is the reusable-workflow entry point below.
+#
+# enable at cutover; Jenkins job rpm-validation still runs this
+# on:
+#   workflow_call:
+#     inputs:
+#       bundle_manifest_url:
+#         required: true
+#         type: string
+#       arch:
+#         required: false
+#         default: 'x64'
+#         type: string
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_manifest_url:
+        description: 'The bundle manifest url, e.g. https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/2.0.0-rc1/2493/linux/x64/rpm/dist/opensearch/manifest.yml'
+        required: true
+        type: string
+      arch:
+        description: 'Architecture to validate on. Replaces the Jenkins AGENT_LABEL parameter.'
+        required: true
+        default: 'x64'
+        type: choice
+        options:
+          - x64
+          - arm64
+
+jobs:
+  rpm-validation:
+    # Jenkins used AGENT_LABEL, typically Jenkins-Agent-AL2023-X64-M54xlarge-Docker-Host (x64)
+    # or Jenkins-Agent-AL2023-Arm64-M6g4xlarge-Docker-Host (arm64). GitHub-hosted runners are
+    # used here because the work is a single RPM install plus API tests; swap in self-hosted
+    # labels once open decision (a) in docs/jenkins-to-github-actions-migration.md is settled.
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    # Jenkins: options { timeout(time: 30, unit: 'MINUTES') }
+    timeout-minutes: 30
+    env:
+      # Jenkins pulled 'opensearchstaging/ci-runner:...' with registryUrl https://public.ecr.aws/
+      CI_RUNNER_IMAGE: 'public.ecr.aws/opensearchstaging/ci-runner:ci-runner-almalinux8-systemd-base-integtest-v1'
+      CONTAINER_NAME: 'rpm-validation'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Record the bundle manifest url
+        # Jenkins: currentBuild.description = BUNDLE_MANIFEST_URL
+        run: |
+          echo "Bundle manifest url: ${{ inputs.bundle_manifest_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "Architecture: ${{ inputs.arch }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Start the ci-runner container with systemd
+        # This deliberately does not use a job-level `container:`. GitHub Actions overrides the
+        # image entrypoint so it can keep the container alive and inject the runner, and
+        # `container.options` does not accept --entrypoint, so systemd would never become PID 1
+        # and `systemctl start opensearch` inside the validation would fail. Running the
+        # container explicitly is the only way to keep the Jenkins docker args intact.
+        run: |
+          set -e
+          docker pull ${{ env.CI_RUNNER_IMAGE }}
+          docker run -d --name ${{ env.CONTAINER_NAME }} \
+            --entrypoint=/usr/lib/systemd/systemd \
+            -u root \
+            --privileged \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            --cgroupns=host \
+            -v ${{ github.workspace }}:/opensearch-build \
+            -w /opensearch-build \
+            ${{ env.CI_RUNNER_IMAGE }}
+
+      - name: Wait for systemd inside the container
+        run: |
+          set -e
+          for i in $(seq 1 30); do
+            if docker exec ${{ env.CONTAINER_NAME }} systemctl is-system-running --wait 2>/dev/null | grep -Eq 'running|degraded'; then
+              echo "systemd is up"
+              exit 0
+            fi
+            echo "Waiting for systemd ($i/30)"
+            sleep 2
+          done
+          echo "systemd did not come up inside ${{ env.CI_RUNNER_IMAGE }}."
+          docker logs ${{ env.CONTAINER_NAME }} || true
+          exit 1
+
+      - name: RPM distribution validation
+        # Jenkins: rpmDistValidation(bundleManifestURL: "$BUNDLE_MANIFEST_URL") from the external
+        # opensearch-build-libraries shared library. Reimplemented against this repository's own
+        # validation workflow, see scripts/validation/rpm-dist-validation.sh.
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} \
+            ./scripts/validation/rpm-dist-validation.sh \
+            --bundle-manifest-url '${{ inputs.bundle_manifest_url }}' \
+            --arch '${{ inputs.arch }}'
+
+      - name: Cleanup
+        # Jenkins: post { always { sh "rm -rf $WORKSPACE/*"; postCleanup() } }.
+        # The runner is ephemeral, so only the container needs removing.
+        if: always()
+        run: |
+          docker rm -f ${{ env.CONTAINER_NAME }} || true
+
+      - name: Report result
+        if: always()
+        run: |
+          if [ '${{ job.status }}' = 'success' ]; then
+            echo "Validation for the RPM distribution has been completed successfully."
+          else
+            echo "Validation for RPM distribution failed."
+          fi
