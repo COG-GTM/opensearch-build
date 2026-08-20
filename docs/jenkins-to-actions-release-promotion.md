@@ -198,6 +198,11 @@ Jenkins had no `input` step for artifact promotion or repository promotion.
 The first two environments are deliberately added controls because those jobs
 write production release data. The Docker and Maven jobs likewise publish
 outside the repository, and the tag job pushes to many component repositories.
+`distribution-release-tag-creation.yml` places `environment:
+production-release-tags` on its `create-tags` matrix job, which fans out over
+`opensearch` and `opensearch-dashboards`; a run covering both products therefore
+prompts for one approval per matrix leg (two approvals), rather than the single
+Jenkins `input` step it replaces.
 
 ## 7. Not migrated / needs a decision
 
