@@ -49,7 +49,8 @@ runs:
       run: |
         set -euo pipefail
         registry='opensearchstaging'
-        if [[ "${IMAGE_REPOSITORY}" == data-prepper:* ]]; then
+        image_product="${IMAGE_REPOSITORY%%:*}"
+        if [[ "${image_product}" == data-prepper ]]; then
           if [[ -z "${DATA_PREPPER_STAGING_CONTAINER_REPOSITORY}" ]]; then
             echo '::error::DATA_PREPPER_STAGING_CONTAINER_REPOSITORY is not configured; refusing to promote a data-prepper image from the default staging registry.'
             exit 1
