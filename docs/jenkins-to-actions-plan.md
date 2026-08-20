@@ -41,7 +41,7 @@ carries at lines 10–11. "Trigger today" is what is declared in the file; pipel
 shared-library steps is the list of `vars/*.groovy` steps the file calls directly
 (`postCleanup` is called by 34 of 36 files and is omitted from the per-row lists).
 
-Suffix note: the `-lf` suffix on 10 filenames matches the pipelines that reference
+Suffix note: the `-lf` suffix on 11 filenames matches the pipelines that reference
 `opensearchorg/opensearchstaging/...` images pulled through `public.ecr.aws`; **(inferred)** it
 marks jobs already moved to the Linux Foundation Jenkins instance. It does not change the migration
 approach.
@@ -71,7 +71,7 @@ approach.
 | `integ-test.jenkinsfile` | 25 KB | OSD distribution-level integ tests, dynamic fan-out + `stash`/`unstash` (`:195`) | upstream | `workflow_dispatch` + `workflow_call` | L | detectTestDockerAgent, downloadBuildManifest, downloadFromS3, runIntegTestScriptForOSD, uploadTestResults, createUploadTestReportManifest, publishIntegTestResults |
 | `bwc-test.jenkinsfile` | 6 KB | OSD BWC tests | upstream | `workflow_call` | S | detectTestDockerAgent, downloadBuildManifest, runBwcTestScript, uploadTestResults, publishNotification |
 
-### `jenkins/release-workflows/` — 13 pipelines
+### `jenkins/release-workflows/` — 12 pipelines
 
 | Pipeline | Size | What it does | Trigger today | Target GHA trigger | Cx | Shared-library steps |
 | --- | ---: | --- | --- | --- | :-: | --- |
@@ -89,7 +89,7 @@ approach.
 | `release-schedule.jenkinsfile` | 3 KB | Daily: reads opensearch.org/releases.html, registers the schedule | `cron('H 8 * * *')` | `schedule` | S | registerReleaseSchedule |
 | `release-schedule` note | | the only pipeline using plain `cron()` instead of `parameterizedCron` | | | | |
 
-### `jenkins/docker/`, `jenkins/packer/`, `jenkins/gradle/`, top level — 8 pipelines
+### `jenkins/docker/`, `jenkins/packer/`, `jenkins/gradle/`, top level — 9 pipelines
 
 | Pipeline | Size | What it does | Trigger today | Target GHA trigger | Cx | Shared-library steps |
 | --- | ---: | --- | --- | --- | :-: | --- |
@@ -103,8 +103,10 @@ approach.
 | `integ-test-notification.jenkinsfile` | 2 KB | Cuts GitHub issues for failed integ-test components | downstream (`build job: 'integ-test-notification', wait: false`, `integ-test.jenkinsfile:330–345`) | `workflow_call` or merged into the integ-test workflow | S | updateIntegTestFailureIssues |
 | `validate-artifacts/validate-artifacts-lf.jenkinsfile` | 16 KB | Validates distribution artifacts on tar/rpm/deb/yum/zip across x64/arm64/Windows; **scripted `node()` allocation inside loops** (`:216`, `:243`) and systemd-entrypoint containers (`:28–32`) | downstream (`build job: 'distribution-validation'` from 4 pipelines) | `workflow_call` with a generated matrix | L | validateArtifacts |
 
-Trigger-model summary (verified by grepping `triggers {`): 11 pipelines have cron-style triggers,
-1 has a webhook `GenericTrigger`, and the remaining 24 are manual or upstream-triggered. There are
+Trigger-model summary (verified by grepping for `triggers` blocks, including the no-space
+`triggers{` in `benchmark-test-endpoint`): 11 pipelines declare a `triggers {}` block, all with
+cron-style entries; one of those (`benchmark-pull-request`) additionally has a `GenericTrigger`
+webhook. The remaining 25 are manual or upstream-triggered. There are
 **no** `pollSCM`, no multibranch, and no `input()` approval steps anywhere under active `jenkins/`
 (grep for `input(` returns only legacy files — the human gates in this estate are "a human clicks
 Build with Parameters", not `input`).
@@ -408,7 +410,7 @@ sequential steps or separate matrix dimensions. `gradle-check-flaky-test-issue-c
 anything else calling library steps that reflect on Jenkins state (`abortStaleJenkinsJobs`,
 `getLogsForStage`) needs redesign per §2 Group D.
 
-**F11 — `buildDiscarder`/retention. Appears:** `logRotator(daysToKeepStr:)` in 15 active pipelines
+**F11 — `buildDiscarder`/retention. Appears:** `logRotator(daysToKeepStr:)` in 14 active pipelines
 (7–180 days; `gradle-check-flaky-test-issue-creation.jenkinsfile:32` wants 180). GHA log/artifact
 retention is a repo/org setting (max 90 days for private repos, 400 for public artifacts? — the
 90-day log ceiling is the binding constraint **(inferred from GitHub docs; verify current limits)**),
