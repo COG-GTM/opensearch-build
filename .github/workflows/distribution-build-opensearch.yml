@@ -130,7 +130,15 @@ jobs:
               exit 1
             fi
           }
+          # A manifest path is resolved under manifests/ and its contents drive shell arguments and container
+          # options, so `..` segments must not be able to walk it out of that directory into another checkout file.
+          manifest_path() {
+            case "$2" in
+              /* | *..*) echo "::error::$1 must be a relative path under manifests/ without '..': $2"; exit 1 ;;
+            esac
+          }
           check INPUT_MANIFEST "${INPUT_MANIFEST}" '^[A-Za-z0-9._/-]+$'
+          manifest_path INPUT_MANIFEST "${INPUT_MANIFEST}"
           check BUILD_PLATFORM "${BUILD_PLATFORM}" '^[a-z0-9 ]*$'
           check BUILD_DISTRIBUTION "${BUILD_DISTRIBUTION}" '^[a-z0-9 ]*$'
           check TEST_PLATFORM "${TEST_PLATFORM}" '^[a-z0-9 ]*$'

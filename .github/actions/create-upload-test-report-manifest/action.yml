@@ -83,7 +83,7 @@ runs:
         # so both are word split into one argument per value.
         read -ra PATH_PAIRS <<< "${ARTIFACT_PATHS}"
         ARGS=('./report.sh' "${TEST_MANIFEST}"
-              '--artifact-paths' "${PATH_PAIRS[@]}"
+              '--artifact-paths' ${PATH_PAIRS[@]+"${PATH_PAIRS[@]}"}
               '--test-run-id' "${TEST_RUN_ID}"
               '--test-type' "${TEST_TYPE}"
               '--base-path' "${BASE_PATH}")
@@ -93,7 +93,7 @@ runs:
         fi
         if [ -n "${COMPONENT_NAME}" ]; then
           read -ra COMPONENTS <<< "${COMPONENT_NAME}"
-          ARGS+=('--component' "${COMPONENTS[@]}")
+          ARGS+=('--component' ${COMPONENTS[@]+"${COMPONENTS[@]}"})
         fi
         "${ARGS[@]}"
 

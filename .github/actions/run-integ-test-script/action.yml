@@ -98,7 +98,7 @@ runs:
         ARGS=('./test.sh' 'integ-test' "${TEST_MANIFEST}"
               '--component' ${COMPONENTS[@]+"${COMPONENTS[@]}"}
               '--test-run-id' "${TEST_RUN_ID}"
-              '--paths' "${PATH_PAIRS[@]}"
+              '--paths' ${PATH_PAIRS[@]+"${PATH_PAIRS[@]}"}
               '--base-path' "${BASE_PATH}")
         if [ -n "${CI_GROUP}" ]; then ARGS+=('--ci-group' "${CI_GROUP}"); fi
 

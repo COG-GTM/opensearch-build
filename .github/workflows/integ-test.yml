@@ -101,7 +101,15 @@ jobs:
               exit 1
             fi
           }
+          # A manifest path is resolved under manifests/ and its contents drive shell arguments and container
+          # options, so `..` segments must not be able to walk it out of that directory into another checkout file.
+          manifest_path() {
+            case "$2" in
+              /* | *..*) echo "::error::$1 must be a relative path under manifests/ without '..': $2"; exit 1 ;;
+            esac
+          }
           check TEST_MANIFEST "${TEST_MANIFEST}" '^[A-Za-z0-9._/-]+$'
+          manifest_path TEST_MANIFEST "${TEST_MANIFEST}"
           check COMPONENT_NAME "${COMPONENT_NAME}" '^[A-Za-z0-9 ._-]*$'
           check RC_NUMBER "${RC_NUMBER}" '^[0-9]+$'
           check BUILD_MANIFEST_URL "${BUILD_MANIFEST_URL}" '^https://[A-Za-z0-9._~:/?#@!$&()*+,;=%-]+$'

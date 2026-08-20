@@ -107,6 +107,21 @@ def sanitize_container_options(args: str) -> str:
     return " ".join(kept)
 
 
+# Docker reference grammar: registry host, optional port, path components, and an optional :tag or @digest.
+CI_IMAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*(:[A-Za-z0-9][A-Za-z0-9._-]*)?(@sha256:[a-f0-9]{64})?$")
+
+
+def validate_ci_image(image: str) -> str:
+    """Reject an image name that could not be a docker reference.
+
+    The name is spliced into the hand-built JSON container object of the caller together with the options, so a quote
+    in it would let a manifest control the whole object, options included.
+    """
+    if not CI_IMAGE_PATTERN.match(image):
+        raise ValueError(f"container image {image!r} is not a valid docker image reference")
+    return image
+
+
 def ci_image(manifest: Dict[str, Any], kind: str, platform: str, distribution: str) -> Dict[str, str]:
     """detectDockerAgent() / detectTestDockerAgent().
 
@@ -132,7 +147,7 @@ def ci_image(manifest: Dict[str, Any], kind: str, platform: str, distribution: s
 
     java_match = re.search(r"openjdk-\d+", args)
     return {
-        "image": image,
+        "image": validate_ci_image(image),
         "args": sanitize_container_options(args),
         "java-version": java_match.group(0) if java_match else DEFAULT_JAVA_VERSION,
     }
