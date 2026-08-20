@@ -136,6 +136,19 @@ jobs:
         with:
           python-version: '3.9'
 
+      - name: Make sure python3 resolves on the Windows runner
+        # setup-python installs `python.exe`; the composite actions all call `python3`, so a copy is created when the
+        # shim is missing rather than branching every composite action on the platform.
+        if: inputs.platform == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v python3 > /dev/null 2>&1; then
+            PYTHON_DIR=$(dirname "$(command -v python)")
+            cp "${PYTHON_DIR}/python.exe" "${PYTHON_DIR}/python3.exe"
+          fi
+          python3 --version
+
       - name: Switch the Windows JDK
         # distribution-build.jenkinsfile:901-904, kept verbatim: the Windows image ships several JDKs and the build
         # needs the one the manifest asks for.

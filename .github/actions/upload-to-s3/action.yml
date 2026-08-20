@@ -26,6 +26,13 @@ inputs:
     description: 'AWS region'
     required: false
     default: 'us-east-1'
+  tolerate-missing:
+    description: >-
+      Skip the upload instead of failing when source-path does not exist. Only uploadTestResults() needs this, because
+      it ran from the `finally` of every Jenkins branch; for artifact and index uploads a missing source means the
+      build produced nothing and has to fail.
+    required: false
+    default: 'false'
 
 runs:
   using: 'composite'
@@ -44,13 +51,16 @@ runs:
         SOURCE: ${{ inputs.source-path }}
         BUCKET: ${{ inputs.bucket }}
         UPLOAD_PATH: ${{ inputs.path }}
+        TOLERATE_MISSING: ${{ inputs.tolerate-missing }}
       run: |
         set -euo pipefail
         if [ ! -e "${SOURCE}" ]; then
-          # uploadTestResults() runs from the `finally` of every branch, so the directory can be missing when the test
-          # step died early; the Jenkins s3Upload() step tolerated that, and the real failure must stay visible.
-          echo "::warning::${SOURCE} does not exist, nothing to upload."
-          exit 0
+          if [ "${TOLERATE_MISSING}" = 'true' ]; then
+            echo "::warning::${SOURCE} does not exist, nothing to upload."
+            exit 0
+          fi
+          echo "::error::${SOURCE} does not exist, nothing to upload."
+          exit 1
         fi
         DESTINATION="s3://${BUCKET}/${UPLOAD_PATH}"
         echo "Uploading ${SOURCE} to ${DESTINATION}"

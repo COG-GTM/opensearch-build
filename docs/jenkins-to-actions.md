@@ -252,6 +252,11 @@ Fidelity was preferred over cleanliness; these are ported as-is and flagged rath
   *tar* image but with the *package* docker args, and `:373-376` runs the assemble stage on the package image with no
   args at all. `manifest_paths.py` reproduces that pairing (`image`/`args` for the build job, `assemble-image`/empty
   `assemble-args` for the assemble job) rather than making the two stages consistent.
+* **Release-candidate promotion is not gated on `RC_NUMBER`.** `uploadArtifacts.groovy:49-58` promotes the min
+  tarball and the package into `release-candidates/` for every non-feature build, RC or not, and only skips feature
+  builds. `upload-artifacts` keeps that behavior; the promotion steps additionally require the production bucket, the
+  production account and the promotion role name to be configured, so a fork without those secrets never writes to the
+  production bucket at all.
 * **The test java version ignores the distribution.** `runIntegTestScript.groovy:32` calls `detectTestDockerAgent()`
   without a platform or distribution, so `JAVA_HOME` always comes from the linux/tar image and is only exported for
   the OpenSearch core distribution off Windows. Both quirks are kept.

@@ -108,7 +108,7 @@ runs:
 
     - name: Assume the artifact promotion role
       # uploadArtifacts.groovy:357 - feature builds skip the release candidate bucket.
-      if: ${{ inputs.build-feature == '' && inputs.artifact-production-bucket-name != '' }}
+      if: ${{ inputs.build-feature == '' && inputs.artifact-production-bucket-name != '' && inputs.aws-account-artifact != '' && inputs.artifact-promotion-role-name != '' }}
       uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6
       with:
         role-to-assume: arn:aws:iam::${{ inputs.aws-account-artifact }}:role/${{ inputs.artifact-promotion-role-name }}
@@ -117,7 +117,7 @@ runs:
         aws-region: us-east-1
 
     - name: Promote the release candidate artifacts
-      if: ${{ inputs.build-feature == '' && inputs.artifact-production-bucket-name != '' }}
+      if: ${{ inputs.build-feature == '' && inputs.artifact-production-bucket-name != '' && inputs.aws-account-artifact != '' && inputs.artifact-promotion-role-name != '' }}
       shell: bash
       env:
         DISTRIBUTION: ${{ steps.info.outputs.distribution }}

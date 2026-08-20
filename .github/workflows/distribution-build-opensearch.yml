@@ -398,7 +398,12 @@ jobs:
           build-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           build-start-time: ${{ needs.verify-parameters.outputs.build-start-time }}
           rc-number: ${{ inputs.RC_NUMBER }}
-          overall-build-result: ${{ (needs.build-archives.result == 'failure' || needs.build-packages.result == 'failure') && 'FAILURE' || 'SUCCESS' }}
+          # Jenkins passed currentBuild.result, which is ABORTED for a cancelled run and never SUCCESS when nothing
+          # was built, so a cancelled or entirely skipped matrix must not be recorded as a success.
+          overall-build-result: >-
+            ${{ (needs.build-archives.result == 'failure' || needs.build-packages.result == 'failure') && 'FAILURE'
+            || (needs.build-archives.result == 'success' || needs.build-packages.result == 'success') && 'SUCCESS'
+            || 'ABORTED' }}
           metrics-host-url: ${{ secrets.METRICS_HOST_URL }}
           metrics-host-account: ${{ secrets.METRICS_HOST_ACCOUNT }}
 

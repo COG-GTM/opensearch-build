@@ -223,6 +223,18 @@ jobs:
         with:
           python-version: '3.9'
 
+      - name: Make sure python3 resolves on the Windows runner
+        # See distribution-build-archive.yml.
+        if: needs.verify-parameters.outputs.platform == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v python3 > /dev/null 2>&1; then
+            PYTHON_DIR=$(dirname "$(command -v python)")
+            cp "${PYTHON_DIR}/python.exe" "${PYTHON_DIR}/python3.exe"
+          fi
+          python3 --version
+
       - name: Stagger the component start
         # integ-test.jenkinsfile:204-222: component index * 20 seconds, to spread the load of the parallel branches.
         env:
@@ -291,6 +303,7 @@ jobs:
     name: test-report
     needs: [verify-parameters, integ-test]
     if: always() && needs.verify-parameters.result == 'success'
+      && needs.verify-parameters.outputs.has-components == 'true'
     runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
     timeout-minutes: 60
     permissions:
@@ -307,6 +320,18 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: '3.9'
+
+      - name: Make sure python3 resolves on the Windows runner
+        # See distribution-build-archive.yml.
+        if: needs.verify-parameters.outputs.platform == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v python3 > /dev/null 2>&1; then
+            PYTHON_DIR=$(dirname "$(command -v python)")
+            cp "${PYTHON_DIR}/python.exe" "${PYTHON_DIR}/python3.exe"
+          fi
+          python3 --version
 
       - name: Download the build manifest
         uses: ./.github/actions/download-build-manifest
@@ -359,6 +384,7 @@ jobs:
     name: notify
     needs: [verify-parameters, integ-test, test-report]
     if: always() && needs.verify-parameters.result == 'success'
+      && needs.verify-parameters.outputs.has-components == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

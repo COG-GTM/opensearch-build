@@ -50,6 +50,8 @@ runs:
       uses: ./.github/actions/upload-to-s3
       with:
         source-path: test-results
+        # The Jenkins step ran from the `finally` of every test branch, so the directory may not exist.
+        tolerate-missing: 'true'
         bucket: ${{ inputs.artifact-bucket-name }}
         path: ${{ steps.path.outputs.upload-path }}
         aws-account: ${{ inputs.aws-account-public }}
