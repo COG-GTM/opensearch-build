@@ -13,7 +13,10 @@ inputs:
     required: false
     default: 'integ-test'
   build-number:
-    description: 'Test run id. Jenkins appended it to the upload path only when set.'
+    description: >-
+      Extra path segment appended to `<artifact-root>/test-results`, as uploadTestResults(buildNumber:) did. Leave it
+      empty when the results were produced by ./test.sh, which already nests them under the test run id; the integ-test
+      pipeline did.
     required: false
     default: ''
   artifact-bucket-name:

@@ -70,6 +70,7 @@ runs:
         build-manifest: ${{ inputs.build-manifest }}
         job-name: ${{ inputs.job-name }}
         build-number: ${{ inputs.build-number }}
+        build-feature: ${{ inputs.build-feature }}
         public-artifact-url: ${{ inputs.public-artifact-url }}
         sign-rpm: ${{ inputs.sign-rpm }}
         rpm-signing-account: ${{ inputs.rpm-signing-account }}

@@ -140,6 +140,7 @@ jobs:
           previous-build-id: ${{ inputs.previous-build-id }}
           parallel: ${{ inputs.parallel }}
           job-name: ${{ inputs.job-name }}
+          build-number: ${{ github.run_number }}
           artifact-bucket-name: ${{ secrets.ARTIFACT_BUCKET_NAME }}
           aws-account-public: ${{ secrets.AWS_ACCOUNT_PUBLIC }}
           stash-name: builds-${{ inputs.platform }}-${{ inputs.architecture }}-${{ inputs.distribution }}

@@ -62,6 +62,9 @@ inputs:
   stash-name:
     description: 'Name of the uploaded artifact, the equivalent of the Jenkins stash name'
     required: true
+  build-number:
+    description: 'Build number, equivalent to the Jenkins BUILD_NUMBER. Stamped into build.id by build.sh.'
+    required: true
 
 outputs:
   build-manifest:
@@ -87,6 +90,7 @@ runs:
         previous-build-id: ${{ inputs.previous-build-id }}
         parallel: ${{ inputs.parallel }}
         job-name: ${{ inputs.job-name }}
+        build-number: ${{ inputs.build-number }}
         public-artifact-url: ${{ inputs.public-artifact-url }}
         artifact-bucket-name: ${{ inputs.artifact-bucket-name }}
         aws-account-public: ${{ inputs.aws-account-public }}

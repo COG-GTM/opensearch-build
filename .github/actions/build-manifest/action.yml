@@ -57,6 +57,12 @@ inputs:
     description: 'Artifact path prefix, equivalent to the Jenkins JOB_NAME'
     required: false
     default: 'distribution-build-opensearch'
+  build-number:
+    description: >-
+      Build number exported as BUILD_NUMBER for ./build.sh. src/build_workflow/build_target.py:41 falls back to a
+      random uuid when it is unset, and that id becomes build.id in the build manifest, which every artifact path is
+      derived from; the Jenkins agents always had BUILD_NUMBER in the environment.
+    required: true
   public-artifact-url:
     description: 'Public artifact URL used to resolve the previous build index'
     required: false
@@ -174,6 +180,8 @@ runs:
         SKIP_ARTIFACT_CHECK: ${{ inputs.skip-artifact-check }}
         PARALLEL: ${{ inputs.parallel }}
         BUILD_LOG_FILE: ${{ inputs.build-log-file }}
+        # build_target.py reads this to stamp build.id, which has to equal the build number the artifact paths use.
+        BUILD_NUMBER: ${{ inputs.build-number }}
       run: |
         set -euo pipefail
         # Jenkins built this argument list in Groovy and dropped the null entries; the shell equivalent appends

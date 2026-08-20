@@ -113,6 +113,7 @@ runs:
         previous-build-id: ${{ inputs.previous-build-id }}
         parallel: ${{ inputs.parallel }}
         job-name: ${{ inputs.job-name }}
+        build-number: ${{ inputs.build-number }}
         public-artifact-url: ${{ inputs.public-artifact-url }}
         artifact-bucket-name: ${{ inputs.artifact-bucket-name }}
         aws-account-public: ${{ inputs.aws-account-public }}

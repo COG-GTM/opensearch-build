@@ -295,7 +295,8 @@ jobs:
         with:
           build-manifest: ${{ env.BUILD_MANIFEST }}
           job-name: integ-test
-          build-number: ${{ github.run_number }}
+          # No build-number on purpose: test.sh already writes test-results/<test-run-id>/integ-test/..., and
+          # integ-test.jenkinsfile:267-270 called uploadTestResults() without buildNumber for exactly that reason.
           artifact-bucket-name: ${{ secrets.ARTIFACT_BUCKET_NAME }}
           aws-account-public: ${{ secrets.AWS_ACCOUNT_PUBLIC }}
 

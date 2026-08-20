@@ -17,6 +17,10 @@ inputs:
   build-number:
     description: 'Build number, equivalent to the Jenkins BUILD_NUMBER'
     required: true
+  build-feature:
+    description: 'Replaces build.version in the artifact path for feature builds, as in upload-artifacts'
+    required: false
+    default: ''
   public-artifact-url:
     description: 'Public artifact URL used as the assemble --base-url'
     required: false
@@ -53,15 +57,20 @@ runs:
         BUILD_MANIFEST: ${{ inputs.build-manifest }}
         JOB_NAME: ${{ inputs.job-name }}
         BUILD_NUMBER: ${{ inputs.build-number }}
+        BUILD_FEATURE: ${{ inputs.build-feature }}
         PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
       run: |
         set -euo pipefail
         python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
-        python3 "${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" build-manifest-info \
-          "${BUILD_MANIFEST}" \
-          --job-name "${JOB_NAME}" \
-          --build-number "${BUILD_NUMBER}" \
-          --public-artifact-url "${PUBLIC_ARTIFACT_URL}" | tee -a "$GITHUB_OUTPUT" > manifest-info.txt
+        ARGS=("${GITHUB_WORKSPACE}/.github/scripts/manifest_paths.py" build-manifest-info
+              "${BUILD_MANIFEST}"
+              --job-name "${JOB_NAME}"
+              --build-number "${BUILD_NUMBER}"
+              --public-artifact-url "${PUBLIC_ARTIFACT_URL}")
+        # A feature build stores its artifacts under <feature>/ instead of <version>/, so the assemble --base-url has
+        # to follow or the bundle manifest would point at URLs the upload never writes.
+        if [ -n "${BUILD_FEATURE}" ]; then ARGS+=(--build-feature "${BUILD_FEATURE}"); fi
+        python3 "${ARGS[@]}" | tee -a "$GITHUB_OUTPUT" > manifest-info.txt
         VERSION=$(grep '^version=' manifest-info.txt | cut -d= -f2)
         # assembleManifest.groovy:276 - majorVersion > 2 signs with release@opensearch.org
         if [ "$(echo "${VERSION}" | cut -d. -f1)" -gt 2 ]; then
