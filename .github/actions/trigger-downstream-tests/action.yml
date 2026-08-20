@@ -84,13 +84,17 @@ runs:
           echo 'Skipping INTEG tests as one of the values has empty or wrong string: integ-test-workflow, test-manifest, build-manifest-url, test-platform, test-distribution'
         else
           echo 'Running INTEG tests'
-          gh workflow run "${INTEG_TEST_WORKFLOW}" \
+          # Jenkins used `propagate: false, wait: false`, so a trigger that could not be started never failed the
+          # build stage; a workflow file missing from the default branch is enough to make `gh workflow run` exit 1.
+          if ! gh workflow run "${INTEG_TEST_WORKFLOW}" \
             --repo "${GITHUB_REPOSITORY}" \
             --ref "${REF}" \
             --field "TEST_MANIFEST=${TEST_MANIFEST}" \
             --field "BUILD_MANIFEST_URL=${BUILD_MANIFEST_URL}" \
             --field "RC_NUMBER=${RC_NUMBER}" \
-            --field "DISTRIBUTION_BUILD_URL=${DISTRIBUTION_BUILD_URL}"
+            --field "DISTRIBUTION_BUILD_URL=${DISTRIBUTION_BUILD_URL}"; then
+            echo "::warning::Failed to trigger ${INTEG_TEST_WORKFLOW}; the distribution build itself succeeded."
+          fi
           # distribution-build.jenkinsfile:1086 also passes UPDATE_GITHUB_ISSUES=true, but integ-test.jenkinsfile
           # declares no such parameter and never reads it - the integ test autocut path lives in the separate
           # updateIntegTestFailureIssues() release pipeline (docs/jenkins-to-actions.md, 'Not migrated'). An unknown

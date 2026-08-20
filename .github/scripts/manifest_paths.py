@@ -94,9 +94,10 @@ def sanitize_container_options(args: str) -> str:
         if skip_value:
             skip_value = False
             continue
-        if '"' in token:
-            # The options end up inside a hand-built JSON container object, so a double quote would break out of it.
-            raise ValueError(f"container option {token!r} contains a double quote, which is not supported")
+        if any(character in '"\\' or character < " " for character in token):
+            # The options end up inside a hand-built JSON container object built with format(), which does no escaping,
+            # so a quote, a backslash or a control character would break the fromJSON() parse of the caller.
+            raise ValueError(f"container option {token!r} contains a character that cannot be passed through JSON")
         name = token.split("=", 1)[0]
         if name in UNSUPPORTED_CONTAINER_OPTIONS:
             print(f"Dropping container option {token}: GitHub Actions does not support it.", file=sys.stderr)
