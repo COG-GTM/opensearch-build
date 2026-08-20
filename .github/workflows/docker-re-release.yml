@@ -77,9 +77,6 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Install manifest parser
-        run: python3 -m pip install --disable-pip-version-check pyyaml
-
       - name: Patch Docker image
         id: patch
         uses: ./.github/actions/patch-docker-image
@@ -127,7 +124,7 @@ jobs:
 
   docker-scan:
     name: docker-scan
-    needs: [prepare, docker-build]
+    needs: [prepare, docker-build, docker-copy]
     permissions:
       contents: read
     uses: ./.github/workflows/docker-scan.yml

@@ -55,6 +55,12 @@ runs:
         docker pull "opensearchproject/${PRODUCT}:${TAG}"
         docker pull "opensearchproject/${PRODUCT}:latest"
 
+    - name: Install manifest parser
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --disable-pip-version-check pyyaml
+
     - name: Inspect image metadata and assemble build command
       id: metadata
       shell: bash
@@ -71,7 +77,8 @@ runs:
         build_date="$(date +%Y%m%d)"
 
         manifest="manifests/${version}/${PRODUCT}-${version}.yml"
-        mapfile -t manifest_values < <(python3 - "${manifest}" <<'PY'
+        # Run the parser to a file first so a python failure is not swallowed by mapfile.
+        python3 - "${manifest}" > "${RUNNER_TEMP}/manifest_values.txt" <<'PY'
         import sys
         import yaml
 
@@ -84,7 +91,7 @@ runs:
         print(qualifier)
         print(build["version"])
         PY
-        )
+        mapfile -t manifest_values < "${RUNNER_TEMP}/manifest_values.txt"
         filename="${manifest_values[0]}"
         build_qualifier="${manifest_values[1]}"
         build_version="${manifest_values[2]}"
