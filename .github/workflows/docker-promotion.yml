@@ -93,6 +93,10 @@ jobs:
         run: |
           set -euo pipefail
           images=$(printf '%s' "${SOURCE_IMAGES}" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+          if [[ "${images}" == '[]' ]]; then
+            echo '::error::SOURCE_IMAGES must contain at least one non-empty image reference.'
+            exit 1
+          fi
           echo "images=${images}" >> "${GITHUB_OUTPUT}"
   promote:
     needs: parameters-check

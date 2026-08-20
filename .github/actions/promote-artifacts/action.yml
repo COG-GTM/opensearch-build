@@ -173,7 +173,9 @@ runs:
       with:
         artifact-path: ${{ steps.prepare.outputs.core-path }}
         sigtype: '.sig'
-        platform: ${{ inputs.distribution-platform }}
+        # promoteArtifacts.groovy:62-88 passes only sigtype/email/artifactPath to the
+        # signer closures; the signer platform stays on the PGP path, not the build platform.
+        platform: linux
         email: ${{ inputs.signing-email }}
         signer-client-role: ${{ inputs.signer-client-role }}
         signer-client-external-id: ${{ inputs.signer-client-external-id }}
@@ -195,7 +197,9 @@ runs:
       with:
         artifact-path: ${{ steps.prepare.outputs.sign-path }}
         sigtype: '.sig'
-        platform: ${{ inputs.distribution-platform }}
+        # promoteArtifacts.groovy:62-88 passes only sigtype/email/artifactPath to the
+        # signer closures; the signer platform stays on the PGP path, not the build platform.
+        platform: linux
         email: ${{ inputs.signing-email }}
         signer-client-role: ${{ inputs.signer-client-role }}
         signer-client-external-id: ${{ inputs.signer-client-external-id }}

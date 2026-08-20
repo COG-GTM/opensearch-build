@@ -296,6 +296,21 @@ outside the repository, and the tag job pushes to many component repositories.
 * `crane` presence in the promotion container image is unverified, so
   `copy-container` installs the pinned release used by
   `.github/workflows/get-ci-image-tag.yml` when `crane` is absent.
+* `configure-aws-credentials` exports credentials into the job environment, so
+  unlike Jenkins' closure-scoped `withAWS` the download-role credentials stay
+  live while later steps run until the next role assumption. The same pattern
+  appears in `promote-repos`; verify on a controlled run that the later
+  assumptions re-authenticate via OIDC rather than chaining.
+* The apt branch's `mkdir "${REPO_PATH}/base"` plus `find ... mv` can still hit
+  an "are the same file" error depending on readdir order. That comes straight
+  from `promoteRepos.groovy:217-218` and is left as a faithful port.
+* The centos7 ci-runner ships bash 4.2, where `"${arr[@]}"` on an empty array
+  trips `set -u`. Current scripts avoid it via early exits, but future edits in
+  container jobs need to keep that in mind.
+* The artifact match pattern `*".${distribution}"*` would also stage/sign
+  pre-existing `.sha512`/`.sig` sidecars if the staging tree ever contained
+  them. That does not happen today, and the trailing wildcard is what matches
+  `.tar.gz`.
 
 ## 9. Validation performed
 
