@@ -38,7 +38,7 @@ jq -c '.failed[]' "$REPORT" | while read -r entry; do
         gh issue edit "$closed_issue" --repo "$repo" --body-file "$body_file"
     else
         echo "Creating new issue in $repo"
-        IFS=',' read -ra label_list <<< "$labels"
+        IFS=',' read -ra label_list <<< "$labels,untriaged"
         for label in "${label_list[@]}"; do
             existing_label=$(gh label list --repo "$repo" -S "$label" --json name --jq '.[0].name')
             if [ "$existing_label" != "$label" ]; then

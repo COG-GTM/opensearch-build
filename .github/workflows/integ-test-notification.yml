@@ -125,10 +125,12 @@ jobs:
       - name: Collect integ test failures
         env:
           METRICS_HOST_URL: ${{ secrets.METRICS_HOST_URL }}
+          INPUT_MANIFEST: ${{ inputs.input_manifest }}
+          DISTRIBUTION_NUMBER: ${{ inputs.distribution_number }}
         run: |
           pipenv run python .github/scripts/integ-test-notification/fetch_integ_test_failures.py \
-            --input-manifest "manifests/${{ inputs.input_manifest }}" \
-            --distribution-number "${{ inputs.distribution_number }}" \
+            --input-manifest "manifests/$INPUT_MANIFEST" \
+            --distribution-number "$DISTRIBUTION_NUMBER" \
             --output-dir "$REPORT_DIR"
 
       - name: Update integ test failure issues
