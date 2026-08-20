@@ -93,6 +93,9 @@ roles and their OIDC trust policies for this repository before dispatching the w
 * Jenkins agent labels map to `ubuntu-24.04`, `ubuntu-24.04-arm`, and `windows-2022` hosted runners here. The Jenkins
   fleet used large m5/c5 instances and real Docker hosts; capacity and Docker-in-Docker behavior need a runner decision.
 * Jenkins `lock` and `buildDiscarder` are not applicable to these workflows.
+* The tar validation container keeps Jenkins' `-u 1000` docker argument; on GitHub-hosted runners the
+  checked-out workspace is owned by a different uid, so file permissions inside the tar leg may need a
+  runner/uid decision.
 * `retry(2)` is implemented inside the validation composite; job `timeout` values map to `timeout-minutes`.
 * `currentBuild.description` maps to `$GITHUB_STEP_SUMMARY` for copy, scan, and validation parameter checks.
 * `copyContainer.groovy:55-57` assumed ambient credentials for staging ECR. This port makes that assumption explicit by

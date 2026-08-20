@@ -43,7 +43,9 @@ inputs:
     description: Docker validation optional argument.
     required: false
   skip-core-plugins:
-    description: Comma-separated native plugins to skip.
+    description: >-
+      Comma-separated native plugins to skip. 'None' omits the flag, '__skip_all__' emits a bare
+      --skip-core-plugins (Jenkins empty-string semantics), and empty means not applicable.
     required: false
     default: arrow-base,arrow-flight-rpc
 runs:
@@ -69,19 +71,38 @@ runs:
         set -uo pipefail
         command=(./validation.sh)
         [[ -n "${VERSION}" ]] && command+=(--version "${VERSION}")
-        [[ -n "${FILE_PATH}" ]] && command+=(--file-path "${FILE_PATH}")
+        # --file-path, --projects, --docker-source, and --skip-core-plugins are argparse
+        # nargs='+'/'*' flags (src/validation_workflow/validation_args.py), so multi-value
+        # strings must be split into separate argv words like the Jenkins sh() invocation.
+        if [[ -n "${FILE_PATH}" ]]; then
+          read -ra file_path_values <<< "${FILE_PATH}"
+          command+=(--file-path "${file_path_values[@]}")
+        fi
         [[ -n "${DISTRIBUTION}" ]] && command+=(--distribution "${DISTRIBUTION}")
         [[ -n "${PLATFORM}" ]] && command+=(--platform "${PLATFORM}")
         [[ -n "${ARCH}" ]] && command+=(--arch "${ARCH}")
-        [[ -n "${PROJECTS}" ]] && command+=(--projects "${PROJECTS}")
-        [[ -n "${DOCKER_SOURCE}" ]] && command+=(--docker-source "${DOCKER_SOURCE}")
+        if [[ -n "${PROJECTS}" ]]; then
+          read -ra projects_values <<< "${PROJECTS}"
+          command+=(--projects "${projects_values[@]}")
+        fi
+        if [[ -n "${DOCKER_SOURCE}" ]]; then
+          read -ra docker_source_values <<< "${DOCKER_SOURCE}"
+          command+=(--docker-source "${docker_source_values[@]}")
+        fi
         [[ -n "${OS_BUILD_NUMBER}" ]] && command+=(--os-build-number "${OS_BUILD_NUMBER}")
         [[ -n "${OSD_BUILD_NUMBER}" ]] && command+=(--osd-build-number "${OSD_BUILD_NUMBER}")
         [[ -n "${ARTIFACT_TYPE}" ]] && command+=(--artifact-type "${ARTIFACT_TYPE}")
         [[ "${ALLOW_HTTP}" == 'true' ]] && command+=(--allow-http)
         [[ -n "${DOCKER_ARGS}" ]] && command+=(--"${DOCKER_ARGS}")
-        if [[ -n "${SKIP_CORE_PLUGINS}" && "${SKIP_CORE_PLUGINS}" != 'None' ]]; then
-          command+=(--skip-core-plugins "${SKIP_CORE_PLUGINS//,/ }")
+        # Match validateArtifacts.groovy:51: SKIP_CORE_PLUGINS='' in Jenkins produces a bare
+        # --skip-core-plugins (skip all) and 'None' omits the flag. The workflow passes the
+        # '__skip_all__' sentinel for the Jenkins empty-string case because an empty input
+        # here means "not applicable for this call shape".
+        if [[ "${SKIP_CORE_PLUGINS}" == '__skip_all__' ]]; then
+          command+=(--skip-core-plugins)
+        elif [[ -n "${SKIP_CORE_PLUGINS}" && "${SKIP_CORE_PLUGINS}" != 'None' ]]; then
+          read -ra skip_core_plugins_values <<< "${SKIP_CORE_PLUGINS//,/ }"
+          command+=(--skip-core-plugins "${skip_core_plugins_values[@]}")
         fi
         for attempt in 1 2; do
           echo "validation attempt ${attempt}/2"

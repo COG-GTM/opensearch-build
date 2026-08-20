@@ -63,7 +63,8 @@ on:
           '<Optional> Space-separated packed values because workflow_dispatch allows at most ten inputs:
           os-build-number=<n> osd-build-number=<n> optional-args=<using-staging-artifact-only|validate-digest-only,
           default using-staging-artifact-only>
-          skip-core-plugins=<csv, default arrow-base,arrow-flight-rpc> allow-http platform=<linux windows>.'
+          skip-core-plugins=<csv, default arrow-base,arrow-flight-rpc; None installs all, an empty value
+          skips all> allow-http platform=<linux windows>.'
         required: false
         default: 'optional-args=using-staging-artifact-only skip-core-plugins=arrow-base,arrow-flight-rpc platform=linux,windows'
         type: string
@@ -113,7 +114,12 @@ jobs:
               os-build-number=*) os_build_number="${option#*=}" ;;
               osd-build-number=*) osd_build_number="${option#*=}" ;;
               optional-args=*) optional_args="${option#*=}" ;;
-              skip-core-plugins=*) skip_core_plugins="${option#*=}" ;;
+              # skip-core-plugins= with an empty value maps to '__skip_all__': Jenkins passes the
+              # empty string through to a bare --skip-core-plugins flag (skip all core plugins).
+              skip-core-plugins=*)
+                skip_core_plugins="${option#*=}"
+                [[ -z "${skip_core_plugins}" ]] && skip_core_plugins='__skip_all__'
+                ;;
               allow-http|allow-http=true) allow_http='true' ;;
               platform=*) platform="${option#*=}"; platform="${platform//,/ }" ;;
               '') ;;
@@ -272,6 +278,19 @@ jobs:
     steps:
       - name: Checkout validation workspace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      # docker and zip legs run directly on hosted runners without the ci-runner image, so
+      # run.sh's python3/pip/pipenv prerequisites must be installed (setup-python also provides
+      # a python3 shim on windows-2022 for the bash invocation).
+      - name: Set up Python for container-less runners
+        if: ${{ matrix.container == '' }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: '3.9'
+
+      - name: Install pipenv for container-less runners
+        if: ${{ matrix.container == '' }}
+        run: python -m pip install pipenv
 
       - name: Validate artifacts
         uses: ./.github/actions/validate-artifacts
