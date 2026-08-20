@@ -64,7 +64,8 @@ on:
           os-build-number=<n> osd-build-number=<n> optional-args=<using-staging-artifact-only|validate-digest-only,
           default using-staging-artifact-only>
           skip-core-plugins=<csv, default arrow-base,arrow-flight-rpc; None installs all, an empty value
-          skips all> allow-http platform=<linux,windows>.'
+          skips all> allow-http platform=<linux,windows> (accepted for Jenkins parameter parity but unused:
+          Jenkins derives the platform from the distribution and never filters on PLATFORM).'
         required: false
         default: 'optional-args=using-staging-artifact-only skip-core-plugins=arrow-base,arrow-flight-rpc platform=linux,windows'
         type: string
@@ -232,15 +233,14 @@ jobs:
               "tar": "-u 1000",
           }
           systemd_distributions = ("rpm", "yum", "deb")
-          platforms = os.environ["PLATFORM"].split()
           matrix = []
           for distribution in os.environ["DISTRIBUTION"].split():
               for architecture in os.environ["ARCHITECTURE"].split():
                   if distribution == "zip" and architecture == "arm64":
                       continue
+                  # Jenkins derives the platform from the distribution (mapDistributionToPlatform,
+                  # validate-artifacts-lf.jenkinsfile:192-205); the PLATFORM parameter never filters legs.
                   platform = "windows" if distribution == "zip" else "linux"
-                  if platform not in platforms:
-                      continue
                   runner = "windows-2022" if platform == "windows" else (
                       "ubuntu-24.04-arm" if architecture == "arm64" else "ubuntu-24.04"
                   )
