@@ -98,8 +98,14 @@ therefore relies on the artifact-promotion role also being able to read from sta
 * The tar validation container keeps Jenkins' `-u 1000` docker argument; on GitHub-hosted runners the
   checked-out workspace is owned by a different uid, so file permissions inside the tar leg may need a
   runner/uid decision.
-* An empty validation matrix is emitted as a warning and skipped as a successful no-op, matching Jenkins' empty
-  parallel-map behavior.
+* An empty validation matrix is emitted as a warning plus a step-summary line and skipped as a successful no-op,
+  matching Jenkins' empty parallel-map behavior.
+* arm64 validation legs pull the same ci-runner image tags Jenkins used on its arm64 agents; those tags are assumed
+  to be multi-arch manifests and need runtime verification before dispatching arm64 runs.
+* `docker-re-release` passes the running image's version label as the git checkout ref for the docker build
+  (`patchDockerImage.groovy:65-69` did the same via `buildGitRef`), and derives the manifest path
+  `manifests/<version>/<product>-<version>.yml` from that label; both couplings are inherited from Jenkins and fail
+  for versions whose refs or manifests no longer exist.
 * `retry(2)` is implemented inside the validation composite; job `timeout` values map to `timeout-minutes`.
 * `currentBuild.description` maps to `$GITHUB_STEP_SUMMARY` for copy, scan, and validation parameter checks.
 * `copyContainer.groovy:55-57` assumed ambient credentials for staging ECR. This port makes that assumption explicit by
