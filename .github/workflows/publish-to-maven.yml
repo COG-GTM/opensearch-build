@@ -34,6 +34,8 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-centos7-opensearch-build-v3
+      # need to switch to root so that github actions can install runner binary on container without permission issues.
+      options: --user root
     timeout-minutes: 60
     environment: production-maven
     permissions:

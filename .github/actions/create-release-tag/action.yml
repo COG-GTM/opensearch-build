@@ -62,6 +62,7 @@ runs:
           fi
         done < <(jq -c '.[]' <<< "${components_json}")
         if [[ "${#untagged[@]}" -ne 0 ]]; then
-          printf '::error::Having issues creating tag in some repos. Please resolve it manually.\nList of untagged repos:\n%s\n' "${untagged[*]}"
+          printf 'Untagged repos: %s\n' "${untagged[*]}"
+          printf '::error::Having issues creating tag in some repos. Please resolve it manually. Untagged repos: %s\n' "${untagged[*]}"
           exit 1
         fi
