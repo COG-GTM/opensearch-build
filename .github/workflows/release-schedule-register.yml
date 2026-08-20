@@ -1,0 +1,85 @@
+---
+name: release-schedule-register
+
+# Port of jenkins/release-workflows/release-schedule.jenkinsfile (Jenkins job release-schedule-register).
+# The Jenkins job stays authoritative until a human cuts over, so this workflow is manual-only for now.
+
+on:
+  workflow_dispatch:
+    inputs:
+      releases_url:
+        description: 'URL of the OpenSearch releases schedule page to parse.'
+        required: false
+        default: 'https://opensearch.org/releases.html'
+        type: string
+      register:
+        description: 'Write the parsed schedule to the opensearch_release_schedule metrics index. Not implemented yet, see TODO(migration).'
+        required: false
+        default: false
+        type: boolean
+  # enable at cutover; Jenkins job release-schedule-register still runs this
+  # schedule:
+  #   # Jenkins cron('H 1 * * *'), hashed by Jenkins into a stable minute of the 01:00 UTC hour.
+  #   - cron: '37 1 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  register-release-schedule:
+    # Jenkins agent label: Jenkins-Agent-AL2023-X64-M54xlarge-Docker-Host, running the
+    # opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-build-v1 container. This job only fetches a
+    # web page and parses it with the repository's own Python tooling, so a hosted runner is enough; swap in a
+    # self-hosted label (and the ci-runner container via .github/workflows/get-ci-image-tag.yml) if the runner
+    # strategy in docs/jenkins-to-github-actions-migration.md section 4a decides otherwise.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHON_VERSION: 3.9
+      # the fallback applies to scheduled runs, where the inputs context is empty
+      RELEASES_URL: ${{ inputs.releases_url || 'https://opensearch.org/releases.html' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install Pipenv and Dependencies
+        run: |
+          python -m pip install --upgrade pipenv==2023.6.12 wheel
+          pipenv install --deploy --dev
+      - name: Parse release schedule
+        run: |
+          pipenv run python src/run_release_schedule.py --releases-url "$RELEASES_URL" --output release-schedule.json
+      - name: Summarize parsed schedule
+        run: |
+          {
+            echo "### Release schedule parsed from $RELEASES_URL"
+            echo
+            echo "| Version | RC date | Release date | Release manager | Release issue |"
+            echo "| --- | --- | --- | --- | --- |"
+            jq -r 'def cell: tostring | gsub("\\|"; "\\|");
+                 .[] | "| \(.version | cell) | \(.rc_date | cell) | \(.release_date | cell) | \(.release_manager | cell) | \(.release_issue | cell) |"' release-schedule.json
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-schedule
+          path: ./release-schedule.json
+      - name: Warn that nothing was registered
+        if: ${{ !inputs.register }}
+        run: |
+          echo "::warning::Parsed only. The schedule was NOT written to the opensearch_release_schedule metrics index, that behavior is not migrated yet (TODO(migration))."
+          echo "> **Not registered.** The metrics-index write is not migrated yet, see TODO(migration) in this workflow." >> "$GITHUB_STEP_SUMMARY"
+      # TODO(migration): registerReleaseSchedule() lives in the external opensearch-build-libraries shared
+      # library (jenkins@13.5.0). It writes each row into the opensearch_release_schedule metrics index using
+      # METRICS_HOST_URL and SigV4 credentials that exist on the Jenkins controller and are not available in
+      # this repository, so it cannot be reimplemented here without that source. This step fails fast rather
+      # than pretending the registration happened.
+      - name: Register release schedule in the metrics index
+        if: ${{ inputs.register }}
+        env:
+          METRICS_HOST_URL: ${{ secrets.METRICS_HOST_URL }}
+          METRICS_HOST_AWS_ROLE_ARN: ${{ secrets.METRICS_HOST_AWS_ROLE_ARN }}
+        run: |
+          echo "::error::TODO(migration): registerReleaseSchedule() is not ported. It is defined in opensearch-build-libraries and writes to the opensearch_release_schedule metrics index using METRICS_HOST_URL and SigV4 credentials that are not present in this repository. Keep using the Jenkins job release-schedule-register until this is implemented."
+          exit 1
