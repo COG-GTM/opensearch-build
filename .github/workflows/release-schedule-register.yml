@@ -36,7 +36,8 @@ jobs:
     timeout-minutes: 30
     env:
       PYTHON_VERSION: 3.9
-      RELEASES_URL: ${{ inputs.releases_url }}
+      # the fallback applies to scheduled runs, where the inputs context is empty
+      RELEASES_URL: ${{ inputs.releases_url || 'https://opensearch.org/releases.html' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Set up Python ${{ env.PYTHON_VERSION }}
