@@ -71,6 +71,7 @@ fi
 
 DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "$WORK_DIR"' EXIT
 MANIFEST_PATH="$WORK_DIR/manifest.yml"
 
 echo "Downloading bundle manifest from $BUNDLE_MANIFEST_URL"

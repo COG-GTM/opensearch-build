@@ -48,14 +48,18 @@ jobs:
       # Jenkins pulled 'opensearchstaging/ci-runner:...' with registryUrl https://public.ecr.aws/
       CI_RUNNER_IMAGE: 'public.ecr.aws/opensearchstaging/ci-runner:ci-runner-almalinux8-systemd-base-integtest-v1'
       CONTAINER_NAME: 'rpm-validation'
+      # workflow_dispatch inputs are passed through env rather than interpolated into the
+      # shell, so a value containing shell metacharacters cannot break out of the script.
+      BUNDLE_MANIFEST_URL: ${{ inputs.bundle_manifest_url }}
+      ARCH: ${{ inputs.arch }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Record the bundle manifest url
         # Jenkins: currentBuild.description = BUNDLE_MANIFEST_URL
         run: |
-          echo "Bundle manifest url: ${{ inputs.bundle_manifest_url }}" >> $GITHUB_STEP_SUMMARY
-          echo "Architecture: ${{ inputs.arch }}" >> $GITHUB_STEP_SUMMARY
+          echo "Bundle manifest url: $BUNDLE_MANIFEST_URL" >> $GITHUB_STEP_SUMMARY
+          echo "Architecture: $ARCH" >> $GITHUB_STEP_SUMMARY
 
       - name: Start the ci-runner container with systemd
         # This deliberately does not use a job-level `container:`. GitHub Actions overrides the
@@ -96,10 +100,13 @@ jobs:
         # opensearch-build-libraries shared library. Reimplemented against this repository's own
         # validation workflow, see scripts/validation/rpm-dist-validation.sh.
         run: |
-          docker exec ${{ env.CONTAINER_NAME }} \
+          docker exec \
+            -e BUNDLE_MANIFEST_URL \
+            -e ARCH \
+            ${{ env.CONTAINER_NAME }} \
             ./scripts/validation/rpm-dist-validation.sh \
-            --bundle-manifest-url '${{ inputs.bundle_manifest_url }}' \
-            --arch '${{ inputs.arch }}'
+            --bundle-manifest-url "$BUNDLE_MANIFEST_URL" \
+            --arch "$ARCH"
 
       - name: Cleanup
         # Jenkins: post { always { sh "rm -rf $WORKSPACE/*"; postCleanup() } }.
