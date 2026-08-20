@@ -159,6 +159,10 @@ the automatic token. The Jenkins 1Password bindings named
 `GITHUB_USER`/`GITHUB_TOKEN` (`createReleaseTag.groovy:10-13`, `signArtifacts`)
 are therefore configured as `RELEASE_BOT_USER`/`RELEASE_BOT_TOKEN` and exported
 into the composite actions under the Jenkins names inside the signing step only.
+`RELEASE_BOT_TOKEN` must be a repository-level secret: the lock-manifests job
+has no environment by design, so an environment-scoped token would be empty
+and `secrets.RELEASE_BOT_TOKEN || github.token` would silently use the
+automatic token instead.
 
 `PUBLIC_ARTIFACT_URL` is a repository variable, not a secret, and replaces the
 Jenkins `PUBLIC_ARTIFACT_URL` environment value in `promoteRepos.groovy:56-57`.
