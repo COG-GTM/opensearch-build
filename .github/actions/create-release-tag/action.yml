@@ -23,11 +23,11 @@ runs:
       env:
         DIST_MANIFEST: ${{ inputs.dist-manifest }}
         VERSION: ${{ inputs.tag-version }}
-        GITHUB_BOT_TOKEN: ${{ inputs.github-bot-token }}
+        RELEASE_BOT_TOKEN: ${{ inputs.github-bot-token }}
       run: |
         set -euo pipefail
-        if [[ -z "${GITHUB_BOT_TOKEN}" ]]; then
-          echo '::error::GITHUB_BOT_TOKEN must be configured; the default GITHUB_TOKEN cannot push to component repositories.'
+        if [[ -z "${RELEASE_BOT_TOKEN}" ]]; then
+          echo '::error::RELEASE_BOT_TOKEN must be configured; the default GITHUB_TOKEN cannot push to component repositories.'
           exit 1
         fi
         python3 -m pip install --quiet pyyaml \
@@ -43,14 +43,14 @@ runs:
           echo "Tagging ${name} at ${commit_id} ..."
           workdir="${RUNNER_TEMP}/release-tag-${name//[^A-Za-z0-9_.-]/-}"
           rm -rf "${workdir}"
-          git -c "http.extraheader=Authorization: Bearer ${GITHUB_BOT_TOKEN}" clone --quiet "${repo}" "${workdir}"
+          git -c "http.extraheader=Authorization: Bearer ${RELEASE_BOT_TOKEN}" clone --quiet "${repo}" "${workdir}"
           git -C "${workdir}" fetch --quiet origin "${commit_id}"
           git -C "${workdir}" checkout --quiet --detach "${commit_id}"
-          tag_id=$(git -c "http.extraheader=Authorization: Bearer ${GITHUB_BOT_TOKEN}" ls-remote --tags "${repo}" "${tag_version}" | awk 'NR==1{print $1}')
+          tag_id=$(git -c "http.extraheader=Authorization: Bearer ${RELEASE_BOT_TOKEN}" ls-remote --tags "${repo}" "${tag_version}" | awk 'NR==1{print $1}')
           if [[ -z "${tag_id}" ]]; then
             echo "Creating ${tag_version} tag for ${name}"
             git -C "${workdir}" tag "${tag_version}"
-            if ! git -C "${workdir}" -c "http.extraheader=Authorization: Bearer ${GITHUB_BOT_TOKEN}" \
+            if ! git -C "${workdir}" -c "http.extraheader=Authorization: Bearer ${RELEASE_BOT_TOKEN}" \
               push origin "${tag_version}" >/dev/null; then
               untagged+=("${name}")
             fi
