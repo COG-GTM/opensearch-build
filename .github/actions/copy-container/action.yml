@@ -1,5 +1,7 @@
 ---
-# Ports opensearch-build-libraries vars/copyContainer.groovy:19-89, called by
+# Ports opensearch-build-libraries vars/copyContainer.groovy:19-89 at the
+# origin/lf-jenkins ref, which is the library version
+# promote-docker-ecr-lf.jenkinsfile pins (jenkins@lf-jenkins). Called by
 # the local promote-container implementation of
 # jenkins/release-workflows/promote-docker-ecr-lf.jenkinsfile:78-89. See
 # docs/jenkins-to-actions-release-promotion.md.
@@ -63,8 +65,9 @@ runs:
         set -euo pipefail
         printf '%s' "${PASSWORD}" | docker login --username "${USERNAME}" --password-stdin
 
+    # lf copyContainer.groovy:53 gates the production login on the destination only.
     - name: Login to production Docker Hub
-      if: ${{ inputs.source-registry == 'opensearchproject' || inputs.destination-registry == 'opensearchproject' }}
+      if: ${{ inputs.destination-registry == 'opensearchproject' }}
       shell: bash
       env:
         USERNAME: ${{ inputs.production-dockerhub-username }}
@@ -73,18 +76,11 @@ runs:
         set -euo pipefail
         printf '%s' "${PASSWORD}" | docker login --username "${USERNAME}" --password-stdin
 
-    - name: Login to staging ECR Public
-      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchstaging' }}
-      shell: bash
-      env:
-        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
-      run: |
-        set -euo pipefail
-        registry="${DESTINATION_REGISTRY}"
-        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${registry}"
-
+    # lf copyContainer.groovy:60-63: one ECR branch covering the LF staging and
+    # production namespaces, logging in to the registry root rather than the full
+    # destination. There is no public.ecr.aws/opensearchstaging branch at this ref.
     - name: Assume production artifact role for ECR
-      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchproject' || inputs.destination-registry == 'public.ecr.aws/opensearchproject' }}
+      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchorg/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchorg/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchorg/opensearchproject' }}
       uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6
       with:
         role-to-assume: arn:aws:iam::${{ inputs.aws-account-artifact }}:role/${{ inputs.artifact-promotion-role-name }}
@@ -92,15 +88,37 @@ runs:
         role-session-name: github-actions-copy-container
         aws-region: us-east-1
 
-    - name: Login to production ECR Public
-      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchproject' || inputs.destination-registry == 'public.ecr.aws/opensearchproject' }}
+    - name: Login to ECR Public
+      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchorg/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchorg/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchorg/opensearchproject' }}
       shell: bash
       env:
         DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
       run: |
         set -euo pipefail
         registry="${DESTINATION_REGISTRY}"
+        if [[ "${registry}" == public.ecr.aws/* ]]; then
+          registry=$(echo "${registry}" | cut -d/ -f1,2)
+        fi
         aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${registry}"
+
+    - name: Check for crane
+      id: crane
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v crane > /dev/null 2>&1; then
+          echo 'present=true' >> "${GITHUB_OUTPUT}"
+        else
+          echo 'present=false' >> "${GITHUB_OUTPUT}"
+        fi
+
+    # The promotion container image is not guaranteed to ship crane; install the
+    # same pinned release .github/workflows/get-ci-image-tag.yml uses.
+    - name: Install crane
+      if: ${{ steps.crane.outputs.present != 'true' }}
+      uses: iarekylew00t/crane-installer@129958071ac638780427317f25d7c5e66f5e88e4  # v1
+      with:
+        crane-release: v0.15.2
 
     - name: Copy container tags
       shell: bash

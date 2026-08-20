@@ -1,6 +1,7 @@
 ---
 # Ports opensearch-build-libraries vars/promoteContainer.groovy:20-110 and
-# vars/copyContainer.groovy:19-89, from
+# vars/copyContainer.groovy:19-89 at the origin/lf-jenkins ref, the library
+# version pinned by
 # jenkins/release-workflows/promote-docker-ecr-lf.jenkinsfile:76-90. Jenkins
 # triggered docker-copy jobs; this slice implements their copy locally because
 # docker-copy is owned by a parallel migration. See the migration document.
@@ -81,7 +82,7 @@ runs:
       with:
         source-registry: ${{ steps.source.outputs.registry }}
         source-image: ${{ inputs.image-repository }}
-        destination-registry: public.ecr.aws/opensearchproject
+        destination-registry: public.ecr.aws/opensearchorg/opensearchproject
         destination-image: ${{ inputs.image-repository }}
         release-version: ${{ inputs.release-version }}
         tag-major-version: ${{ inputs.tag-major-version }}

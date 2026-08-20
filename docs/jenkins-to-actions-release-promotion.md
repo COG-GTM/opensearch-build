@@ -45,11 +45,32 @@ later. No workflow has a `push` or `pull_request` trigger.
 | `build job:` (`release-tag.jenkinsfile:68-77`; `promoteContainer.groovy:39-107`) | The manifest-lock job accepts an optional workflow name and otherwise emits a notice with Jenkins' exact parameters. Docker copy is implemented locally in this slice because the `docker-copy` migration is owned by another session. |
 | `withAWS(role:, roleAccount:)` (`promoteArtifacts.groovy:55-57,91-125`; `promoteRepos.groovy:69-73,238-241`; `copyContainer.groovy:59-64`) | Job `permissions: id-token: write` and pinned `aws-actions/configure-aws-credentials` with `role-to-assume: arn:aws:iam::${{ inputs.aws-account }}:role/${{ inputs.role-name }}` and `role-duration-seconds: 900`. |
 | `withSecrets` / 1Password (`promoteArtifacts.groovy:13-19,43`; `promoteRepos.groovy:63-67,169-180`; `copyContainer.groovy:20-33,44-64`; `publishToMaven.groovy:34-40`) | Repository or environment secrets are exported by the caller job and passed into composite-action inputs. Composite actions cannot read the `secrets` context. |
-| `library(identifier: 'jenkins@12.0.0')` (`promote-artifacts.jenkinsfile:13-16`; `promote-repos.jenkinsfile:13-16`; `release-tag.jenkinsfile:13-16`) | Source behavior was read from the cloned shared library. The action code is local and reviewable. |
-| `library(identifier: 'jenkins@lf-jenkins')` (`promote-docker-ecr-lf.jenkinsfile:13-16`; `publish-to-maven-lf.jenkinsfile:13-16`) | Docker behavior is local for this slice; the Maven resource `resources/publish/stage-maven-release.sh` is fetched from the `lf-jenkins` ref at runtime rather than copied into this repository. |
+| `library(identifier: 'jenkins@12.0.0')` (`promote-artifacts.jenkinsfile:13-16`; `promote-repos.jenkinsfile:13-16`; `release-tag.jenkinsfile:13-16`) | Source behavior was read from the shared library at tag `12.0.0`. The action code is local and reviewable. |
+| `library(identifier: 'jenkins@lf-jenkins')` (`promote-docker-ecr-lf.jenkinsfile:13-16`; `publish-to-maven-lf.jenkinsfile:13-16`) | Container behavior was read from the shared library at the `lf-jenkins` branch. Docker copy is local for this slice; the Maven resource `resources/publish/stage-maven-release.sh` is fetched from the `lf-jenkins` ref at runtime rather than copied into this repository. |
 | `readYaml` / `findFiles` / `s3Download` / `s3Upload` / `cleanWs` (`promoteArtifacts.groovy:24-25,59-60,84-87,101-124`; `promoteRepos.groovy:22-23,72,240`; `promote-artifacts.jenkinsfile:78`) | `release_manifest_facts.py`, `find`, `aws s3 cp/sync` with `--exclude '*' --include`, and ephemeral job workspaces. The glob dialects differ: the Jenkins Ant pattern `**/x*` means "any depth, including none", while an aws-cli `--include "**/x*"` requires a literal `/`; the faithful aws-cli translation is `*x*`, because aws-cli `*` already crosses `/`. |
 
 ## 3. Shared-library steps converted
+
+Each Jenkins pipeline pins its own shared-library version, and the ported steps
+follow the version its caller pins:
+
+| Jenkins pipeline | Library version | Ported steps that follow it |
+| --- | --- | --- |
+| `promote-artifacts.jenkinsfile`, `promote-repos.jenkinsfile`, `release-tag.jenkinsfile` | `jenkins@12.0.0` | `promoteArtifacts`, `promoteRepos`, `createReleaseTag`, `createSha512Checksums`, `signArtifacts`, `downloadFromS3` |
+| `promote-docker-ecr-lf.jenkinsfile`, `publish-to-maven-lf.jenkinsfile` | `jenkins@lf-jenkins` | `promoteContainer`, `copyContainer`, `publishToMaven`, `loadCustomScript` |
+
+Of the vars used by this slice, only `promoteContainer.groovy` and
+`copyContainer.groovy` differ materially between `main`/`12.0.0` and
+`lf-jenkins`, and both are reached only from the lf pipeline. The container
+actions therefore follow `lf-jenkins`: the ECR production namespace is
+`public.ecr.aws/opensearchorg/opensearchproject`
+(`lf-jenkins:vars/promoteContainer.groovy:34`), the production Docker Hub login
+is gated on the destination registry alone
+(`lf-jenkins:vars/copyContainer.groovy:53`), and the single ECR branch
+(`:60-63`) logs in to the registry *root* `public.ecr.aws/opensearchorg`
+computed from the first two destination segments (`:37-44`). There is no
+`public.ecr.aws/opensearchstaging` branch at that ref, so no such condition is
+carried. Everything else in this slice follows `12.0.0`.
 
 * `promoteArtifacts` became `.github/actions/promote-artifacts`. It preserves
   the Linux/windows distribution map and prints `Skip <distribution> due to
@@ -246,6 +267,35 @@ outside the repository, and the tag job pushes to many component repositories.
   local rollback point. Likewise `mkdir "${REPO_PATH}/base"` is called without
   `-p`, matching `promoteRepos.groovy:216`, so a re-run over a dirty workspace
   fails rather than continuing.
+
+### Known risks and unverified behavior
+
+* Staging two matched artifacts with the same basename hard-errors in
+  `promote-artifacts` instead of being a no-op. Jenkins signs each match in
+  place (`promoteArtifacts.groovy:80-88`) and has no basename collision, so the
+  failure is a property of the staged-directory design, not of the port.
+* Component tag pushes authenticate with
+  `git -c "http.extraheader=Authorization: Bearer <token>"`. This replaces the
+  Jenkins token-in-URL form (`createReleaseTag.groovy:16-17`) and is
+  **unverified against a real repository**; `actions/checkout` uses basic auth
+  for the same purpose, which may be the safer form.
+* The centos7 ci-runner containers may not satisfy GitHub's injected Node 20
+  runtime for node-based actions (`actions/checkout`,
+  `configure-aws-credentials`, `crane-installer`). This is unverified; a job
+  that runs those actions inside such a container can fail before any ported
+  logic executes.
+* The data-prepper staging source registry
+  (`DATA_PREPPER_STAGING_CONTAINER_REPOSITORY`) receives no login in lf
+  `copyContainer.groovy:46-63` either, so `crane cp` pulls it unauthenticated.
+  This is a faithful port and works only while that registry allows anonymous
+  pulls.
+* A promotion whose glob matches nothing still reaches the final `aws s3 cp`
+  and fails there rather than failing fast. That matches
+  `promoteArtifacts.groovy:110-124`, where the uploads run regardless of what
+  `findFiles` matched.
+* `crane` presence in the promotion container image is unverified, so
+  `copy-container` installs the pinned release used by
+  `.github/workflows/get-ci-image-tag.yml` when `crane` is absent.
 
 ## 9. Validation performed
 

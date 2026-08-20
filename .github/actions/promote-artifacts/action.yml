@@ -116,9 +116,12 @@ runs:
           # checksums are produced in one copy, signatures in the other.
           matched_dir="${RUNNER_TEMP}/promote-artifacts-checksums"
           sign_dir="${RUNNER_TEMP}/promote-artifacts-signing"
+          # The mapping file lives outside both staged directories: those are handed to
+          # the checksum and signing actions as artifact sets.
+          mapping="${RUNNER_TEMP}/promote-artifacts-mapping"
           rm -rf "${matched_dir}" "${sign_dir}"
           mkdir -p "${matched_dir}" "${sign_dir}"
-          : > "${matched_dir}/mapping"
+          : > "${mapping}"
           index=0
           while IFS= read -r -d '' file; do
             base=$(basename "${file}")
@@ -131,13 +134,13 @@ runs:
               fi
               cp -- "${file}" "${matched_dir}/${base}"
               cp -- "${file}" "${sign_dir}/${base}"
-              printf '%s\t%s\n' "${base}" "${file}" >> "${matched_dir}/mapping"
+              printf '%s\t%s\n' "${base}" "${file}" >> "${mapping}"
               index=$((index + 1))
             fi
           done < <(find "${local_root}/${artifact_path}" -type f -print0)
           echo "checksum-path=${matched_dir}" >> "${GITHUB_OUTPUT}"
           echo "sign-path=${sign_dir}" >> "${GITHUB_OUTPUT}"
-          echo "mapping=${matched_dir}/mapping" >> "${GITHUB_OUTPUT}"
+          echo "mapping=${mapping}" >> "${GITHUB_OUTPUT}"
           if [[ "${distribution}" == tar && -d "${core_plugins}" ]]; then
             echo 'has-core=true' >> "${GITHUB_OUTPUT}"
             echo "core-path=${core_plugins}" >> "${GITHUB_OUTPUT}"
@@ -246,19 +249,23 @@ runs:
         build_root="${local_root}/${artifact_path}/builds/${FILENAME}"
         dist_root="${build_root}/dist"
         build_manifest="${build_root}/manifest.yml"
-        if [[ "${DISTRIBUTION_NAME}" == tar && -d "${build_root}/core-plugins" ]]; then
-          python3 -m pip install --quiet pyyaml \
-            || python3 -m pip install --quiet --break-system-packages pyyaml
-          # Ant "**/x*" means any depth including none; the aws-cli "*" already crosses "/",
-          # so the faithful translation of the Jenkins includePathPattern is "*x*".
-          while IFS= read -r plugin_subpath; do
-            plugin_file=$(basename "${plugin_subpath}")
-            plugin_name="${plugin_file%-${REVISION}.zip}"
-            aws s3 cp --recursive "${build_root}/core-plugins/" \
-              "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/releases/plugins/${plugin_name}/${REVISION}/" \
-              --exclude '*' --include "*${plugin_name}*"
-          done < <(python3 .github/scripts/release_manifest_facts.py build-manifest-core-plugins \
-            --manifest "${build_manifest}")
+        if [[ "${DISTRIBUTION_NAME}" == tar ]]; then
+          # promoteArtifacts.groovy:92-108: core plugins are published only when the
+          # core-plugins directory exists, but the min upload is gated on tar alone.
+          if [[ -d "${build_root}/core-plugins" ]]; then
+            python3 -m pip install --quiet pyyaml \
+              || python3 -m pip install --quiet --break-system-packages pyyaml
+            # Ant "**/x*" means any depth including none; the aws-cli "*" already crosses "/",
+            # so the faithful translation of the Jenkins includePathPattern is "*x*".
+            while IFS= read -r plugin_subpath; do
+              plugin_file=$(basename "${plugin_subpath}")
+              plugin_name="${plugin_file%-${REVISION}.zip}"
+              aws s3 cp --recursive "${build_root}/core-plugins/" \
+                "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/releases/plugins/${plugin_name}/${REVISION}/" \
+                --exclude '*' --include "*${plugin_name}*"
+            done < <(python3 .github/scripts/release_manifest_facts.py build-manifest-core-plugins \
+              --manifest "${build_manifest}")
+          fi
           aws s3 cp --recursive "${dist_root}/" \
             "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/releases/core/${FILENAME}/${REVISION}/" \
             --exclude '*' --include "*${FILENAME}-min-${REVISION}-${DISTRIBUTION_PLATFORM}-${DISTRIBUTION_ARCHITECTURE}*"

@@ -53,7 +53,10 @@ def build_manifest_core_plugins(path: str) -> None:
     components = manifest["components"]
     if not isinstance(components, list):
         raise ValueError(f"Manifest {path} has no component list")
-    for plugin in components[0]["artifacts"]["core-plugins"]:
+    if not components:
+        return
+    artifacts = components[0].get("artifacts") or {}
+    for plugin in artifacts.get("core-plugins") or []:
         print(plugin)
 
 
