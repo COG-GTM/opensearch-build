@@ -375,9 +375,26 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  publish-test-metrics:
+    # integ-test.jenkinsfile:308-322: the second `retry(5)` block of post { always } ran on agent_nodes['linux_x64'],
+    # not on the build platform agent, so the metrics publish stays on a linux runner even for a windows build manifest.
+    # Jenkins re-downloaded the report from ci.opensearch.org; the artifact uploaded by test-report is the same file.
+    name: publish-test-metrics
+    needs: [verify-parameters, test-report]
+    if: always() && needs.test-report.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: test-report
+
       - name: Publish the integration test results
-        # integ-test.jenkinsfile:309-322. Jenkins re-downloaded the uploaded report from ci.opensearch.org; the local
-        # copy created above is the same file.
         uses: ./.github/actions/publish-integ-test-results
         with:
           test-report-manifest-yml: test-report.yml
@@ -394,7 +411,7 @@ jobs:
     # integ-test.jenkinsfile:330-346 post { always }: `build job: 'integ-test-notification', wait: false`. That
     # pipeline is not part of this migration slice.
     name: notify
-    needs: [verify-parameters, integ-test, test-report]
+    needs: [verify-parameters, integ-test, test-report, publish-test-metrics]
     if: always() && needs.verify-parameters.result == 'success'
       && needs.verify-parameters.outputs.has-components == 'true'
     runs-on: ubuntu-24.04

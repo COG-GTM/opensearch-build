@@ -71,7 +71,10 @@ runs:
         } > "${CURL_CONFIG}"
         SIGV4=(--config "${CURL_CONFIG}")
 
-        if curl -s -I "${METRICS_HOST_URL}/${INDEX}" "${SIGV4[@]}" | grep -qE 'HTTP/[0-9]+(\.[0-9]+)? 200'; then
+        # `-w '%{http_code}'` instead of piping the headers into `grep -q`, which can kill curl with SIGPIPE and make
+        # the pipeline status non-zero under `pipefail` even though the index exists.
+        INDEX_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -I "${METRICS_HOST_URL}/${INDEX}" "${SIGV4[@]}")
+        if [ "${INDEX_STATUS}" = '200' ]; then
           echo "Index ${INDEX} already exists. Indexing results."
         else
           echo "Index ${INDEX} does not exist. Creating..."

@@ -54,7 +54,8 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p "$(dirname "${MANIFEST_PATH}")"
-        curl -sSL --retry 5 "${URL}" --output "${MANIFEST_PATH}"
+        # --fail so an S3/CloudFront error page is not written out as the manifest and parsed as one later.
+        curl -sSL --fail --retry 5 "${URL}" --output "${MANIFEST_PATH}"
         cat "${MANIFEST_PATH}"
 
     - name: Read the build manifest

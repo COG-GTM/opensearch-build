@@ -256,6 +256,12 @@ Fidelity was preferred over cleanliness; these are ported as-is and flagged rath
   *tar* image but with the *package* docker args, and `:373-376` runs the assemble stage on the package image with no
   args at all. `manifest_paths.py` reproduces that pairing (`image`/`args` for the build job, `assemble-image`/empty
   `assemble-args` for the assemble job) rather than making the two stages consistent.
+* **The incremental `latest` lookup and the index file can disagree for a qualifier release.** `buildManifest.groovy`
+  resolves `latest` from `<job>/<input manifest version-qualifier>/index/...` while `uploadIndexFile.groovy` writes it
+  under the *build manifest* `build.version`; for a manifest carrying a `qualifier` those prefixes only agree if the
+  build version already embeds it, otherwise the lookup misses and the build silently falls back to a full build. The
+  port keeps both sides exactly as they are (`build-manifest` reads `revision`, `upload-index-file` reads
+  `index_file_root()`).
 * **A component with no security config counts as passed.** `publishIntegTestResults.groovy:67-69` defaults a
   missing `with-security`/`without-security` status to `unknown`, which is not `fail`, so the component is recorded as
   `passed`; `metrics_records.py` keeps that. The Groovy also compares the already-lowercased status against
