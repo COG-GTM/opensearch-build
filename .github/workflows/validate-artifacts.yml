@@ -64,7 +64,7 @@ on:
           os-build-number=<n> osd-build-number=<n> optional-args=<using-staging-artifact-only|validate-digest-only,
           default using-staging-artifact-only>
           skip-core-plugins=<csv, default arrow-base,arrow-flight-rpc; None installs all, an empty value
-          skips all> allow-http platform=<linux windows>.'
+          skips all> allow-http platform=<linux,windows>.'
         required: false
         default: 'optional-args=using-staging-artifact-only skip-core-plugins=arrow-base,arrow-flight-rpc platform=linux,windows'
         type: string
@@ -257,13 +257,15 @@ jobs:
           print(json.dumps(matrix, separators=(",", ":")))
           PY
           matrix_json="$(cat "${RUNNER_TEMP}/matrix.json")"
-          printf 'matrix=%s\n' "${matrix_json}" >> "${GITHUB_OUTPUT}"
           if [[ "${matrix_json}" == '[]' ]]; then
             echo "::warning::Validation matrix is empty; matching Jenkins, validation completes with no legs."
+            # Keep matrix expansion valid even if GitHub evaluates it before the job-level guard.
+            matrix_json='[{"distribution":"none","architecture":"none","platform":"linux","runner":"ubuntu-24.04","container":"","container_options":"","systemd_image":""}]'
             printf 'has-legs=false\n' >> "${GITHUB_OUTPUT}"
           else
             printf 'has-legs=true\n' >> "${GITHUB_OUTPUT}"
           fi
+          printf 'matrix=%s\n' "${matrix_json}" >> "${GITHUB_OUTPUT}"
 
   validate:
     name: validate-${{ matrix.distribution }}-${{ matrix.architecture }}
