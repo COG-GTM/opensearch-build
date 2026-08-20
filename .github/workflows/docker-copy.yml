@@ -149,6 +149,6 @@ jobs:
       - name: Logout and prune Docker images
         if: always()
         run: |
-          docker logout
-          docker logout public.ecr.aws
-          docker image prune -f --all
+          docker logout || true
+          docker logout public.ecr.aws || true
+          docker image prune -f --all || true

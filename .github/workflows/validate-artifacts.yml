@@ -83,6 +83,7 @@ jobs:
     permissions: {}
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      has-legs: ${{ steps.matrix.outputs.has-legs }}
       version: ${{ steps.normalized.outputs.version }}
       file-path: ${{ steps.normalized.outputs.file-path }}
       distribution: ${{ steps.normalized.outputs.distribution }}
@@ -253,16 +254,22 @@ jobs:
                       "container_options": options.get(distribution, ""),
                       "systemd_image": images[distribution] if distribution in systemd_distributions else "",
                   })
-          if not matrix:
-              raise SystemExit("validation matrix is empty")
           print(json.dumps(matrix, separators=(",", ":")))
           PY
-          printf 'matrix=%s\n' "$(cat "${RUNNER_TEMP}/matrix.json")" >> "${GITHUB_OUTPUT}"
+          matrix_json="$(cat "${RUNNER_TEMP}/matrix.json")"
+          printf 'matrix=%s\n' "${matrix_json}" >> "${GITHUB_OUTPUT}"
+          if [[ "${matrix_json}" == '[]' ]]; then
+            echo "::warning::Validation matrix is empty; matching Jenkins, validation completes with no legs."
+            printf 'has-legs=false\n' >> "${GITHUB_OUTPUT}"
+          else
+            printf 'has-legs=true\n' >> "${GITHUB_OUTPUT}"
+          fi
 
   validate:
     name: validate-${{ matrix.distribution }}-${{ matrix.architecture }}
     needs: verify-parameters
-    if: ${{ needs.verify-parameters.result == 'success' }}
+    # Jenkins treats an empty parallel map as a successful no-op; skip the matrix job in that case.
+    if: ${{ needs.verify-parameters.result == 'success' && needs.verify-parameters.outputs.has-legs == 'true' }}
     strategy:
       fail-fast: false
       matrix:

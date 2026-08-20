@@ -80,6 +80,8 @@ The Docker copy workflow grants `id-token: write` to the copy job. Configure the
 roles and their OIDC trust policies for this repository before dispatching the workflow. Staging ECR login assumes
 `ECR_STAGING_ROLE_ARN`; production ECR login assumes
 `arn:aws:iam::<AWS_ACCOUNT_ARTIFACT>:role/<ARTIFACT_PROMOTION_ROLE_NAME>`.
+Both public.ecr.aws logins share one Docker credential entry, as in Jenkins; a staging-ECR-to-production-ECR copy
+therefore relies on the artifact-promotion role also being able to read from staging.
 
 ### Not migrated / needs a decision
 
@@ -96,6 +98,8 @@ roles and their OIDC trust policies for this repository before dispatching the w
 * The tar validation container keeps Jenkins' `-u 1000` docker argument; on GitHub-hosted runners the
   checked-out workspace is owned by a different uid, so file permissions inside the tar leg may need a
   runner/uid decision.
+* An empty validation matrix is emitted as a warning and skipped as a successful no-op, matching Jenkins' empty
+  parallel-map behavior.
 * `retry(2)` is implemented inside the validation composite; job `timeout` values map to `timeout-minutes`.
 * `currentBuild.description` maps to `$GITHUB_STEP_SUMMARY` for copy, scan, and validation parameter checks.
 * `copyContainer.groovy:55-57` assumed ambient credentials for staging ECR. This port makes that assumption explicit by
