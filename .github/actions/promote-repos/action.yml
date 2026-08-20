@@ -1,0 +1,240 @@
+---
+# Ports jenkins/vars/promoteRepos.groovy:19-243 and
+# jenkins/release-workflows/promote-repos.jenkinsfile:62-69. See
+# docs/jenkins-to-actions-release-promotion.md. The hosted runner/container is
+# smaller than Jenkins' m5.4xlarge Docker host.
+name: 'Promote distribution repository'
+description: 'Update and publish a yum or apt distribution repository.'
+
+inputs:
+  distribution-job-name:
+    required: true
+  distribution-repo-type:
+    required: true
+  distribution-build-number:
+    required: true
+  input-manifest:
+    required: true
+  filename:
+    required: true
+  revision:
+    required: true
+  repo-version:
+    required: true
+  signing-email:
+    required: true
+  artifact-production-bucket-name:
+    required: true
+  artifact-promotion-role-name:
+    required: true
+  aws-account-artifact:
+    required: true
+  rpm-signing-account:
+    required: true
+  rpm-release-signing-passphrase-secrets-arn:
+    required: true
+  rpm-release-signing-secret-key-id-secrets-arn:
+    required: true
+  rpm-release-signing-key-id:
+    required: true
+  rpm-signing-passphrase-secrets-arn:
+    required: true
+  rpm-signing-secret-key-id-secrets-arn:
+    required: true
+  rpm-signing-key-id:
+    required: true
+  signer-client-role:
+    required: true
+  signer-client-external-id:
+    required: true
+  signer-client-unsigned-bucket:
+    required: true
+  signer-client-signed-bucket:
+    required: true
+  github-user:
+    required: true
+  github-token:
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate build number
+      shell: bash
+      env:
+        BUILD_NUMBER: ${{ inputs.distribution-build-number }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${BUILD_NUMBER}" ]]; then
+          echo 'User did not enter build number in jenkins parameter, exit 1'
+          exit 1
+        fi
+
+    - name: Assume artifact promotion role for download
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.aws-account-artifact }}:role/${{ inputs.artifact-promotion-role-name }}
+        role-duration-seconds: 900
+        role-session-name: github-actions-promote-repos-download
+        aws-region: us-east-1
+
+    - name: Download and stage repository
+      shell: bash
+      env:
+        REPO_TYPE: ${{ inputs.distribution-repo-type }}
+        JOB_NAME: ${{ inputs.distribution-job-name }}
+        BUILD_NUMBER: ${{ inputs.distribution-build-number }}
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
+        FILENAME: ${{ inputs.filename }}
+        REVISION: ${{ inputs.revision }}
+        REPO_VERSION: ${{ inputs.repo-version }}
+        PROD_BUCKET: ${{ inputs.artifact-production-bucket-name }}
+        PUBLIC_ARTIFACT_URL: ${{ vars.PUBLIC_ARTIFACT_URL }}
+      run: |
+        set -euo pipefail
+        case "${REPO_TYPE}" in
+          yum) DIST_TYPE=rpm ;;
+          apt) DIST_TYPE=deb ;;
+          *) echo "::error::Unsupported repository type: ${REPO_TYPE}"; exit 1 ;;
+        esac
+        repo_path="releases/bundle/${FILENAME}/${REPO_VERSION}/${REPO_TYPE}"
+        artifact_path="${GITHUB_WORKSPACE}/artifacts/${repo_path}"
+        mkdir -p "${artifact_path}"
+        aws s3 sync "s://${PROD_BUCKET}/${repo_path}/" "${artifact_path}/" --no-progress
+        cd "${artifact_path}"
+        curl -fsSLO "${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${REVISION}/${BUILD_NUMBER}/linux/x64/${DIST_TYPE}/dist/${FILENAME}/${FILENAME}-${REVISION}-linux-x64.${DIST_TYPE}"
+        curl -fsSLO "${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${REVISION}/${BUILD_NUMBER}/linux/arm64/${DIST_TYPE}/dist/${FILENAME}/${FILENAME}-${REVISION}-linux-arm64.${DIST_TYPE}"
+        ls -l
+        echo "artifact-path=${artifact_path}" >> "${GITHUB_WORKSPACE}/repo-path.env"
+        echo "dist-type=${DIST_TYPE}" >> "${GITHUB_WORKSPACE}/repo-path.env"
+
+    - name: Update yum metadata
+      if: ${{ inputs.distribution-repo-type == 'yum' }}
+      shell: bash
+      env:
+        REPO_PATH_FILE: ${{ github.workspace }}/repo-path.env
+      run: |
+        set -euo pipefail
+        # shellcheck disable=SC1090
+        source "${REPO_PATH_FILE}"
+        cd "${artifact_path}"
+        rm -vf repodata/repomd.xml.asc
+        createrepo --update .
+        # Rename .xml to .pom for signing. Please do not add .xml to signer filter:
+        # Maven has many .xml files and we do not want to sign them.
+        mv -v repodata/repomd.xml repodata/repomd.pom
+
+    - name: Sign yum metadata
+      if: ${{ inputs.distribution-repo-type == 'yum' }}
+      uses: ./.github/actions/sign-artifacts-client
+      with:
+        artifact-path: ${{ github.workspace }}/artifacts/releases/bundle/${{ inputs.filename }}/${{ inputs.repo-version }}/yum/repodata/repomd.pom
+        sigtype: '.asc'
+        platform: 'linux'
+        email: ${{ inputs.signing-email }}
+        signer-client-role: ${{ inputs.signer-client-role }}
+        signer-client-external-id: ${{ inputs.signer-client-external-id }}
+        signer-client-unsigned-bucket: ${{ inputs.signer-client-unsigned-bucket }}
+        signer-client-signed-bucket: ${{ inputs.signer-client-signed-bucket }}
+        github-user: ${{ inputs.github-user }}
+        github-token: ${{ inputs.github-token }}
+
+    - name: Restore yum metadata names
+      if: ${{ inputs.distribution-repo-type == 'yum' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "${GITHUB_WORKSPACE}/artifacts/releases/bundle/${{ inputs.filename }}/${{ inputs.repo-version }}/yum/repodata"
+        mv -v repomd.pom repomd.xml
+        mv -v repomd.pom.asc repomd.xml.asc
+
+    - name: Check apt utility versions
+      if: ${{ inputs.distribution-repo-type == 'apt' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        gpg_version=$(gpg --version | head -n 1 | grep -oE '[0-9.]+')
+        aptly_version=$(aptly version | cut -d: -f2 | grep -oE '[0-9.]+' | head -n 1)
+        gpg_lowest=$(printf '%s\n%s\n' "${gpg_version}" '2.2.0' | sort -V | head -n 1)
+        aptly_lowest=$(printf '%s\n%s\n' "${aptly_version}" '1.5.0' | sort -V | head -n 1)
+        if [[ "${gpg_lowest}" != '2.2.0' || "${aptly_lowest}" != '1.5.0' ]]; then
+          echo 'Utility version is lower than set limit, exit 1'
+          exit 1
+        fi
+        echo "gpg ${gpg_version}; aptly ${aptly_version}"
+
+    - name: Assume RPM signing role for apt metadata
+      if: ${{ inputs.distribution-repo-type == 'apt' }}
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.rpm-signing-account }}:role/jenkins-prod-rpm-signing-assume-role
+        role-duration-seconds: 900
+        role-session-name: github-actions-promote-repos-signing
+        aws-region: us-west-2
+
+    - name: Publish apt metadata
+      if: ${{ inputs.distribution-repo-type == 'apt' }}
+      shell: bash
+      env:
+        REPO_PATH: ${{ github.workspace }}/artifacts/releases/bundle/${{ inputs.filename }}/${{ inputs.repo-version }}/apt
+        JOB_NAME: ${{ inputs.distribution-job-name }}
+        REPO_VERSION: ${{ inputs.repo-version }}
+        SIGNING_EMAIL: ${{ inputs.signing-email }}
+        RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ inputs.rpm-release-signing-passphrase-secrets-arn }}
+        RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ inputs.rpm-release-signing-secret-key-id-secrets-arn }}
+        RPM_RELEASE_SIGNING_KEY_ID: ${{ inputs.rpm-release-signing-key-id }}
+        RPM_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ inputs.rpm-signing-passphrase-secrets-arn }}
+        RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ inputs.rpm-signing-secret-key-id-secrets-arn }}
+        RPM_SIGNING_KEY_ID: ${{ inputs.rpm-signing-key-id }}
+      run: |
+        set -euo pipefail
+        for variable in RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN \
+          RPM_RELEASE_SIGNING_KEY_ID RPM_SIGNING_PASSPHRASE_SECRETS_ARN RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN RPM_SIGNING_KEY_ID; do
+          if [[ -z "${!variable:-}" ]]; then echo "::error::${variable} is empty"; exit 1; fi
+        done
+        passphrase_arn="${RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN}"
+        key_arn="${RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN}"
+        key_id="${RPM_RELEASE_SIGNING_KEY_ID}"
+        if [[ "${SIGNING_EMAIL}" == 'opensearch@amazon.com' ]]; then
+          passphrase_arn="${RPM_SIGNING_PASSPHRASE_SECRETS_ARN}"
+          key_arn="${RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN}"
+          key_id="${RPM_SIGNING_KEY_ID}"
+        fi
+        aws secretsmanager get-secret-value --region us-west-2 --secret-id "${passphrase_arn}" \
+          | jq -r .SecretBinary | base64 --decode > passphrase
+        aws secretsmanager get-secret-value --region us-west-2 --secret-id "${key_arn}" \
+          | jq -r .SecretBinary | base64 --decode | gpg --quiet --import --pinentry-mode loopback --passphrase-file passphrase -
+        rm -rf ~/.aptly
+        mkdir "${REPO_PATH}/base"
+        find "${REPO_PATH}" -type f -name '*.deb' -exec mv -v {} "${REPO_PATH}/base/" \;
+        aptly repo create "-comment=${FILENAME} repository" -distribution=stable -component=main "${JOB_NAME}"
+        aptly repo add "${JOB_NAME}" "${REPO_PATH}/base"
+        aptly repo show -with-packages "${JOB_NAME}"
+        aptly snapshot create "${JOB_NAME}-${REPO_VERSION}" from repo "${JOB_NAME}"
+        aptly publish snapshot -label="${FILENAME}" -origin=artifacts.opensearch.org -batch=true \
+          -passphrase-file=passphrase "${JOB_NAME}-${REPO_VERSION}"
+        gpg --batch --yes --delete-secret-keys "${key_id}"
+        gpg --batch --yes --delete-keys "${key_id}"
+        rm -f passphrase
+        rm -rf "${REPO_PATH:?}"/*
+        cp -rvp ~/.aptly/public/* "${REPO_PATH}/"
+
+    - name: Assume artifact promotion role for upload
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.aws-account-artifact }}:role/${{ inputs.artifact-promotion-role-name }}
+        role-duration-seconds: 900
+        role-session-name: github-actions-promote-repos-upload
+        aws-region: us-east-1
+
+    - name: Upload promoted repository
+      shell: bash
+      env:
+        REPO_PATH: ${{ github.workspace }}/artifacts/releases/bundle/${{ inputs.filename }}/${{ inputs.repo-version }}/${{ inputs.distribution-repo-type }}
+        PROD_BUCKET: ${{ inputs.artifact-production-bucket-name }}
+        FILENAME: ${{ inputs.filename }}
+        REPO_VERSION: ${{ inputs.repo-version }}
+        REPO_TYPE: ${{ inputs.distribution-repo-type }}
+      run: |
+        set -euo pipefail
+        aws s3 sync "${REPO_PATH}/" "s://${PROD_BUCKET}/releases/bundle/${FILENAME}/${REPO_VERSION}/${REPO_TYPE}/" --no-progress

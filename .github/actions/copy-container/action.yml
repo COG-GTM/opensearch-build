@@ -1,0 +1,133 @@
+---
+# Ports opensearch-build-libraries vars/copyContainer.groovy:19-89, called by
+# the local promote-container implementation of
+# jenkins/release-workflows/promote-docker-ecr-lf.jenkinsfile:78-89. See
+# docs/jenkins-to-actions-release-promotion.md.
+name: 'Copy container'
+description: 'Copy one or more container tags between staging and production registries.'
+
+inputs:
+  source-registry:
+    required: true
+  source-image:
+    required: true
+  destination-registry:
+    required: true
+  destination-image:
+    required: true
+  release-version:
+    required: true
+  tag-major-version:
+    required: true
+  tag-latest:
+    required: true
+  all-tags:
+    required: false
+    default: 'false'
+  staging-dockerhub-username:
+    required: true
+  staging-dockerhub-password:
+    required: true
+  production-dockerhub-username:
+    required: true
+  production-dockerhub-password:
+    required: true
+  artifact-promotion-role-name:
+    required: true
+  aws-account-artifact:
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check all-tags guard
+      if: ${{ inputs.all-tags == 'true' }}
+      shell: bash
+      env:
+        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+        DESTINATION_IMAGE: ${{ inputs.destination-image }}
+      run: |
+        set -euo pipefail
+        if [[ "${DESTINATION_REGISTRY}" != *opensearchstaging* || "${DESTINATION_IMAGE%%:*}" != ci-runner ]]; then
+          echo "::error::'destination_registry' must be opensearchstaging registry and 'destination_image' must be ci-runner"
+          exit 1
+        fi
+
+    - name: Login to staging Docker Hub
+      if: ${{ inputs.source-registry == 'opensearchstaging' || inputs.destination-registry == 'opensearchstaging' }}
+      shell: bash
+      env:
+        USERNAME: ${{ inputs.staging-dockerhub-username }}
+        PASSWORD: ${{ inputs.staging-dockerhub-password }}
+      run: |
+        set -euo pipefail
+        printf '%s' "${PASSWORD}" | docker login --username "${USERNAME}" --password-stdin
+
+    - name: Login to production Docker Hub
+      if: ${{ inputs.source-registry == 'opensearchproject' || inputs.destination-registry == 'opensearchproject' }}
+      shell: bash
+      env:
+        USERNAME: ${{ inputs.production-dockerhub-username }}
+        PASSWORD: ${{ inputs.production-dockerhub-password }}
+      run: |
+        set -euo pipefail
+        printf '%s' "${PASSWORD}" | docker login --username "${USERNAME}" --password-stdin
+
+    - name: Login to staging ECR Public
+      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchstaging' }}
+      shell: bash
+      env:
+        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+      run: |
+        set -euo pipefail
+        registry="${DESTINATION_REGISTRY}"
+        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${registry}"
+
+    - name: Assume production artifact role for ECR
+      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchproject' || inputs.destination-registry == 'public.ecr.aws/opensearchproject' }}
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.aws-account-artifact }}:role/${{ inputs.artifact-promotion-role-name }}
+        role-duration-seconds: 900
+        role-session-name: github-actions-copy-container
+        aws-region: us-east-1
+
+    - name: Login to production ECR Public
+      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchproject' || inputs.destination-registry == 'public.ecr.aws/opensearchproject' }}
+      shell: bash
+      env:
+        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+      run: |
+        set -euo pipefail
+        registry="${DESTINATION_REGISTRY}"
+        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${registry}"
+
+    - name: Copy container tags
+      shell: bash
+      env:
+        SOURCE_REGISTRY: ${{ inputs.source-registry }}
+        SOURCE_IMAGE: ${{ inputs.source-image }}
+        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+        DESTINATION_IMAGE: ${{ inputs.destination-image }}
+        RELEASE_VERSION: ${{ inputs.release-version }}
+        TAG_MAJOR_VERSION: ${{ inputs.tag-major-version }}
+        TAG_LATEST: ${{ inputs.tag-latest }}
+        ALL_TAGS: ${{ inputs.all-tags }}
+      run: |
+        set -euo pipefail
+        source_name="${SOURCE_IMAGE%%:*}"
+        destination_name="${DESTINATION_IMAGE%%:*}"
+        if [[ "${ALL_TAGS}" == true ]]; then
+          echo "Copying all the tags of image ${SOURCE_REGISTRY}/${source_name} to ${DESTINATION_REGISTRY}/${destination_name}"
+          crane cp "${SOURCE_REGISTRY}/${source_name}" "${DESTINATION_REGISTRY}/${destination_name}" --all-tags
+        else
+          tags=("${RELEASE_VERSION}")
+          if [[ "${TAG_MAJOR_VERSION}" == true ]]; then tags+=("${RELEASE_VERSION%%.*}"); fi
+          if [[ "${TAG_LATEST}" == true ]]; then tags+=(latest); fi
+          for tag in "${tags[@]}"; do
+            echo "Copying single image tag from ${SOURCE_REGISTRY}/${SOURCE_IMAGE} to ${DESTINATION_REGISTRY}/${destination_name}:${tag}"
+            crane cp "${SOURCE_REGISTRY}/${SOURCE_IMAGE}" "${DESTINATION_REGISTRY}/${destination_name}:${tag}"
+          done
+        fi
+        docker logout || true
+        docker logout public.ecr.aws || true

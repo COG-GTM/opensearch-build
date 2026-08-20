@@ -1,0 +1,260 @@
+---
+# Ports jenkins/vars/promoteArtifacts.groovy:21-130 and
+# jenkins/release-workflows/promote-artifacts.jenkinsfile:68-73. See
+# docs/jenkins-to-actions-release-promotion.md. Jenkins had no approval gate;
+# this migration deliberately adds the caller's production-artifacts environment.
+name: 'Promote distribution artifacts'
+description: 'Download, sign, checksum, and publish a distribution artifact.'
+
+inputs:
+  distribution-job-name:
+    required: true
+  distribution-build-number:
+    required: true
+  input-manifest:
+    required: true
+  distribution-platform:
+    required: true
+  distribution-name:
+    required: true
+  distribution-architecture:
+    required: true
+  filename:
+    required: true
+  revision:
+    required: true
+  signing-email:
+    required: true
+  aws-account-public:
+    required: true
+  artifact-bucket-name:
+    required: true
+  artifact-promotion-role-name:
+    required: true
+  aws-account-artifact:
+    required: true
+  artifact-production-bucket-name:
+    required: true
+  signer-client-role:
+    required: true
+  signer-client-external-id:
+    required: true
+  signer-client-unsigned-bucket:
+    required: true
+  signer-client-signed-bucket:
+    required: true
+  github-user:
+    required: true
+  github-token:
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Assume the artifact download role
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.aws-account-public }}:role/opensearch-bundle
+        role-duration-seconds: 900
+        role-session-name: github-actions-promote-artifacts-download
+        aws-region: us-east-1
+
+    - name: Download and select artifacts
+      id: prepare
+      shell: bash
+      env:
+        DISTRIBUTION_JOB_NAME: ${{ inputs.distribution-job-name }}
+        DISTRIBUTION_BUILD_NUMBER: ${{ inputs.distribution-build-number }}
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
+        DISTRIBUTION_PLATFORM: ${{ inputs.distribution-platform }}
+        DISTRIBUTION_NAME: ${{ inputs.distribution-name }}
+        DISTRIBUTION_ARCHITECTURE: ${{ inputs.distribution-architecture }}
+        FILENAME: ${{ inputs.filename }}
+        REVISION: ${{ inputs.revision }}
+        SIGNING_EMAIL: ${{ inputs.signing-email }}
+        AWS_ACCOUNT_PUBLIC: ${{ inputs.aws-account-public }}
+        ARTIFACT_BUCKET_NAME: ${{ inputs.artifact-bucket-name }}
+        ARTIFACT_PROMOTION_ROLE_NAME: ${{ inputs.artifact-promotion-role-name }}
+        AWS_ACCOUNT_ARTIFACT: ${{ inputs.aws-account-artifact }}
+        ARTIFACT_PRODUCTION_BUCKET_NAME: ${{ inputs.artifact-production-bucket-name }}
+        SIGNER_CLIENT_ROLE: ${{ inputs.signer-client-role }}
+        SIGNER_CLIENT_EXTERNAL_ID: ${{ inputs.signer-client-external-id }}
+        SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ inputs.signer-client-unsigned-bucket }}
+        SIGNER_CLIENT_SIGNED_BUCKET: ${{ inputs.signer-client-signed-bucket }}
+        GITHUB_USER: ${{ inputs.github-user }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        case "${DISTRIBUTION_PLATFORM}" in
+          linux) distributions=('tar' 'rpm' 'deb') ;;
+          windows) distributions=('zip') ;;
+          darwin)
+            echo "::error::darwin is offered as an input but Jenkins has no darwin distribution map; refusing to iterate null."
+            exit 1
+            ;;
+          *) echo "::error::Unsupported distribution platform: ${DISTRIBUTION_PLATFORM}"; exit 1 ;;
+        esac
+
+        selected=false
+        for distribution in "${distributions[@]}"; do
+          if [[ "${DISTRIBUTION_NAME}" != "${distribution}" ]]; then
+            echo "Skip ${distribution} due to user inputs"
+            continue
+          fi
+          selected=true
+          echo "${distribution} start promoting"
+          artifact_path="${DISTRIBUTION_JOB_NAME}/${REVISION}/${DISTRIBUTION_BUILD_NUMBER}/${DISTRIBUTION_PLATFORM}/${DISTRIBUTION_ARCHITECTURE}/${distribution}"
+          local_root="${GITHUB_WORKSPACE}/artifacts/${distribution}"
+          echo "S3 download ${DISTRIBUTION_PLATFORM} ${DISTRIBUTION_ARCHITECTURE} ${distribution} ${REVISION} from ${DISTRIBUTION_JOB_NAME} build number ${DISTRIBUTION_BUILD_NUMBER} artifacts before creating signatures"
+          mkdir -p "${local_root}"
+          aws s3 cp --recursive --quiet "s://${ARTIFACT_BUCKET_NAME}/${artifact_path}" "${local_root}/${artifact_path}"
+          build_root="${local_root}/${artifact_path}/builds/${FILENAME}"
+          build_manifest="${build_root}/manifest.yml"
+          core_plugins="${build_root}/core-plugins"
+          matched_dir="${RUNNER_TEMP}/promote-artifacts-matched"
+          rm -rf "${matched_dir}"
+          mkdir -p "${matched_dir}"
+          : > "${matched_dir}/mapping"
+          index=0
+          while IFS= read -r -d '' file; do
+            base=$(basename "${file}")
+            if [[ "${base}" == "${FILENAME}-min-${REVISION}"*".${distribution}"* ||
+                  "${base}" == "${FILENAME}-${REVISION}"*".${distribution}"* ]]; then
+              suffix=
+              for candidate in .tar.gz .zip .rpm .deb; do
+                if [[ "${base}" == *"${candidate}" ]]; then suffix="${candidate}"; break; fi
+              done
+              if [[ -n "${suffix}" ]]; then
+                staged="${matched_dir}/artifact-${index}${suffix}"
+                cp -- "${file}" "${staged}"
+                printf '%s\t%s\n' "${staged}" "${file}" >> "${matched_dir}/mapping"
+                index=$((index + 1))
+              fi
+            fi
+          done < <(find "${local_root}/${artifact_path}" -type f -print0)
+          echo "artifact-path=${matched_dir}" >> "${GITHUB_OUTPUT}"
+          echo "mapping=${matched_dir}/mapping" >> "${GITHUB_OUTPUT}"
+          if [[ "${distribution}" == tar && -d "${core_plugins}" ]]; then
+            echo 'has-core=true' >> "${GITHUB_OUTPUT}"
+            echo "core-path=${core_plugins}" >> "${GITHUB_OUTPUT}"
+          else
+            echo 'has-core=false' >> "${GITHUB_OUTPUT}"
+          fi
+          if [[ "${index}" -gt 0 ]]; then
+            echo 'has-matched=true' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'has-matched=false' >> "${GITHUB_OUTPUT}"
+          fi
+        done
+        if [[ "${selected}" != true ]]; then
+          echo "::error::DISTRIBUTION_NAME '${DISTRIBUTION_NAME}' is not valid for ${DISTRIBUTION_PLATFORM}"
+          exit 1
+        fi
+
+    - name: Create core-plugin checksums
+      if: ${{ steps.prepare.outputs.has-core == 'true' }}
+      uses: ./.github/actions/create-sha512-checksums
+      with:
+        artifact-path: ${{ steps.prepare.outputs.core-path }}
+
+    - name: Sign core plugins
+      if: ${{ steps.prepare.outputs.has-core == 'true' }}
+      uses: ./.github/actions/sign-artifacts-client
+      with:
+        artifact-path: ${{ steps.prepare.outputs.core-path }}
+        sigtype: '.sig'
+        platform: ${{ inputs.distribution-platform }}
+        email: ${{ inputs.signing-email }}
+        signer-client-role: ${{ inputs.signer-client-role }}
+        signer-client-external-id: ${{ inputs.signer-client-external-id }}
+        signer-client-unsigned-bucket: ${{ inputs.signer-client-unsigned-bucket }}
+        signer-client-signed-bucket: ${{ inputs.signer-client-signed-bucket }}
+        github-user: ${{ inputs.github-user }}
+        github-token: ${{ inputs.github-token }}
+
+    - name: Create distribution checksums
+      if: ${{ steps.prepare.outputs.has-matched == 'true' }}
+      uses: ./.github/actions/create-sha512-checksums
+      with:
+        artifact-path: ${{ steps.prepare.outputs.artifact-path }}
+
+    - name: Sign distribution artifacts
+      if: ${{ steps.prepare.outputs.has-matched == 'true' }}
+      uses: ./.github/actions/sign-artifacts-client
+      with:
+        artifact-path: ${{ steps.prepare.outputs.artifact-path }}
+        sigtype: '.sig'
+        platform: ${{ inputs.distribution-platform }}
+        email: ${{ inputs.signing-email }}
+        signer-client-role: ${{ inputs.signer-client-role }}
+        signer-client-external-id: ${{ inputs.signer-client-external-id }}
+        signer-client-unsigned-bucket: ${{ inputs.signer-client-unsigned-bucket }}
+        signer-client-signed-bucket: ${{ inputs.signer-client-signed-bucket }}
+        github-user: ${{ inputs.github-user }}
+        github-token: ${{ inputs.github-token }}
+
+    - name: Copy generated sidecars back to downloaded artifacts
+      if: ${{ steps.prepare.outputs.has-matched == 'true' }}
+      shell: bash
+      env:
+        MAPPING: ${{ steps.prepare.outputs.mapping }}
+      run: |
+        set -euo pipefail
+        while IFS=$'\t' read -r staged original; do
+          for suffix in .sha512 .sig; do
+            if [[ -f "${staged}${suffix}" ]]; then
+              cp -- "${staged}${suffix}" "${original}${suffix}"
+            fi
+          done
+        done < "${MAPPING}"
+
+    - name: Assume the artifact promotion role
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.aws-account-artifact }}:role/${{ inputs.artifact-promotion-role-name }}
+        role-duration-seconds: 900
+        role-session-name: github-actions-promote-artifacts-upload
+        aws-region: us-east-1
+
+    - name: Upload promoted artifacts
+      shell: bash
+      env:
+        DISTRIBUTION_JOB_NAME: ${{ inputs.distribution-job-name }}
+        DISTRIBUTION_BUILD_NUMBER: ${{ inputs.distribution-build-number }}
+        DISTRIBUTION_PLATFORM: ${{ inputs.distribution-platform }}
+        DISTRIBUTION_NAME: ${{ inputs.distribution-name }}
+        DISTRIBUTION_ARCHITECTURE: ${{ inputs.distribution-architecture }}
+        FILENAME: ${{ inputs.filename }}
+        REVISION: ${{ inputs.revision }}
+        ARTIFACT_PRODUCTION_BUCKET_NAME: ${{ inputs.artifact-production-bucket-name }}
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
+      run: |
+        set -euo pipefail
+        artifact_path="${DISTRIBUTION_JOB_NAME}/${REVISION}/${DISTRIBUTION_BUILD_NUMBER}/${DISTRIBUTION_PLATFORM}/${DISTRIBUTION_ARCHITECTURE}/${DISTRIBUTION_NAME}"
+        local_root="${GITHUB_WORKSPACE}/artifacts/${DISTRIBUTION_NAME}"
+        build_root="${local_root}/${artifact_path}/builds/${FILENAME}"
+        dist_root="${build_root}/dist"
+        build_manifest="${build_root}/manifest.yml"
+        if [[ "${DISTRIBUTION_NAME}" == tar && -d "${build_root}/core-plugins" ]]; then
+          while IFS= read -r plugin_subpath; do
+            plugin_file=$(basename "${plugin_subpath}")
+            plugin_name="${plugin_file%-${REVISION}.zip}"
+            aws s3 cp --recursive "${build_root}/core-plugins/" \
+              "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/releases/plugins/${plugin_name}/${REVISION}/" \
+              --exclude '*' --include "**/${plugin_name}*"
+          done < <(python - "${build_manifest}" <<'PY'
+        import sys
+        import yaml
+        with open(sys.argv[1], encoding='utf-8') as manifest_file:
+            data = yaml.safe_load(manifest_file)
+        for item in data.get('components', {}).get('artifacts', {}).get('core-plugins', [[]])[0]:
+            print(item)
+        PY
+          )
+          aws s3 cp --recursive "${dist_root}/" \
+            "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/releases/core/${FILENAME}/${REVISION}/" \
+            --exclude '*' --include "**/${FILENAME}-min-${REVISION}-${DISTRIBUTION_PLATFORM}-${DISTRIBUTION_ARCHITECTURE}*"
+        fi
+        aws s3 cp --recursive "${dist_root}/${FILENAME}/" \
+          "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/releases/bundle/${FILENAME}/${REVISION}/" \
+          --exclude '*' --include "**/${FILENAME}-${REVISION}-${DISTRIBUTION_PLATFORM}-${DISTRIBUTION_ARCHITECTURE}*"

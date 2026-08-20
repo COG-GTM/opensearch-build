@@ -1,0 +1,137 @@
+---
+# Ports jenkins/release-workflows/promote-docker-ecr-lf.jenkinsfile:18-101 and
+# opensearch-build-libraries vars/promoteContainer.groovy:20-110 plus
+# vars/copyContainer.groovy:19-89. See docs/jenkins-to-actions-release-promotion.md.
+name: Docker Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      SOURCE_IMAGES:
+        description: '<Required> Comma separated list of product with its image tag that we want to promote from staging to production. E.g.: opensearch:2.0.1.3910, opensearch-dashboards:2.0.1, data-prepper:1.5.0-19.'
+        required: true
+        default: ''
+        type: string
+      RELEASE_VERSION:
+        description: '<Required> Official release version on production repository. This is uniform for all source images. E.g.: 2.0.1, 1.5.0.'
+        required: true
+        default: ''
+        type: string
+      DOCKER_HUB_PROMOTE:
+        description: '<Optional> Promote SOURCE_IMAGES to `opensearchproject` production Docker Hub.'
+        required: true
+        default: true
+        type: boolean
+      ECR_PROMOTE:
+        description: '<Optional> Promote SOURCE_IMAGES to `gallery.ecr.aws/opensearchorg/opensearchproject` production ECR repository.'
+        required: true
+        default: true
+        type: boolean
+      TAG_LATEST:
+        description: '<Optional> Tag the copied image as latest'
+        required: true
+        default: true
+        type: boolean
+      TAG_MAJOR_VERSION:
+        description: '<Optional> Tag the copied image with its major version. E.g.: 1.3.2 image will be tagged with 1 in the hub.'
+        required: true
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      SOURCE_IMAGES:
+        required: true
+        type: string
+      RELEASE_VERSION:
+        required: true
+        type: string
+      DOCKER_HUB_PROMOTE:
+        required: false
+        type: boolean
+        default: true
+      ECR_PROMOTE:
+        required: false
+        type: boolean
+        default: true
+      TAG_LATEST:
+        required: false
+        type: boolean
+        default: true
+      TAG_MAJOR_VERSION:
+        required: false
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  parameters-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      images: ${{ steps.matrix.outputs.images }}
+    steps:
+      - name: Check parameters
+        shell: bash
+        env:
+          SOURCE_IMAGES: ${{ inputs.SOURCE_IMAGES }}
+          RELEASE_VERSION: ${{ inputs.RELEASE_VERSION }}
+        run: |
+          set -euo pipefail
+          echo "Promoting ${SOURCE_IMAGES} to production hub." >> "${GITHUB_STEP_SUMMARY}"
+          if [[ -z "${SOURCE_IMAGES}" || -z "${RELEASE_VERSION}" ]]; then
+            echo '::error::Make sure at lease one product is added to be promoted with proper release version.'
+            exit 1
+          fi
+      - name: Build image matrix
+        id: matrix
+        shell: bash
+        env:
+          SOURCE_IMAGES: ${{ inputs.SOURCE_IMAGES }}
+        run: |
+          set -euo pipefail
+          images=$(printf '%s' "${SOURCE_IMAGES}" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+          echo "images=${images}" >> "${GITHUB_OUTPUT}"
+  promote:
+    needs: parameters-check
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: true
+      matrix:
+        image: ${{ fromJSON(needs.parameters-check.outputs.images) }}
+    container:
+      image: public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1
+      options: -u root
+    timeout-minutes: 60
+    environment: production-containers
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      DATA_PREPPER_STAGING_CONTAINER_REPOSITORY: ${{ vars.DATA_PREPPER_STAGING_CONTAINER_REPOSITORY }}
+      DOCKERHUB_STAGING_USERNAME: ${{ secrets.DOCKERHUB_STAGING_USERNAME }}
+      DOCKERHUB_STAGING_PASSWORD: ${{ secrets.DOCKERHUB_STAGING_PASSWORD }}
+      DOCKERHUB_PRODUCTION_USERNAME: ${{ secrets.DOCKERHUB_PRODUCTION_USERNAME }}
+      DOCKERHUB_PRODUCTION_PASSWORD: ${{ secrets.DOCKERHUB_PRODUCTION_PASSWORD }}
+      ARTIFACT_PROMOTION_ROLE_NAME: ${{ secrets.ARTIFACT_PROMOTION_ROLE_NAME }}
+      AWS_ACCOUNT_ARTIFACT: ${{ secrets.AWS_ACCOUNT_ARTIFACT }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - name: Promote container
+        uses: ./.github/actions/promote-container
+        with:
+          image-repository: ${{ matrix.image }}
+          release-version: ${{ inputs.RELEASE_VERSION }}
+          docker-hub-promote: ${{ inputs.DOCKER_HUB_PROMOTE }}
+          ecr-promote: ${{ inputs.ECR_PROMOTE }}
+          tag-latest: ${{ inputs.TAG_LATEST }}
+          tag-major-version: ${{ inputs.TAG_MAJOR_VERSION }}
+          data-prepper-staging-container-repository: ${{ env.DATA_PREPPER_STAGING_CONTAINER_REPOSITORY }}
+          staging-dockerhub-username: ${{ env.DOCKERHUB_STAGING_USERNAME }}
+          staging-dockerhub-password: ${{ env.DOCKERHUB_STAGING_PASSWORD }}
+          production-dockerhub-username: ${{ env.DOCKERHUB_PRODUCTION_USERNAME }}
+          production-dockerhub-password: ${{ env.DOCKERHUB_PRODUCTION_PASSWORD }}
+          artifact-promotion-role-name: ${{ env.ARTIFACT_PROMOTION_ROLE_NAME }}
+          aws-account-artifact: ${{ env.AWS_ACCOUNT_ARTIFACT }}

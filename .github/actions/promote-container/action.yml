@@ -1,0 +1,76 @@
+---
+# Ports opensearch-build-libraries vars/promoteContainer.groovy:20-110 and
+# vars/copyContainer.groovy:19-89, from
+# jenkins/release-workflows/promote-docker-ecr-lf.jenkinsfile:76-90. Jenkins
+# triggered docker-copy jobs; this slice implements their copy locally because
+# docker-copy is owned by a parallel migration. See the migration document.
+name: 'Promote container'
+description: 'Promote one staging image to Docker Hub and/or ECR tags.'
+
+inputs:
+  image-repository:
+    required: true
+  release-version:
+    required: true
+  docker-hub-promote:
+    required: true
+  ecr-promote:
+    required: true
+  tag-latest:
+    required: true
+  tag-major-version:
+    required: true
+  data-prepper-staging-container-repository:
+    required: false
+    default: ''
+  staging-dockerhub-username:
+    required: true
+  staging-dockerhub-password:
+    required: true
+  production-dockerhub-username:
+    required: true
+  production-dockerhub-password:
+    required: true
+  artifact-promotion-role-name:
+    required: true
+  aws-account-artifact:
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Copy to Docker Hub
+      if: ${{ inputs.docker-hub-promote == 'true' }}
+      uses: ./.github/actions/copy-container
+      with:
+        source-registry: ${{ startsWith(inputs.image-repository, 'data-prepper:') && (inputs.data-prepper-staging-container-repository || 'opensearchstaging') || 'opensearchstaging' }}
+        source-image: ${{ inputs.image-repository }}
+        destination-registry: opensearchproject
+        destination-image: ${{ inputs.image-repository }}
+        release-version: ${{ inputs.release-version }}
+        tag-major-version: ${{ inputs.tag-major-version }}
+        tag-latest: ${{ inputs.tag-latest }}
+        staging-dockerhub-username: ${{ inputs.staging-dockerhub-username }}
+        staging-dockerhub-password: ${{ inputs.staging-dockerhub-password }}
+        production-dockerhub-username: ${{ inputs.production-dockerhub-username }}
+        production-dockerhub-password: ${{ inputs.production-dockerhub-password }}
+        artifact-promotion-role-name: ${{ inputs.artifact-promotion-role-name }}
+        aws-account-artifact: ${{ inputs.aws-account-artifact }}
+
+    - name: Copy to ECR Public
+      if: ${{ inputs.ecr-promote == 'true' }}
+      uses: ./.github/actions/copy-container
+      with:
+        source-registry: ${{ startsWith(inputs.image-repository, 'data-prepper:') && (inputs.data-prepper-staging-container-repository || 'opensearchstaging') || 'opensearchstaging' }}
+        source-image: ${{ inputs.image-repository }}
+        destination-registry: public.ecr.aws/opensearchproject
+        destination-image: ${{ inputs.image-repository }}
+        release-version: ${{ inputs.release-version }}
+        tag-major-version: ${{ inputs.tag-major-version }}
+        tag-latest: ${{ inputs.tag-latest }}
+        staging-dockerhub-username: ${{ inputs.staging-dockerhub-username }}
+        staging-dockerhub-password: ${{ inputs.staging-dockerhub-password }}
+        production-dockerhub-username: ${{ inputs.production-dockerhub-username }}
+        production-dockerhub-password: ${{ inputs.production-dockerhub-password }}
+        artifact-promotion-role-name: ${{ inputs.artifact-promotion-role-name }}
+        aws-account-artifact: ${{ inputs.aws-account-artifact }}
