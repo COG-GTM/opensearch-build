@@ -225,15 +225,6 @@ outside the repository, and the tag job pushes to many component repositories.
 * Hosted runner sizing is unverified against real release artifacts; Jenkins
   used m5.4xlarge Docker hosts.
 
-## Intentional deviations
-
-* A distribution not present in the platform's map now fails instead of
-  silently succeeding: Jenkins iterated and continued past non-matches
-  (`12.0.0:vars/promoteArtifacts.groovy:47-53`), while
-  `.github/actions/promote-artifacts/action.yml` treats a no-op release
-  promotion as an error. The only callers are dispatch/call inputs with an
-  explicit distribution choice.
-
 ## 8. Known smells kept on purpose
 
 * The artifact workflow retains the Jenkins distribution map, including the
@@ -276,6 +267,15 @@ outside the repository, and the tag job pushes to many component repositories.
   local rollback point. Likewise `mkdir "${REPO_PATH}/base"` is called without
   `-p`, matching `promoteRepos.groovy:216`, so a re-run over a dirty workspace
   fails rather than continuing.
+
+### Intentional deviations
+
+* A distribution not present in the platform's map now fails instead of
+  silently succeeding: Jenkins iterated and continued past non-matches
+  (`12.0.0:vars/promoteArtifacts.groovy:47-53`), while
+  `.github/actions/promote-artifacts/action.yml` treats a no-op release
+  promotion as an error. The only callers are dispatch/call inputs with an
+  explicit distribution choice.
 
 ### Known risks and unverified behavior
 
