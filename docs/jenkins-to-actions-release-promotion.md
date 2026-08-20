@@ -225,6 +225,15 @@ outside the repository, and the tag job pushes to many component repositories.
 * Hosted runner sizing is unverified against real release artifacts; Jenkins
   used m5.4xlarge Docker hosts.
 
+## Intentional deviations
+
+* A distribution not present in the platform's map now fails instead of
+  silently succeeding: Jenkins iterated and continued past non-matches
+  (`12.0.0:vars/promoteArtifacts.groovy:47-53`), while
+  `.github/actions/promote-artifacts/action.yml` treats a no-op release
+  promotion as an error. The only callers are dispatch/call inputs with an
+  explicit distribution choice.
+
 ## 8. Known smells kept on purpose
 
 * The artifact workflow retains the Jenkins distribution map, including the
@@ -311,6 +320,24 @@ outside the repository, and the tag job pushes to many component repositories.
   pre-existing `.sha512`/`.sig` sidecars if the staging tree ever contained
   them. That does not happen today, and the trailing wildcard is what matches
   `.tar.gz`.
+* `copy-container` logs in to the ECR registry root
+  `public.ecr.aws/opensearchorg` before `crane cp` targets a nested repository,
+  matching `lf-jenkins:vars/copyContainer.groovy:60-62,74,82`. Jenkins exercises
+  this root-keyed credential lookup; the port has not, and a controlled 401
+  would justify logging in to the host instead.
+* Both Docker Hub logins target the same host, so the production credential
+  overwrites the read-only credential on staging-to-production copies. This
+  matches `lf-jenkins:vars/copyContainer.groovy:46-58` and works while staging
+  images remain publicly pullable; it would also break upstream if staging
+  became private.
+* `create-release-tag` attaches the bot credential per invocation with
+  `git -c`, leaving `fetch origin <commit_id>` and detached checkout
+  unauthenticated. This is fine for public component repositories and follows
+  the ported Groovy, but becomes a trap if any component repository is private.
+* The manifest-lock poll accepts any target-workflow run created at or after
+  the dispatch timestamp (second granularity), so a concurrent dispatch could
+  be watched instead. Jenkins' `build job:` returns the downstream build
+  directly; here the risk is misreported lock status, not publication.
 
 ## 9. Validation performed
 
