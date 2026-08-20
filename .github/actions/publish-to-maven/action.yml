@@ -1,0 +1,88 @@
+---
+# Ports opensearch-build-libraries vars/publishToMaven.groovy:17-41 and
+# jenkins/release-workflows/publish-to-maven-lf.jenkinsfile:51-77. See
+# docs/jenkins-to-actions-release-promotion.md. Jenkins loadCustomScript()
+# became a fetch of the pinned lf-jenkins library resource; review that trust
+# decision before enabling automatic Maven publication.
+name: 'Publish to Maven'
+description: 'Sign, stage, and automatically publish Maven artifacts.'
+
+inputs:
+  signing-artifacts-path:
+    description: 'Path containing the Maven manifest to sign'
+    required: true
+  maven-artifacts-path:
+    description: 'Path containing Maven artifacts to stage and publish'
+    required: true
+  email:
+    description: 'Email address used for Maven signing'
+    required: true
+  sonatype-username:
+    description: 'Sonatype username for Maven publication'
+    required: true
+  sonatype-password:
+    description: 'Sonatype password for Maven publication'
+    required: true
+  staging-profile-id:
+    description: 'Sonatype staging profile identifier'
+    required: true
+  signer-client-role:
+    description: 'Signer client AWS IAM role'
+    required: true
+  signer-client-external-id:
+    description: 'Signer client external ID'
+    required: true
+  signer-client-unsigned-bucket:
+    description: 'S3 bucket used for unsigned signer-client artifacts'
+    required: true
+  signer-client-signed-bucket:
+    description: 'S3 bucket used for signed signer-client artifacts'
+    required: true
+  github-user:
+    description: 'GitHub bot username passed to the signer client'
+    required: true
+  github-token:
+    description: 'GitHub bot token passed to the signer client'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Sign Maven manifest
+      uses: ./.github/actions/sign-artifacts-client
+      with:
+        artifact-path: ${{ inputs.signing-artifacts-path }}
+        sigtype: '.asc'
+        platform: 'linux'
+        type: 'maven'
+        email: ${{ inputs.email }}
+        signer-client-role: ${{ inputs.signer-client-role }}
+        signer-client-external-id: ${{ inputs.signer-client-external-id }}
+        signer-client-unsigned-bucket: ${{ inputs.signer-client-unsigned-bucket }}
+        signer-client-signed-bucket: ${{ inputs.signer-client-signed-bucket }}
+        github-user: ${{ inputs.github-user }}
+        github-token: ${{ inputs.github-token }}
+
+    - name: Fetch stage Maven release script
+      shell: bash
+      run: |
+        set -euo pipefail
+        curl -fsSL \
+          'https://raw.githubusercontent.com/opensearch-project/opensearch-build-libraries/lf-jenkins/resources/publish/stage-maven-release.sh' \
+          -o "${RUNNER_TEMP}/stage-maven-release.sh"
+        chmod +x "${RUNNER_TEMP}/stage-maven-release.sh"
+
+    - name: Stage and publish Maven artifacts
+      shell: bash
+      env:
+        MAVEN_ARTIFACTS_PATH: ${{ inputs.maven-artifacts-path }}
+        SONATYPE_USERNAME: ${{ inputs.sonatype-username }}
+        SONATYPE_PASSWORD: ${{ inputs.sonatype-password }}
+        STAGING_PROFILE_ID: ${{ inputs.staging-profile-id }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${SONATYPE_USERNAME}" || -z "${SONATYPE_PASSWORD}" || -z "${STAGING_PROFILE_ID}" ]]; then
+          echo '::error::SONATYPE_USERNAME, SONATYPE_PASSWORD, and STAGING_PROFILE_ID must be configured.'
+          exit 1
+        fi
+        "${RUNNER_TEMP}/stage-maven-release.sh" -d "${MAVEN_ARTIFACTS_PATH}" -a true

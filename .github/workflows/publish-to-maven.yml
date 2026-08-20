@@ -1,0 +1,96 @@
+---
+# Ports jenkins/release-workflows/publish-to-maven-lf.jenkinsfile:23-87 and
+# opensearch-build-libraries vars/publishToMaven.groovy:17-41. See
+# docs/jenkins-to-actions-release-promotion.md. Maven autoPublish is
+# irreversible, so this job uses the production-maven environment.
+name: Publish to Maven
+
+on:
+  workflow_dispatch:
+    inputs:
+      BUILD_ID:
+        description: '<Required> Build ID of the OpenSearch distribution artifacts to be staged and released'
+        required: true
+        default: ''
+        type: string
+      VERSION:
+        description: '<Required> Version of the OpenSearch distribution artifacts to be staged and released'
+        required: true
+        default: ''
+        type: string
+  workflow_call:
+    inputs:
+      BUILD_ID:
+        required: true
+        type: string
+      VERSION:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    container:
+      image: public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-centos7-opensearch-build-v3
+      # need to switch to root so that github actions can install runner binary on container without permission issues.
+      options: --user root
+    timeout-minutes: 60
+    environment: production-maven
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      JAVA_HOME: /opt/java/openjdk-11
+      ARTIFACT_PATH: distribution-build-opensearch/${{ inputs.VERSION }}/${{ inputs.BUILD_ID }}/linux/x64/tar/builds
+      REPO_URL: https://aws.oss.sonatype.org/
+      STAGING_PROFILE_ID: ${{ secrets.SONATYPE_STAGING_PROFILE_ID }}
+      AWS_ACCOUNT_PUBLIC: ${{ secrets.AWS_ACCOUNT_PUBLIC_LF }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME_LF }}
+      SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+      SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+      SIGNER_CLIENT_ROLE: ${{ secrets.SIGNER_CLIENT_ROLE }}
+      SIGNER_CLIENT_EXTERNAL_ID: ${{ secrets.SIGNER_CLIENT_EXTERNAL_ID }}
+      SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_UNSIGNED_BUCKET }}
+      SIGNER_CLIENT_SIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_SIGNED_BUCKET }}
+      RELEASE_BOT_USER: ${{ secrets.RELEASE_BOT_USER }}
+      RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - name: Download Maven artifacts
+        uses: ./.github/actions/download-from-s3
+        with:
+          bucket-name: ${{ env.ARTIFACT_BUCKET_NAME }}
+          download-path: ${{ env.ARTIFACT_PATH }}/
+          local-path: ${{ github.workspace }}/artifacts
+          aws-account: ${{ env.AWS_ACCOUNT_PUBLIC }}
+          role-name: opensearch-bundle
+      - name: Compute signing email
+        id: manifest
+        shell: bash
+        env:
+          VERSION: ${{ inputs.VERSION }}
+        run: |
+          set -euo pipefail
+          major="${VERSION%%.*}"
+          if (( major > 2 )); then
+            echo 'email=release@opensearch.org' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'email=opensearch@amazon.com' >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Sign, stage, and publish
+        uses: ./.github/actions/publish-to-maven
+        with:
+          signing-artifacts-path: ${{ github.workspace }}/artifacts/${{ env.ARTIFACT_PATH }}/opensearch/manifest.yml
+          maven-artifacts-path: ${{ github.workspace }}/artifacts/${{ env.ARTIFACT_PATH }}/opensearch/maven
+          email: ${{ steps.manifest.outputs.email }}
+          sonatype-username: ${{ env.SONATYPE_USERNAME }}
+          sonatype-password: ${{ env.SONATYPE_PASSWORD }}
+          staging-profile-id: ${{ env.STAGING_PROFILE_ID }}
+          signer-client-role: ${{ env.SIGNER_CLIENT_ROLE }}
+          signer-client-external-id: ${{ env.SIGNER_CLIENT_EXTERNAL_ID }}
+          signer-client-unsigned-bucket: ${{ env.SIGNER_CLIENT_UNSIGNED_BUCKET }}
+          signer-client-signed-bucket: ${{ env.SIGNER_CLIENT_SIGNED_BUCKET }}
+          github-user: ${{ env.RELEASE_BOT_USER }}
+          github-token: ${{ env.RELEASE_BOT_TOKEN }}

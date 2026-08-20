@@ -1,0 +1,149 @@
+---
+# Ports jenkins/release-workflows/promote-repos.jenkinsfile:24-79 and
+# opensearch-build-libraries vars/promoteRepos.groovy:19-243. See
+# docs/jenkins-to-actions-release-promotion.md.
+name: Distribution Promote Repositories
+
+on:
+  workflow_dispatch:
+    inputs:
+      DISTRIBUTION_JOB_NAME:
+        description: '<Optional> What distribution job name is this distribution build with? Defaults to distribution-build-opensearch.'
+        required: true
+        default: 'distribution-build-opensearch'
+        type: choice
+        options:
+          - distribution-build-opensearch
+          - distribution-build-opensearch-dashboards
+      DISTRIBUTION_REPO_TYPE:
+        description: '<Optional> What distribution repo type is this distribution promote to? Defaults to yum.'
+        required: true
+        default: 'yum'
+        type: choice
+        options:
+          - yum
+          - apt
+      DISTRIBUTION_BUILD_NUMBER:
+        description: '<Required> What is the build id of the above DISTRIBUTION_JOB_NAME that you want to promote? (e.g. 123, 136)'
+        required: true
+        default: ''
+        type: string
+      INPUT_MANIFEST:
+        description: '<Required> What is the input manifest of the above DISTRIBUTION_JOB_NAME that you want to promote? (e.g. 1.2.2/opensearch-1.2.2.yml)'
+        required: true
+        default: ''
+        type: string
+  workflow_call:
+    inputs:
+      DISTRIBUTION_JOB_NAME:
+        required: true
+        type: string
+      DISTRIBUTION_REPO_TYPE:
+        required: true
+        type: string
+      DISTRIBUTION_BUILD_NUMBER:
+        required: true
+        type: string
+      INPUT_MANIFEST:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  resolve-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - id: image
+        shell: bash
+        env:
+          DISTRIBUTION_REPO_TYPE: ${{ inputs.DISTRIBUTION_REPO_TYPE }}
+        run: |
+          set -euo pipefail
+          if [[ "${DISTRIBUTION_REPO_TYPE}" == yum ]]; then
+            echo 'image=public.ecr.aws/opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-build-v1' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'image=public.ecr.aws/opensearchstaging/ci-runner:ci-runner-ubuntu2404-opensearch-build-v1' >> "${GITHUB_OUTPUT}"
+          fi
+  promote:
+    needs: resolve-image
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ needs.resolve-image.outputs.image }}
+      # need to switch to root so that github actions can install runner binary on container without permission issues.
+      options: --user root
+    timeout-minutes: 60
+    environment: production-repositories
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      ARTIFACT_PROMOTION_ROLE_NAME: ${{ secrets.ARTIFACT_PROMOTION_ROLE_NAME }}
+      AWS_ACCOUNT_ARTIFACT: ${{ secrets.AWS_ACCOUNT_ARTIFACT }}
+      ARTIFACT_PRODUCTION_BUCKET_NAME: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+      RPM_SIGNING_ACCOUNT: ${{ secrets.RPM_SIGNING_ACCOUNT }}
+      RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN }}
+      RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+      RPM_RELEASE_SIGNING_KEY_ID: ${{ secrets.RPM_RELEASE_SIGNING_KEY_ID }}
+      RPM_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_SIGNING_PASSPHRASE_SECRETS_ARN }}
+      RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+      RPM_SIGNING_KEY_ID: ${{ secrets.RPM_SIGNING_KEY_ID }}
+      SIGNER_CLIENT_ROLE: ${{ secrets.SIGNER_CLIENT_ROLE }}
+      SIGNER_CLIENT_EXTERNAL_ID: ${{ secrets.SIGNER_CLIENT_EXTERNAL_ID }}
+      SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_UNSIGNED_BUCKET }}
+      SIGNER_CLIENT_SIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_SIGNED_BUCKET }}
+      RELEASE_BOT_USER: ${{ secrets.RELEASE_BOT_USER }}
+      RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - name: Read input manifest facts
+        id: manifest
+        shell: bash
+        env:
+          DISTRIBUTION_REPO_TYPE: ${{ inputs.DISTRIBUTION_REPO_TYPE }}
+          DISTRIBUTION_JOB_NAME: ${{ inputs.DISTRIBUTION_JOB_NAME }}
+          DISTRIBUTION_BUILD_NUMBER: ${{ inputs.DISTRIBUTION_BUILD_NUMBER }}
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml \
+            || python3 -m pip install --quiet --break-system-packages pyyaml
+          python3 .github/scripts/release_manifest_facts.py input-manifest-facts \
+            --manifest "manifests/${INPUT_MANIFEST}" >> "${GITHUB_OUTPUT}"
+          printf '%s %s %s %s\n' \
+            "${DISTRIBUTION_REPO_TYPE}" "${DISTRIBUTION_JOB_NAME}" \
+            "${DISTRIBUTION_BUILD_NUMBER}" "${INPUT_MANIFEST}" \
+            >> "${GITHUB_STEP_SUMMARY}"
+      - name: Promote repository
+        uses: ./.github/actions/promote-repos
+        with:
+          distribution-job-name: ${{ inputs.DISTRIBUTION_JOB_NAME }}
+          distribution-repo-type: ${{ inputs.DISTRIBUTION_REPO_TYPE }}
+          distribution-build-number: ${{ inputs.DISTRIBUTION_BUILD_NUMBER }}
+          input-manifest: ${{ inputs.INPUT_MANIFEST }}
+          filename: ${{ steps.manifest.outputs.filename }}
+          revision: ${{ steps.manifest.outputs.revision }}
+          repo-version: ${{ steps.manifest.outputs.repo-version }}
+          signing-email: ${{ steps.manifest.outputs.signing-email }}
+          artifact-production-bucket-name: ${{ env.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+          artifact-promotion-role-name: ${{ env.ARTIFACT_PROMOTION_ROLE_NAME }}
+          aws-account-artifact: ${{ env.AWS_ACCOUNT_ARTIFACT }}
+          rpm-signing-account: ${{ env.RPM_SIGNING_ACCOUNT }}
+          rpm-release-signing-passphrase-secrets-arn: ${{ env.RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN }}
+          rpm-release-signing-secret-key-id-secrets-arn: ${{ env.RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+          rpm-release-signing-key-id: ${{ env.RPM_RELEASE_SIGNING_KEY_ID }}
+          rpm-signing-passphrase-secrets-arn: ${{ env.RPM_SIGNING_PASSPHRASE_SECRETS_ARN }}
+          rpm-signing-secret-key-id-secrets-arn: ${{ env.RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+          rpm-signing-key-id: ${{ env.RPM_SIGNING_KEY_ID }}
+          public-artifact-url: ${{ vars.PUBLIC_ARTIFACT_URL }}
+          signer-client-role: ${{ env.SIGNER_CLIENT_ROLE }}
+          signer-client-external-id: ${{ env.SIGNER_CLIENT_EXTERNAL_ID }}
+          signer-client-unsigned-bucket: ${{ env.SIGNER_CLIENT_UNSIGNED_BUCKET }}
+          signer-client-signed-bucket: ${{ env.SIGNER_CLIENT_SIGNED_BUCKET }}
+          github-user: ${{ env.RELEASE_BOT_USER }}
+          github-token: ${{ env.RELEASE_BOT_TOKEN }}

@@ -1,0 +1,165 @@
+---
+# Ports opensearch-build-libraries vars/copyContainer.groovy:19-89 at the
+# origin/lf-jenkins ref, which is the library version
+# promote-docker-ecr-lf.jenkinsfile pins (jenkins@lf-jenkins). Called by
+# the local promote-container implementation of
+# jenkins/release-workflows/promote-docker-ecr-lf.jenkinsfile:78-89. See
+# docs/jenkins-to-actions-release-promotion.md.
+name: 'Copy container'
+description: 'Copy one or more container tags between staging and production registries.'
+
+inputs:
+  source-registry:
+    description: 'Source container registry namespace'
+    required: true
+  source-image:
+    description: 'Source image repository and tag'
+    required: true
+  destination-registry:
+    description: 'Destination container registry namespace'
+    required: true
+  destination-image:
+    description: 'Destination image repository and tag'
+    required: true
+  release-version:
+    description: 'Release tag to copy'
+    required: true
+  tag-major-version:
+    description: 'Whether to copy the major-version tag'
+    required: true
+  tag-latest:
+    description: 'Whether to copy the latest tag'
+    required: true
+  all-tags:
+    description: 'Whether to copy every tag for the image'
+    required: false
+    default: 'false'
+  readonly-dockerhub-username:
+    description: 'Read-only Docker Hub username for staging pulls'
+    required: true
+  readonly-dockerhub-password:
+    description: 'Read-only Docker Hub password for staging pulls'
+    required: true
+  production-dockerhub-username:
+    description: 'Production Docker Hub username'
+    required: true
+  production-dockerhub-password:
+    description: 'Production Docker Hub password'
+    required: true
+  artifact-promotion-role-name:
+    description: 'AWS IAM role used for artifact promotion'
+    required: true
+  aws-account-artifact:
+    description: 'AWS account containing the artifact promotion role'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check all-tags guard
+      if: ${{ inputs.all-tags == 'true' }}
+      shell: bash
+      env:
+        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+        DESTINATION_IMAGE: ${{ inputs.destination-image }}
+      run: |
+        set -euo pipefail
+        if [[ "${DESTINATION_REGISTRY}" != *opensearchstaging || "${DESTINATION_IMAGE%%:*}" != ci-runner ]]; then
+          echo "::error::'destination_registry' must be opensearchstaging registry and 'destination_image' must be ci-runner"
+          exit 1
+        fi
+
+    - name: Login to read-only Docker Hub
+      if: ${{ inputs.source-registry == 'opensearchstaging' || inputs.destination-registry == 'opensearchstaging' }}
+      shell: bash
+      env:
+        USERNAME: ${{ inputs.readonly-dockerhub-username }}
+        PASSWORD: ${{ inputs.readonly-dockerhub-password }}
+      run: |
+        set -euo pipefail
+        printf '%s' "${PASSWORD}" | docker login --username "${USERNAME}" --password-stdin
+
+    # lf copyContainer.groovy:53 gates the production login on the destination only.
+    - name: Login to production Docker Hub
+      if: ${{ inputs.destination-registry == 'opensearchproject' }}
+      shell: bash
+      env:
+        USERNAME: ${{ inputs.production-dockerhub-username }}
+        PASSWORD: ${{ inputs.production-dockerhub-password }}
+      run: |
+        set -euo pipefail
+        printf '%s' "${PASSWORD}" | docker login --username "${USERNAME}" --password-stdin
+
+    # lf copyContainer.groovy:60-63: one ECR branch covering the LF staging and
+    # production namespaces, logging in to the registry root rather than the full
+    # destination. There is no public.ecr.aws/opensearchstaging branch at this ref.
+    - name: Assume production artifact role for ECR
+      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchorg/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchorg/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchorg/opensearchproject' }}
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.aws-account-artifact }}:role/${{ inputs.artifact-promotion-role-name }}
+        role-duration-seconds: 900
+        role-session-name: github-actions-copy-container
+        aws-region: us-east-1
+
+    - name: Login to ECR Public
+      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchorg/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchorg/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchorg/opensearchproject' }}
+      shell: bash
+      env:
+        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+      run: |
+        set -euo pipefail
+        registry="${DESTINATION_REGISTRY}"
+        if [[ "${registry}" == public.ecr.aws/* ]]; then
+          registry=$(echo "${registry}" | cut -d/ -f1,2)
+        fi
+        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${registry}"
+
+    - name: Check for crane
+      id: crane
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v crane > /dev/null 2>&1; then
+          echo 'present=true' >> "${GITHUB_OUTPUT}"
+        else
+          echo 'present=false' >> "${GITHUB_OUTPUT}"
+        fi
+
+    # The promotion container image is not guaranteed to ship crane; install the
+    # same pinned release .github/workflows/get-ci-image-tag.yml uses.
+    - name: Install crane
+      if: ${{ steps.crane.outputs.present != 'true' }}
+      uses: iarekylew00t/crane-installer@129958071ac638780427317f25d7c5e66f5e88e4  # v1
+      with:
+        crane-release: v0.15.2
+
+    - name: Copy container tags
+      shell: bash
+      env:
+        SOURCE_REGISTRY: ${{ inputs.source-registry }}
+        SOURCE_IMAGE: ${{ inputs.source-image }}
+        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+        DESTINATION_IMAGE: ${{ inputs.destination-image }}
+        RELEASE_VERSION: ${{ inputs.release-version }}
+        TAG_MAJOR_VERSION: ${{ inputs.tag-major-version }}
+        TAG_LATEST: ${{ inputs.tag-latest }}
+        ALL_TAGS: ${{ inputs.all-tags }}
+      run: |
+        set -euo pipefail
+        source_name="${SOURCE_IMAGE%%:*}"
+        destination_name="${DESTINATION_IMAGE%%:*}"
+        if [[ "${ALL_TAGS}" == true ]]; then
+          echo "Copying all the tags of image ${SOURCE_REGISTRY}/${source_name} to ${DESTINATION_REGISTRY}/${destination_name}"
+          crane cp "${SOURCE_REGISTRY}/${source_name}" "${DESTINATION_REGISTRY}/${destination_name}" --all-tags
+        else
+          tags=("${RELEASE_VERSION}")
+          if [[ "${TAG_MAJOR_VERSION}" == true ]]; then tags+=("${RELEASE_VERSION%%.*}"); fi
+          if [[ "${TAG_LATEST}" == true ]]; then tags+=(latest); fi
+          for tag in "${tags[@]}"; do
+            echo "Copying single image tag from ${SOURCE_REGISTRY}/${SOURCE_IMAGE} to ${DESTINATION_REGISTRY}/${destination_name}:${tag}"
+            crane cp "${SOURCE_REGISTRY}/${SOURCE_IMAGE}" "${DESTINATION_REGISTRY}/${destination_name}:${tag}"
+          done
+        fi
+        docker logout || true
+        docker logout public.ecr.aws || true

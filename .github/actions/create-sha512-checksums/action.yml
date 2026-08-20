@@ -1,0 +1,54 @@
+---
+# Ports opensearch-build-libraries vars/createSha512Checksums.groovy:9-63, used by
+# jenkins/release-workflows/promote-artifacts.jenkinsfile:71. See
+# docs/jenkins-to-actions-release-promotion.md. The Windows `bat` branch is
+# intentionally omitted because this action runs in a Linux container job.
+name: 'Create SHA-512 checksums'
+description: 'Create OpenSearch-compatible SHA-512 sidecar files.'
+
+inputs:
+  artifact-path:
+    description: 'File or directory to scan'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Create SHA-512 checksums
+      shell: bash
+      env:
+        ARTIFACT_PATH: ${{ inputs.artifact-path }}
+      run: |
+        set -euo pipefail
+        allowed_types=('.tar.gz' '.zip' '.rpm' '.deb')
+        if [[ ! -e "${ARTIFACT_PATH}" ]]; then
+          echo "::error::Artifact path ${ARTIFACT_PATH} does not exist."
+          exit 1
+        fi
+        # "mapfile -d" needs bash 4.4; the centos7 ci-runner container ships bash 4.2.
+        files=()
+        while IFS= read -r -d '' found; do
+          files+=("${found}")
+        done < <(find "${ARTIFACT_PATH}" -type f -print0)
+        if [[ "${#files[@]}" -eq 0 ]]; then
+          echo "No files found under ${ARTIFACT_PATH}"
+          exit 0
+        fi
+        for file in "${files[@]}"; do
+          accepted=false
+          for file_type in "${allowed_types[@]}"; do
+            if [[ "${file}" == *"${file_type}" ]]; then
+              hash=$(sha512sum "${file}" | awk '{print $1}')
+              printf '%s  %s\n' "${hash}" "$(basename "${file}")" > "${file}.sha512"
+              accepted=true
+              break
+            fi
+          done
+          if [[ "${accepted}" != true ]]; then
+            if [[ "${#files[@]}" -eq 1 ]]; then
+              echo "Not generating sha for ${file} with artifact Path ${ARTIFACT_PATH}, doesn't match allowed types [${allowed_types[*]}]"
+            else
+              echo "Not generating sha for ${file} in ${ARTIFACT_PATH}, doesn't match allowed types [${allowed_types[*]}]"
+            fi
+          fi
+        done

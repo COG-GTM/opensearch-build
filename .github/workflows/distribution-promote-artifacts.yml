@@ -1,0 +1,148 @@
+---
+# Ports jenkins/release-workflows/promote-artifacts.jenkinsfile:19-82 and
+# opensearch-build-libraries vars/promoteArtifacts.groovy:21-130. See
+# docs/jenkins-to-actions-release-promotion.md. Jenkins had no approval gate;
+# production-artifacts is a deliberately added GitHub Environment control because
+# this job writes release artifacts to the public production bucket.
+name: Distribution Promote Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      DISTRIBUTION_JOB_NAME:
+        description: '<Optional> The jenkins job name that is used for building the artifact. Defaults to distribution-build-opensearch.'
+        required: true
+        default: 'distribution-build-opensearch'
+        type: choice
+        options:
+          - distribution-build-opensearch
+          - distribution-build-opensearch-dashboards
+      DISTRIBUTION_BUILD_NUMBER:
+        description: '<Required> What is the build id of the above DISTRIBUTION_JOB_NAME that you want to promote? (e.g. 123, 136)'
+        required: true
+        default: ''
+        type: string
+      INPUT_MANIFEST:
+        description: '<Required> What is the input manifest of the above DISTRIBUTION_JOB_NAME that you want to promote? (e.g. 1.2.2/opensearch-1.2.2.yml)'
+        required: true
+        default: ''
+        type: string
+      DISTRIBUTION_PLATFORM:
+        description: '<Optional> What is the platform of the distribution? Defaults to linux.'
+        required: true
+        default: 'linux'
+        type: choice
+        options:
+          - linux
+          - windows
+          - darwin
+      DISTRIBUTION_NAME:
+        description: '<Optional> What is the name of the distribution?? Defaults to tar.'
+        required: true
+        default: 'tar'
+        type: choice
+        options:
+          - tar
+          - rpm
+          - deb
+          - zip
+      DISTRIBUTION_ARCHITECTURE:
+        description: '<Optional> What is the architecture of the distribution? Defaults to arm64.'
+        required: true
+        default: 'arm64'
+        type: choice
+        options:
+          - arm64
+          - x64
+  workflow_call:
+    inputs:
+      DISTRIBUTION_JOB_NAME:
+        required: true
+        type: string
+      DISTRIBUTION_BUILD_NUMBER:
+        required: true
+        type: string
+      INPUT_MANIFEST:
+        required: true
+        type: string
+      DISTRIBUTION_PLATFORM:
+        required: true
+        type: string
+      DISTRIBUTION_NAME:
+        required: true
+        type: string
+      DISTRIBUTION_ARCHITECTURE:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  promote:
+    name: promote artifacts
+    runs-on: ubuntu-24.04
+    container:
+      image: public.ecr.aws/opensearchstaging/ci-runner:ci-runner-centos7-opensearch-build-v3
+      # need to switch to root so that github actions can install runner binary on container without permission issues.
+      options: --user root
+    timeout-minutes: 60
+    environment: production-artifacts
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_ACCOUNT_PUBLIC: ${{ secrets.AWS_ACCOUNT_PUBLIC }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+      ARTIFACT_PROMOTION_ROLE_NAME: ${{ secrets.ARTIFACT_PROMOTION_ROLE_NAME }}
+      AWS_ACCOUNT_ARTIFACT: ${{ secrets.AWS_ACCOUNT_ARTIFACT }}
+      ARTIFACT_PRODUCTION_BUCKET_NAME: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+      SIGNER_CLIENT_ROLE: ${{ secrets.SIGNER_CLIENT_ROLE }}
+      SIGNER_CLIENT_EXTERNAL_ID: ${{ secrets.SIGNER_CLIENT_EXTERNAL_ID }}
+      SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_UNSIGNED_BUCKET }}
+      SIGNER_CLIENT_SIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_SIGNED_BUCKET }}
+      RELEASE_BOT_USER: ${{ secrets.RELEASE_BOT_USER }}
+      RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - name: Read input manifest facts
+        id: manifest
+        shell: bash
+        env:
+          DISTRIBUTION_BUILD_NUMBER: ${{ inputs.DISTRIBUTION_BUILD_NUMBER }}
+          DISTRIBUTION_PLATFORM: ${{ inputs.DISTRIBUTION_PLATFORM }}
+          DISTRIBUTION_ARCHITECTURE: ${{ inputs.DISTRIBUTION_ARCHITECTURE }}
+          DISTRIBUTION_NAME: ${{ inputs.DISTRIBUTION_NAME }}
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml \
+            || python3 -m pip install --quiet --break-system-packages pyyaml
+          python3 .github/scripts/release_manifest_facts.py input-manifest-facts \
+            --manifest "manifests/${INPUT_MANIFEST}" >> "${GITHUB_OUTPUT}"
+          printf '%s %s %s %s %s\n' \
+            "${DISTRIBUTION_BUILD_NUMBER}" "${DISTRIBUTION_PLATFORM}" \
+            "${DISTRIBUTION_ARCHITECTURE}" "${DISTRIBUTION_NAME}" \
+            "${INPUT_MANIFEST}" >> "${GITHUB_STEP_SUMMARY}"
+      - name: Promote artifacts
+        uses: ./.github/actions/promote-artifacts
+        with:
+          distribution-job-name: ${{ inputs.DISTRIBUTION_JOB_NAME }}
+          distribution-build-number: ${{ inputs.DISTRIBUTION_BUILD_NUMBER }}
+          input-manifest: ${{ inputs.INPUT_MANIFEST }}
+          distribution-platform: ${{ inputs.DISTRIBUTION_PLATFORM }}
+          distribution-name: ${{ inputs.DISTRIBUTION_NAME }}
+          distribution-architecture: ${{ inputs.DISTRIBUTION_ARCHITECTURE }}
+          filename: ${{ steps.manifest.outputs.filename }}
+          revision: ${{ steps.manifest.outputs.revision }}
+          signing-email: ${{ steps.manifest.outputs.signing-email }}
+          aws-account-public: ${{ env.AWS_ACCOUNT_PUBLIC }}
+          artifact-bucket-name: ${{ env.ARTIFACT_BUCKET_NAME }}
+          artifact-promotion-role-name: ${{ env.ARTIFACT_PROMOTION_ROLE_NAME }}
+          aws-account-artifact: ${{ env.AWS_ACCOUNT_ARTIFACT }}
+          artifact-production-bucket-name: ${{ env.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+          signer-client-role: ${{ env.SIGNER_CLIENT_ROLE }}
+          signer-client-external-id: ${{ env.SIGNER_CLIENT_EXTERNAL_ID }}
+          signer-client-unsigned-bucket: ${{ env.SIGNER_CLIENT_UNSIGNED_BUCKET }}
+          signer-client-signed-bucket: ${{ env.SIGNER_CLIENT_SIGNED_BUCKET }}
+          github-user: ${{ env.RELEASE_BOT_USER }}
+          github-token: ${{ env.RELEASE_BOT_TOKEN }}

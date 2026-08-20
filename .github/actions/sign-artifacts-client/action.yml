@@ -1,0 +1,112 @@
+---
+# Ports the non-rpm/client branch of opensearch-build-libraries vars/signArtifacts.groovy:123-255,
+# used by jenkins/release-workflows/promote-artifacts.jenkinsfile:71, promote-repos.jenkinsfile:65,
+# and publish-to-maven-lf.jenkinsfile:70-75. See docs/jenkins-to-actions-release-promotion.md.
+# The Groovy fallback cloned opensearch-build when sign.sh was absent; this action uses the checked-out repository's
+# root sign.sh directly. Composite actions cannot read secrets, so all six signer-client/GitHub values must be
+# exported by the caller's job environment.
+name: 'Sign artifacts with signer client'
+description: 'Import OpenSearch PGP keys and sign artifacts through sign.sh.'
+
+inputs:
+  artifact-path:
+    description: 'File, directory, or manifest to sign'
+    required: true
+  sigtype:
+    description: 'Signature suffix, such as .sig or .asc'
+    required: true
+  platform:
+    description: 'Signer platform'
+    required: false
+    default: 'linux'
+  type:
+    description: 'Optional signer type, such as yml or maven'
+    required: false
+  email:
+    description: 'Signing email'
+    required: true
+  component:
+    description: 'Optional component name'
+    required: false
+  overwrite:
+    description: 'Pass the valueless overwrite flag'
+    required: false
+    default: 'false'
+  signer-client-role:
+    description: 'Signer client role'
+    required: true
+  signer-client-external-id:
+    description: 'Signer client external ID'
+    required: true
+  signer-client-unsigned-bucket:
+    description: 'Signer client unsigned bucket'
+    required: true
+  signer-client-signed-bucket:
+    description: 'Signer client signed bucket'
+    required: true
+  github-user:
+    description: 'GitHub bot username'
+    required: true
+  github-token:
+    description: 'GitHub bot token'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check signer-client environment
+      shell: bash
+      env:
+        SIGNER_CLIENT_ROLE: ${{ inputs.signer-client-role }}
+        SIGNER_CLIENT_EXTERNAL_ID: ${{ inputs.signer-client-external-id }}
+        SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ inputs.signer-client-unsigned-bucket }}
+        SIGNER_CLIENT_SIGNED_BUCKET: ${{ inputs.signer-client-signed-bucket }}
+        GITHUB_USER: ${{ inputs.github-user }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        for variable in SIGNER_CLIENT_ROLE SIGNER_CLIENT_EXTERNAL_ID SIGNER_CLIENT_UNSIGNED_BUCKET \
+          SIGNER_CLIENT_SIGNED_BUCKET GITHUB_USER GITHUB_TOKEN; do
+          if [[ -z "${!variable:-}" ]]; then
+            echo "::error::${variable} is empty. Configure the signer-client and GitHub bot secrets (see docs/jenkins-to-actions-release-promotion.md)."
+            exit 1
+          fi
+        done
+
+    - name: Import OpenSearch PGP keys
+      shell: bash
+      run: |
+        set -euo pipefail
+        curl -fsSL https://artifacts.opensearch.org/publickeys/opensearch.pgp | gpg --import -
+        curl -fsSL https://artifacts.opensearch.org/publickeys/opensearch-release.pgp | gpg --import -
+
+    - name: Sign artifact
+      shell: bash
+      env:
+        ARTIFACT_PATH: ${{ inputs.artifact-path }}
+        SIGTYPE: ${{ inputs.sigtype }}
+        PLATFORM: ${{ inputs.platform }}
+        SIGNING_TYPE: ${{ inputs.type }}
+        SIGNING_EMAIL: ${{ inputs.email }}
+        COMPONENT: ${{ inputs.component }}
+        OVERWRITE: ${{ inputs.overwrite }}
+        ROLE: ${{ inputs.signer-client-role }}
+        EXTERNAL_ID: ${{ inputs.signer-client-external-id }}
+        UNSIGNED_BUCKET: ${{ inputs.signer-client-unsigned-bucket }}
+        SIGNED_BUCKET: ${{ inputs.signer-client-signed-bucket }}
+        GITHUB_USER: ${{ inputs.github-user }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        set +x
+        args=("${ARTIFACT_PATH}" "--sigtype" "${SIGTYPE}" "--platform" "${PLATFORM}" "--email" "${SIGNING_EMAIL}")
+        if [[ -n "${SIGNING_TYPE}" ]]; then
+          args+=("--type" "${SIGNING_TYPE}")
+        fi
+        if [[ -n "${COMPONENT}" ]]; then
+          args+=("--component" "${COMPONENT}")
+        fi
+        if [[ "${OVERWRITE}" == 'true' ]]; then
+          args+=("--overwrite")
+        fi
+        ./sign.sh "${args[@]}"
