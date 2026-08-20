@@ -1,0 +1,130 @@
+---
+# GitHub Actions port of jenkins/docker/docker-build-lf.jenkinsfile.
+# The Jenkins parameters block is at lines 38-61, the repository guard is at lines 63-71,
+# the checkout/login/eval sequence is at lines 73-101, and the always-cleanup block is at lines 103-116.
+# This workflow deliberately has no push or pull_request trigger. workflow_call replaces the Jenkins
+# `build job: 'docker-build'` call used by the re-release pipeline.
+name: Docker Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      DOCKER_BUILD_GIT_REPOSITORY:
+        description: '<Optional> Repository containing the Dockerfiles and build script.'
+        required: false
+        default: https://github.com/opensearch-project/opensearch-build
+        type: string
+      DOCKER_BUILD_GIT_REPOSITORY_REFERENCE:
+        description: '<Optional> Git branch, tag, or commit of the repository.'
+        required: false
+        default: main
+        type: string
+      DOCKER_BUILD_SCRIPT_WITH_COMMANDS:
+        description: '<Required> Script commands to evaluate from the repository root.'
+        required: true
+        type: string
+      DOCKER_BUILD_OS:
+        description: '<Optional> Operating system on which to build.'
+        required: false
+        default: linux
+        type: choice
+        options:
+          - linux
+          - windows
+  workflow_call:
+    inputs:
+      DOCKER_BUILD_GIT_REPOSITORY:
+        description: '<Optional> Repository containing the Dockerfiles and build script.'
+        required: false
+        default: https://github.com/opensearch-project/opensearch-build
+        type: string
+      DOCKER_BUILD_GIT_REPOSITORY_REFERENCE:
+        description: '<Optional> Git branch, tag, or commit of the repository.'
+        required: false
+        default: main
+        type: string
+      DOCKER_BUILD_SCRIPT_WITH_COMMANDS:
+        description: '<Required> Script commands to evaluate from the repository root.'
+        required: true
+        type: string
+      DOCKER_BUILD_OS:
+        description: '<Optional> Operating system on which to build. workflow_call uses string because choice is dispatch-only.'
+        required: false
+        default: linux
+        type: string
+    secrets:
+      DOCKERHUB_STAGING_USERNAME:
+        required: true
+      DOCKERHUB_STAGING_PASSWORD:
+        required: true
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  parameters-check:
+    name: parameters-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    outputs:
+      repository: ${{ steps.repository.outputs.repository }}
+    steps:
+      - name: Validate repository
+        env:
+          REPOSITORY: ${{ inputs.DOCKER_BUILD_GIT_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          if [[ "${REPOSITORY}" != https://github.com/opensearch-project/* ]]; then
+            echo "::error::The repository needs to be an opensearch-project repository"
+            exit 1
+          fi
+
+      - name: Strip GitHub URL prefix
+        id: repository
+        env:
+          REPOSITORY: ${{ inputs.DOCKER_BUILD_GIT_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          printf 'repository=%s\n' "${REPOSITORY#https://github.com/}" >> "${GITHUB_OUTPUT}"
+
+  docker-build:
+    name: docker-build-${{ inputs.DOCKER_BUILD_OS }}
+    needs: parameters-check
+    runs-on: ${{ inputs.DOCKER_BUILD_OS == 'windows' && 'windows-2022' || 'ubuntu-24.04' }}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    # Jenkins docker-build used a Windows container with a Docker Engine named-pipe mount
+    # (docker-build-lf.jenkinsfile:18-21). GitHub Actions cannot run that Windows job container,
+    # so the Windows branch runs directly on the hosted Windows runner.
+    container: ${{ inputs.DOCKER_BUILD_OS == 'linux' && fromJSON('{"image":"public.ecr.aws/opensearchstaging/ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1","options":"-u root -v /var/run/docker.sock:/var/run/docker.sock"}') || null }}
+    steps:
+      - name: Checkout requested repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          repository: ${{ needs.parameters-check.outputs.repository }}
+          ref: ${{ inputs.DOCKER_BUILD_GIT_REPOSITORY_REFERENCE }}
+
+      - name: DockerHub staging login and build
+        env:
+          DOCKERHUB_STAGING_USERNAME: ${{ secrets.DOCKERHUB_STAGING_USERNAME }}
+          DOCKERHUB_STAGING_PASSWORD: ${{ secrets.DOCKERHUB_STAGING_PASSWORD }}
+          DOCKER_BUILD_SCRIPT_WITH_COMMANDS: ${{ inputs.DOCKER_BUILD_SCRIPT_WITH_COMMANDS }}
+        run: |
+          set -euo pipefail
+          echo 'The docker-build workflow will only push docker images to staging, please use docker-copy to move the image to other repositories'
+          set +x
+          printf '%s' "${DOCKERHUB_STAGING_PASSWORD}" | docker login --username "${DOCKERHUB_STAGING_USERNAME}" --password-stdin
+          set -x
+          eval "${DOCKER_BUILD_SCRIPT_WITH_COMMANDS}"
+
+      - name: Logout and prune Docker images
+        if: always()
+        run: |
+          # cleanWs/postCleanup is unnecessary on ephemeral runners, matching PR #1's stance.
+          docker logout || true
+          docker image prune -f --all || true

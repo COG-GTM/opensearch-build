@@ -1,0 +1,95 @@
+---
+# Composite port of opensearch-build-libraries/vars/validateArtifacts.groovy.
+# Command assembly follows validateArtifacts.groovy:29-58. The two-attempt loop ports Jenkins retry(2)
+# from validate-artifacts-lf.jenkinsfile:220-232 and :251-271.
+name: Validate artifacts
+description: Run validation.sh with the validateArtifacts shared-library arguments.
+inputs:
+  version:
+    description: OpenSearch version.
+    required: false
+  file-path:
+    description: Artifact URL mappings.
+    required: false
+  distribution:
+    description: Distribution.
+    required: false
+  platform:
+    description: Platform.
+    required: false
+  arch:
+    description: Architecture.
+    required: false
+  projects:
+    description: Projects to validate.
+    required: false
+  docker-source:
+    description: Docker source.
+    required: false
+  os-build-number:
+    description: OpenSearch build number.
+    required: false
+  osd-build-number:
+    description: OpenSearch Dashboards build number.
+    required: false
+  artifact-type:
+    description: Artifact type.
+    required: false
+  allow-http:
+    description: Allow validation without the security plugin.
+    required: false
+    default: 'false'
+  docker-args:
+    description: Docker validation optional argument.
+    required: false
+  skip-core-plugins:
+    description: Comma-separated native plugins to skip.
+    required: false
+    default: arrow-base,arrow-flight-rpc
+runs:
+  using: composite
+  steps:
+    - name: Validate artifacts with retry(2)
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        FILE_PATH: ${{ inputs.file-path }}
+        DISTRIBUTION: ${{ inputs.distribution }}
+        PLATFORM: ${{ inputs.platform }}
+        ARCH: ${{ inputs.arch }}
+        PROJECTS: ${{ inputs.projects }}
+        DOCKER_SOURCE: ${{ inputs.docker-source }}
+        OS_BUILD_NUMBER: ${{ inputs.os-build-number }}
+        OSD_BUILD_NUMBER: ${{ inputs.osd-build-number }}
+        ARTIFACT_TYPE: ${{ inputs.artifact-type }}
+        ALLOW_HTTP: ${{ inputs.allow-http }}
+        DOCKER_ARGS: ${{ inputs.docker-args }}
+        SKIP_CORE_PLUGINS: ${{ inputs.skip-core-plugins }}
+      run: |
+        set -uo pipefail
+        command=(./validation.sh)
+        [[ -n "${VERSION}" ]] && command+=(--version "${VERSION}")
+        [[ -n "${FILE_PATH}" ]] && command+=(--file-path "${FILE_PATH}")
+        [[ -n "${DISTRIBUTION}" ]] && command+=(--distribution "${DISTRIBUTION}")
+        [[ -n "${PLATFORM}" ]] && command+=(--platform "${PLATFORM}")
+        [[ -n "${ARCH}" ]] && command+=(--arch "${ARCH}")
+        [[ -n "${PROJECTS}" ]] && command+=(--projects "${PROJECTS}")
+        [[ -n "${DOCKER_SOURCE}" ]] && command+=(--docker-source "${DOCKER_SOURCE}")
+        [[ -n "${OS_BUILD_NUMBER}" ]] && command+=(--os-build-number "${OS_BUILD_NUMBER}")
+        [[ -n "${OSD_BUILD_NUMBER}" ]] && command+=(--osd-build-number "${OSD_BUILD_NUMBER}")
+        [[ -n "${ARTIFACT_TYPE}" ]] && command+=(--artifact-type "${ARTIFACT_TYPE}")
+        [[ "${ALLOW_HTTP}" == 'true' ]] && command+=(--allow-http)
+        [[ -n "${DOCKER_ARGS}" ]] && command+=(--"${DOCKER_ARGS}")
+        if [[ -n "${SKIP_CORE_PLUGINS}" && "${SKIP_CORE_PLUGINS}" != 'None' ]]; then
+          command+=(--skip-core-plugins "${SKIP_CORE_PLUGINS//,/ }")
+        fi
+        for attempt in 1 2; do
+          echo "validation attempt ${attempt}/2"
+          if "${command[@]}"; then
+            exit 0
+          fi
+          status=$?
+          if [[ "${attempt}" == 2 ]]; then
+            exit "${status}"
+          fi
+        done

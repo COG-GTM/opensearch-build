@@ -1,0 +1,112 @@
+---
+# Composite port of opensearch-build-libraries/vars/patchDockerImage.groovy.
+# Pull/inspect/manifest handling follows patchDockerImage.groovy:15-73; the build command follows
+# buildDockerImage.groovy:20-102. The downstream docker-promotion build is intentionally not invoked.
+name: Patch Docker image
+description: Prepare a Docker re-release and expose the exact downstream build parameters (vars/patchDockerImage.groovy and vars/buildDockerImage.groovy).
+inputs:
+  product:
+    description: Product name, opensearch or opensearch-dashboards.
+    required: true
+  tag:
+    description: Product tag to re-release.
+    required: true
+outputs:
+  version:
+    description: Image version label.
+    value: ${{ steps.metadata.outputs.version }}
+  build-number:
+    description: Image build number label.
+    value: ${{ steps.metadata.outputs.build-number }}
+  build-date:
+    description: Current build date.
+    value: ${{ steps.metadata.outputs.build-date }}
+  filename:
+    description: InputManifest build filename.
+    value: ${{ steps.metadata.outputs.filename }}
+  base-os:
+    description: Docker base OS selected by buildDockerImage.
+    value: ${{ steps.metadata.outputs.base-os }}
+  build-qualifier:
+    description: Normalized build qualifier.
+    value: ${{ steps.metadata.outputs.build-qualifier }}
+  tag-latest:
+    description: Whether the re-released version matches latest.
+    value: ${{ steps.metadata.outputs.tag-latest }}
+  docker-build-script:
+    description: Exact buildDockerImage docker-build command string.
+    value: ${{ steps.metadata.outputs.docker-build-script }}
+  source-images:
+    description: Exact docker-promotion SOURCE_IMAGES parameter.
+    value: ${{ steps.metadata.outputs.source-images }}
+runs:
+  using: composite
+  steps:
+    - name: Pull source images
+      shell: bash
+      env:
+        PRODUCT: ${{ inputs.product }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+        docker pull "opensearchproject/${PRODUCT}:${TAG}"
+        docker pull "opensearchproject/${PRODUCT}:latest"
+
+    - name: Inspect image metadata and assemble build command
+      id: metadata
+      shell: bash
+      env:
+        PRODUCT: ${{ inputs.product }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+        docker_image="opensearchproject/${PRODUCT}:${TAG}"
+        latest_docker_image="opensearchproject/${PRODUCT}:latest"
+        version="$(docker inspect --format '{{ index .Config.Labels "org.label-schema.version"}}' "${docker_image}")"
+        build_number="$(docker inspect --format '{{ index .Config.Labels "org.label-schema.description"}}' "${docker_image}")"
+        latest_version="$(docker inspect --format '{{ index .Config.Labels "org.label-schema.version"}}' "${latest_docker_image}")"
+        build_date="$(date +%Y%m%d)"
+
+        manifest="manifests/${version}/${PRODUCT}-${version}.yml"
+        mapfile -t manifest_values < <(python3 - "${manifest}" <<'PY'
+        import sys
+        import yaml
+
+        with open(sys.argv[1], encoding="utf-8") as stream:
+            build = yaml.safe_load(stream)["build"]
+        filename = build["name"].lower().replace(" ", "-")
+        qualifier = build.get("qualifier")
+        qualifier = f"-{qualifier}" if qualifier not in (None, "null") else ""
+        print(filename)
+        print(qualifier)
+        print(build["version"])
+        PY
+        )
+        filename="${manifest_values[0]}"
+        build_qualifier="${manifest_values[1]}"
+        build_version="${manifest_values[2]}"
+        base_os='al2023'
+        if [[ "${build_version%%.*}" == 1 ]]; then
+          base_os='al2'
+        fi
+
+        artifact_url_x64="https://ci.opensearch.org/ci/dbc/distribution-build-${PRODUCT}/${version}/${build_number}/linux/x64/tar/dist/${PRODUCT}/${PRODUCT}-${version}-linux-x64.tar.gz"
+        artifact_url_arm64="https://ci.opensearch.org/ci/dbc/distribution-build-${PRODUCT}/${version}/${build_number}/linux/arm64/tar/dist/${PRODUCT}/${PRODUCT}-${version}-linux-arm64.tar.gz"
+        docker_build_script="id && pwd && cd docker/release && curl -sSL ${artifact_url_x64} -o ${filename}-x64.tgz && curl -sSL ${artifact_url_arm64} -o ${filename}-arm64.tgz && bash build-image-multi-arch.sh -v ${build_version}${build_qualifier} -f ./dockerfiles/${filename}.${base_os}.dockerfile -p ${filename} -a 'x64,arm64' -r opensearchstaging/${filename} -t '${filename}-x64.tgz,${filename}-arm64.tgz' -n ${build_number}"
+        tag_latest='false'
+        if [[ "${latest_version}" == "${version}" ]]; then
+          tag_latest='true'
+        fi
+        source_images="${PRODUCT}:${build_version}${build_qualifier}.${build_number}.${build_date}"
+
+        {
+          printf 'version=%s\n' "${version}"
+          printf 'build-number=%s\n' "${build_number}"
+          printf 'build-date=%s\n' "${build_date}"
+          printf 'filename=%s\n' "${filename}"
+          printf 'base-os=%s\n' "${base_os}"
+          printf 'build-qualifier=%s\n' "${build_qualifier}"
+          printf 'tag-latest=%s\n' "${tag_latest}"
+          printf 'source-images=%s\n' "${source_images}"
+          printf 'docker-build-script<<SCRIPT\n%s\nSCRIPT\n' "${docker_build_script}"
+        } >> "${GITHUB_OUTPUT}"

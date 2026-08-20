@@ -1,0 +1,153 @@
+---
+# GitHub Actions port of jenkins/docker/docker-copy-lf.jenkinsfile.
+# The parameters are at lines 23-50, the summary/empty-parameter guard is at lines 64-73,
+# copyContainer is invoked at lines 75-85, and post cleanup is at lines 89-95.
+name: Docker Copy
+
+on:
+  workflow_dispatch:
+    inputs:
+      ALL_TAGS:
+        description: '<Optional> Copy all source tags; the image tag is ignored when true.'
+        required: false
+        default: false
+        type: boolean
+      SOURCE_IMAGE_REGISTRY:
+        description: '<Optional> Source registry.'
+        required: false
+        default: opensearchstaging
+        type: choice
+        options:
+          - opensearchstaging
+          - public.ecr.aws/opensearchorg/opensearchstaging
+          - public.ecr.aws/t2m2d0w1
+      SOURCE_IMAGE:
+        description: '<Required> Source image and tag.'
+        required: true
+        type: string
+      DESTINATION_IMAGE_REGISTRY:
+        description: '<Optional> Destination registry.'
+        required: false
+        default: opensearchstaging
+        type: choice
+        options:
+          - opensearchstaging
+          - opensearchproject
+          - public.ecr.aws/opensearchorg/opensearchstaging
+          - public.ecr.aws/opensearchorg/opensearchproject
+      DESTINATION_IMAGE:
+        description: '<Required> Destination image and tag.'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      ALL_TAGS:
+        description: '<Optional> Copy all source tags; the image tag is ignored when true.'
+        required: false
+        default: false
+        type: boolean
+      SOURCE_IMAGE_REGISTRY:
+        description: '<Optional> Source registry. workflow_call uses string because choice is dispatch-only.'
+        required: false
+        default: opensearchstaging
+        type: string
+      SOURCE_IMAGE:
+        description: '<Required> Source image and tag.'
+        required: true
+        type: string
+      DESTINATION_IMAGE_REGISTRY:
+        description: '<Optional> Destination registry. workflow_call uses string because choice is dispatch-only.'
+        required: false
+        default: opensearchstaging
+        type: string
+      DESTINATION_IMAGE:
+        description: '<Required> Destination image and tag.'
+        required: true
+        type: string
+    secrets:
+      DOCKERHUB_READONLY_USERNAME:
+        required: true
+      DOCKERHUB_READONLY_PASSWORD:
+        required: true
+      DOCKERHUB_PRODUCTION_USERNAME:
+        required: true
+      DOCKERHUB_PRODUCTION_PASSWORD:
+        required: true
+      AWS_ACCOUNT_ARTIFACT:
+        required: true
+      ARTIFACT_PROMOTION_ROLE_NAME:
+        required: true
+      ECR_STAGING_ROLE_ARN:
+        required: true
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  parameters-check:
+    name: parameters-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Validate parameters and write summary
+        env:
+          ALL_TAGS: ${{ inputs.ALL_TAGS }}
+          SOURCE_IMAGE_REGISTRY: ${{ inputs.SOURCE_IMAGE_REGISTRY }}
+          SOURCE_IMAGE: ${{ inputs.SOURCE_IMAGE }}
+          DESTINATION_IMAGE_REGISTRY: ${{ inputs.DESTINATION_IMAGE_REGISTRY }}
+          DESTINATION_IMAGE: ${{ inputs.DESTINATION_IMAGE }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Docker copy"
+            echo "- ALL_TAGS: ${ALL_TAGS}"
+            echo "- Copying: ${SOURCE_IMAGE_REGISTRY}/${SOURCE_IMAGE}"
+            echo "- To: ${DESTINATION_IMAGE_REGISTRY}/${DESTINATION_IMAGE}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [[ -z "${SOURCE_IMAGE}" || -z "${DESTINATION_IMAGE}" ]]; then
+            echo "::error::Make sure all the parameters are passed in."
+            exit 1
+          fi
+
+  copy:
+    name: copy-image
+    needs: parameters-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    container:
+      image: public.ecr.aws/opensearchstaging/ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1
+      options: -u root -v /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - name: Checkout workflow actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Copy image
+        uses: ./.github/actions/copy-container
+        with:
+          all-tags: ${{ inputs.ALL_TAGS }}
+          source-image: ${{ inputs.SOURCE_IMAGE }}
+          source-registry: ${{ inputs.SOURCE_IMAGE_REGISTRY }}
+          destination-image: ${{ inputs.DESTINATION_IMAGE }}
+          destination-registry: ${{ inputs.DESTINATION_IMAGE_REGISTRY }}
+          dockerhub-readonly-username: ${{ secrets.DOCKERHUB_READONLY_USERNAME }}
+          dockerhub-readonly-password: ${{ secrets.DOCKERHUB_READONLY_PASSWORD }}
+          dockerhub-production-username: ${{ secrets.DOCKERHUB_PRODUCTION_USERNAME }}
+          dockerhub-production-password: ${{ secrets.DOCKERHUB_PRODUCTION_PASSWORD }}
+          artifact-promotion-role-name: ${{ secrets.ARTIFACT_PROMOTION_ROLE_NAME }}
+          aws-account-artifact: ${{ secrets.AWS_ACCOUNT_ARTIFACT }}
+          ecr-staging-role-arn: ${{ secrets.ECR_STAGING_ROLE_ARN }}
+
+      - name: Logout and prune Docker images
+        if: always()
+        run: |
+          docker logout "${{ inputs.SOURCE_IMAGE_REGISTRY }}" || true
+          docker logout "${{ inputs.DESTINATION_IMAGE_REGISTRY }}" || true
+          docker logout public.ecr.aws || true
+          docker image prune -f --all || true

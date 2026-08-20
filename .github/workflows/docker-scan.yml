@@ -1,0 +1,74 @@
+---
+# GitHub Actions port of jenkins/docker/docker-scan-lf.jenkinsfile.
+# The environment and parameter are at lines 23-34, the scan stages are at lines 36-66,
+# and artifact/cleanup post behavior is at lines 69-75.
+name: Docker Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      IMAGE_FULL_NAME:
+        description: '<Required> Full image name, for example opensearchstaging/opensearch:2.0.0.'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      IMAGE_FULL_NAME:
+        description: '<Required> Full image name.'
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db
+  TRIVY_JAVA_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-java-db
+  TRIVY_DISABLE_VEX_NOTICE: 'true'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  scan:
+    name: scan-docker-image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    container:
+      image: public.ecr.aws/opensearchstaging/ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1
+      options: -u root -v /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - name: Checkout workflow actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Verify parameters and write summary
+        env:
+          IMAGE_FULL_NAME: ${{ inputs.IMAGE_FULL_NAME }}
+        run: |
+          set -euo pipefail
+          echo "### Docker scan" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- Scanning: ${IMAGE_FULL_NAME}" >> "${GITHUB_STEP_SUMMARY}"
+          if [[ -z "${IMAGE_FULL_NAME}" ]]; then
+            echo "::error::Make sure all the parameters are passed in."
+            exit 1
+          fi
+
+      - name: Scan image
+        uses: ./.github/actions/scan-docker-image
+        with:
+          image-full-name: ${{ inputs.IMAGE_FULL_NAME }}
+          image-result-file: scan_docker_image
+
+      - name: Archive scan results
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: scan-docker-image
+          path: scan_docker_image.*
+          if-no-files-found: warn
+
+      - name: Clean Trivy cache
+        if: always()
+        run: trivy clean --all || true

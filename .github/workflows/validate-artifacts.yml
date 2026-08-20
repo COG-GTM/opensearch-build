@@ -1,0 +1,290 @@
+---
+# GitHub Actions port of jenkins/validate-artifacts/validate-artifacts-lf.jenkinsfile.
+# Jenkins parameters are lines 50-126, parameter normalization is lines 128-178, and the parallel
+# distribution stages/retry(2) are lines 186-295. Actions dispatch is limited to ten inputs, so the
+# remaining Jenkins values are packed into OPTIONS; see the OPTIONS description below.
+name: Validate Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      OPENSEARCH_ARTIFACT_URL:
+        description: '<Conditionally-Required> OpenSearch artifact URL.'
+        required: false
+        default: ''
+        type: string
+      OPENSEARCH_DASHBOARDS_ARTIFACT_URL:
+        description: '<Conditionally-Required> OpenSearch Dashboards artifact URL.'
+        required: false
+        default: ''
+        type: string
+      VERSION:
+        description: '<Conditionally-Required> Version when artifact URLs are not provided.'
+        required: false
+        default: ''
+        type: string
+      DISTRIBUTION:
+        description: '<Optional> Space-separated distributions. Defaults to tar rpm yum deb zip docker.'
+        required: false
+        default: tar rpm yum deb zip docker
+        type: string
+      ARCHITECTURE:
+        description: '<Optional> Space-separated architectures. Defaults to x64 arm64.'
+        required: false
+        default: x64 arm64
+        type: string
+      PROJECTS:
+        description: '<Optional> Project to validate.'
+        required: false
+        default: opensearch
+        type: choice
+        options:
+          - opensearch
+          - Both
+      ARTIFACT_TYPE:
+        description: '<Optional> Artifact type.'
+        required: false
+        default: production
+        type: choice
+        options:
+          - production
+          - staging
+      DOCKER_SOURCE:
+        description: '<Optional> Docker source.'
+        required: false
+        default: dockerhub
+        type: choice
+        options:
+          - dockerhub
+          - ecr
+          - Both
+      OPTIONS:
+        description: >-
+          '<Optional> Space-separated packed values because workflow_dispatch allows at most ten inputs:
+          os-build-number=<n> osd-build-number=<n> optional-args=<using-staging-artifact-only|validate-digest-only>
+          skip-core-plugins=<csv, default arrow-base,arrow-flight-rpc> allow-http platform=<linux windows>.'
+        required: false
+        default: 'skip-core-plugins=arrow-base,arrow-flight-rpc platform=linux,windows'
+        type: string
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify-parameters:
+    name: verify-parameters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {}
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      version: ${{ steps.normalized.outputs.version }}
+      file-path: ${{ steps.normalized.outputs.file-path }}
+      distribution: ${{ steps.normalized.outputs.distribution }}
+      architecture: ${{ steps.normalized.outputs.architecture }}
+      platform: ${{ steps.normalized.outputs.platform }}
+      projects: ${{ steps.normalized.outputs.projects }}
+      docker-source: ${{ steps.normalized.outputs.docker-source }}
+      artifact-type: ${{ steps.normalized.outputs.artifact-type }}
+      os-build-number: ${{ steps.options.outputs.os-build-number }}
+      osd-build-number: ${{ steps.options.outputs.osd-build-number }}
+      optional-args: ${{ steps.options.outputs.optional-args }}
+      skip-core-plugins: ${{ steps.options.outputs.skip-core-plugins }}
+      allow-http: ${{ steps.options.outputs.allow-http }}
+    steps:
+      - name: Unpack OPTIONS
+        id: options
+        env:
+          OPTIONS: ${{ inputs.OPTIONS }}
+        run: |
+          set -euo pipefail
+          os_build_number=''
+          osd_build_number=''
+          optional_args=''
+          skip_core_plugins='arrow-base,arrow-flight-rpc'
+          allow_http='false'
+          platform='linux windows'
+          for option in ${OPTIONS}; do
+            case "${option}" in
+              os-build-number=*) os_build_number="${option#*=}" ;;
+              osd-build-number=*) osd_build_number="${option#*=}" ;;
+              optional-args=*) optional_args="${option#*=}" ;;
+              skip-core-plugins=*) skip_core_plugins="${option#*=}" ;;
+              allow-http|allow-http=true) allow_http='true' ;;
+              platform=*) platform="${option#*=}"; platform="${platform//,/ }" ;;
+              '') ;;
+              *) echo "::error::Unsupported OPTIONS value: ${option}"; exit 1 ;;
+            esac
+          done
+          {
+            printf 'os-build-number=%s\n' "${os_build_number}"
+            printf 'osd-build-number=%s\n' "${osd_build_number}"
+            printf 'optional-args=%s\n' "${optional_args}"
+            printf 'skip-core-plugins=%s\n' "${skip_core_plugins}"
+            printf 'allow-http=%s\n' "${allow_http}"
+            printf 'platform=%s\n' "${platform}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Verify parameters
+        id: normalized
+        env:
+          OPENSEARCH_ARTIFACT_URL: ${{ inputs.OPENSEARCH_ARTIFACT_URL }}
+          OPENSEARCH_DASHBOARDS_ARTIFACT_URL: ${{ inputs.OPENSEARCH_DASHBOARDS_ARTIFACT_URL }}
+          VERSION: ${{ inputs.VERSION }}
+          DISTRIBUTION: ${{ inputs.DISTRIBUTION }}
+          ARCHITECTURE: ${{ inputs.ARCHITECTURE }}
+          PROJECTS: ${{ inputs.PROJECTS }}
+          DOCKER_SOURCE: ${{ inputs.DOCKER_SOURCE }}
+          ARTIFACT_TYPE: ${{ inputs.ARTIFACT_TYPE }}
+          PLATFORM: ${{ steps.options.outputs.platform }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${OPENSEARCH_DASHBOARDS_ARTIFACT_URL}" && -z "${OPENSEARCH_ARTIFACT_URL}" ]]; then
+            echo "::error::Provide OPENSEARCH_ARTIFACT_URL to validate"
+            exit 1
+          fi
+          if [[ -z "${VERSION}" && -z "${OPENSEARCH_ARTIFACT_URL}" ]]; then
+            echo "::error::Both VERSION and OPENSEARCH_ARTIFACT_URL cannot be empty. Please provide either value"
+            exit 1
+          fi
+          projects="${PROJECTS}"
+          [[ "${projects}" == Both ]] && projects='opensearch opensearch-dashboards'
+          docker_source="${DOCKER_SOURCE}"
+          [[ "${docker_source}" == Both ]] && docker_source='dockerhub ecr'
+          distribution="${DISTRIBUTION}"
+          architecture="${ARCHITECTURE}"
+          file_path=''
+          if [[ -n "${OPENSEARCH_ARTIFACT_URL}" ]]; then
+            if [[ "${OPENSEARCH_ARTIFACT_URL} ${OPENSEARCH_DASHBOARDS_ARTIFACT_URL}" == *x64* ]]; then
+              architecture='x64'
+            else
+              architecture='arm64'
+            fi
+            distribution=''
+            for keyword in 'tar.gz:tar' 'zip:zip' 'rpm:rpm' 'repo:yum' 'deb:deb'; do
+              if [[ "${OPENSEARCH_ARTIFACT_URL} ${OPENSEARCH_DASHBOARDS_ARTIFACT_URL}" == *"${keyword%%:*}"* ]]; then
+                distribution="${keyword##*:}"
+                break
+              fi
+            done
+            if [[ -z "${distribution}" ]]; then
+              echo "::error::The provided distribution type is not supported"
+              exit 1
+            fi
+            file_path="opensearch=${OPENSEARCH_ARTIFACT_URL}"
+            if [[ -n "${OPENSEARCH_DASHBOARDS_ARTIFACT_URL}" ]]; then
+              file_path+=" opensearch-dashboards=${OPENSEARCH_DASHBOARDS_ARTIFACT_URL}"
+            fi
+          fi
+          {
+            printf 'version=%s\n' "${VERSION}"
+            printf 'file-path=%s\n' "${file_path}"
+            printf 'distribution=%s\n' "${distribution}"
+            printf 'architecture=%s\n' "${architecture}"
+            printf 'platform=%s\n' "${PLATFORM}"
+            printf 'projects=%s\n' "${projects}"
+            printf 'docker-source=%s\n' "${docker_source}"
+            printf 'artifact-type=%s\n' "${ARTIFACT_TYPE}"
+          } >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Artifact validation"
+            echo "- Projects: ${projects}"
+            echo "- Distribution: ${distribution}"
+            echo "- Architecture: ${architecture}"
+            echo "- Platform: ${PLATFORM}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Generate validation matrix
+        id: matrix
+        env:
+          DISTRIBUTION: ${{ steps.normalized.outputs.distribution }}
+          ARCHITECTURE: ${{ steps.normalized.outputs.architecture }}
+          PLATFORM: ${{ steps.options.outputs.platform }}
+        run: |
+          set -euo pipefail
+          export DISTRIBUTION ARCHITECTURE PLATFORM
+          python3 > "${RUNNER_TEMP}/matrix.json" <<'PY'
+          import json
+          import os
+
+          images = {
+              "tar": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-dashboards-integtest-v1",
+              "rpm": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-almalinux8-systemd-base-integtest-v1",
+              "yum": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-almalinux8-systemd-base-integtest-v1",
+              "zip": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-windows2019-opensearch-build-v1",
+              "deb": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-ubuntu2404-systemd-base-integtest-v1",
+          }
+          options = {
+              "tar": "-u 1000",
+              "rpm": "--entrypoint=/usr/lib/systemd/systemd -u root --privileged -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host",
+              "yum": "--entrypoint=/usr/lib/systemd/systemd -u root --privileged -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host",
+              "zip": "-u ContainerAdministrator",
+              "deb": "--entrypoint=/usr/lib/systemd/systemd -u root --privileged -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host",
+          }
+          platforms = os.environ["PLATFORM"].split()
+          matrix = []
+          for distribution in os.environ["DISTRIBUTION"].split():
+              for architecture in os.environ["ARCHITECTURE"].split():
+                  if distribution == "zip" and architecture == "arm64":
+                      continue
+                  platform = "windows" if distribution == "zip" else "linux"
+                  if platform not in platforms:
+                      continue
+                  runner = "windows-2022" if platform == "windows" else (
+                      "ubuntu-24.04-arm" if architecture == "arm64" else "ubuntu-24.04"
+                  )
+                  container = "" if distribution in ("docker", "zip") else images[distribution]
+                  matrix.append({
+                      "distribution": distribution,
+                      "architecture": architecture,
+                      "platform": platform,
+                      "runner": runner,
+                      "container": container,
+                      "container_options": options.get(distribution, ""),
+                  })
+          if not matrix:
+              raise SystemExit("validation matrix is empty")
+          print(json.dumps(matrix, separators=(",", ":")))
+          PY
+          printf 'matrix=%s\n' "$(cat "${RUNNER_TEMP}/matrix.json")" >> "${GITHUB_OUTPUT}"
+
+  validate:
+    name: validate-${{ matrix.distribution }}-${{ matrix.architecture }}
+    needs: verify-parameters
+    if: ${{ needs.verify-parameters.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.verify-parameters.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    # docker and zip intentionally have no job container. Jenkins used a Windows ci-runner container for zip,
+    # but GitHub Actions cannot run Windows job containers with that Docker setup.
+    # Jenkins' systemd-entrypoint containers are retained for other distributions; hosted-runner support is a smell
+    # documented in docs/jenkins-to-actions.md.
+    container: ${{ matrix.container != '' && fromJSON(format('{{"image":"{0}","options":"{1}"}}', matrix.container, matrix.container_options)) || null }}
+    steps:
+      - name: Checkout validation workspace
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Validate artifacts
+        uses: ./.github/actions/validate-artifacts
+        with:
+          version: ${{ needs.verify-parameters.outputs.version }}
+          file-path: ${{ needs.verify-parameters.outputs.file-path }}
+          distribution: ${{ matrix.distribution }}
+          platform: ${{ matrix.platform }}
+          arch: ${{ matrix.architecture }}
+          projects: ${{ needs.verify-parameters.outputs.projects }}
+          docker-source: ${{ needs.verify-parameters.outputs.docker-source }}
+          os-build-number: ${{ needs.verify-parameters.outputs.os-build-number }}
+          osd-build-number: ${{ needs.verify-parameters.outputs.osd-build-number }}
+          artifact-type: ${{ needs.verify-parameters.outputs.artifact-type }}
+          allow-http: ${{ needs.verify-parameters.outputs.allow-http }}
+          docker-args: ${{ needs.verify-parameters.outputs.optional-args }}
+          skip-core-plugins: ${{ needs.verify-parameters.outputs.skip-core-plugins }}
