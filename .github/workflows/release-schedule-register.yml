@@ -58,7 +58,8 @@ jobs:
             echo
             echo "| Version | RC date | Release date | Release manager | Release issue |"
             echo "| --- | --- | --- | --- | --- |"
-            jq -r '.[] | "| \(.version) | \(.rc_date) | \(.release_date) | \(.release_manager) | \(.release_issue) |"' release-schedule.json
+            jq -r 'def cell: tostring | gsub("\\|"; "\\|");
+                 .[] | "| \(.version | cell) | \(.rc_date | cell) | \(.release_date | cell) | \(.release_manager | cell) | \(.release_issue | cell) |"' release-schedule.json
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
