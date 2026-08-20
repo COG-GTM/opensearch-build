@@ -129,8 +129,10 @@ source.
 
 | Name | Used by | Jenkins 1Password reference |
 | --- | --- | --- |
-| `AWS_ACCOUNT_PUBLIC` | S3 staging downloads | `op://opensearch-release-secrets/aws-accounts/jenkins-aws-account-public` |
-| `ARTIFACT_BUCKET_NAME` | S3 staging bucket | `op://opensearch-release-secrets/aws-resource-arns/jenkins-artifact-bucket-name` |
+| `AWS_ACCOUNT_PUBLIC` | Artifact/repository promotion S3 staging downloads | `op://opensearch-release-secrets/aws-accounts/jenkins-aws-account-public` |
+| `AWS_ACCOUNT_PUBLIC_LF` | Maven promotion S3 staging downloads | `op://opensearch-release-secrets/aws-accounts/jenkins-aws-account-public-lf` (`publish-to-maven-lf.jenkinsfile:60`) |
+| `ARTIFACT_BUCKET_NAME` | Artifact/repository promotion S3 staging bucket | `op://opensearch-release-secrets/aws-resource-arns/jenkins-artifact-bucket-name` |
+| `ARTIFACT_BUCKET_NAME_LF` | Maven promotion S3 staging bucket | `op://opensearch-release-secrets/aws-resource-arns/jenkins-artifact-bucket-name-lf` (`publish-to-maven-lf.jenkinsfile:18-20`) |
 | `ARTIFACT_PROMOTION_ROLE_NAME` | Production S3/ECR role | `op://opensearch-release-secrets/aws-iam-roles/jenkins-artifact-promotion-role` |
 | `AWS_ACCOUNT_ARTIFACT` | Production S3/ECR account | `op://opensearch-release-secrets/aws-accounts/jenkins-aws-production-account` |
 | `ARTIFACT_PRODUCTION_BUCKET_NAME` | Public production bucket | `op://opensearch-release-secrets/aws-resource-arns/jenkins-artifact-production-bucket-name` |

@@ -46,8 +46,8 @@ jobs:
       ARTIFACT_PATH: distribution-build-opensearch/${{ inputs.VERSION }}/${{ inputs.BUILD_ID }}/linux/x64/tar/builds
       REPO_URL: https://aws.oss.sonatype.org/
       STAGING_PROFILE_ID: ${{ secrets.SONATYPE_STAGING_PROFILE_ID }}
-      AWS_ACCOUNT_PUBLIC: ${{ secrets.AWS_ACCOUNT_PUBLIC }}
-      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+      AWS_ACCOUNT_PUBLIC: ${{ secrets.AWS_ACCOUNT_PUBLIC_LF }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME_LF }}
       SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
       SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
       SIGNER_CLIENT_ROLE: ${{ secrets.SIGNER_CLIENT_ROLE }}
