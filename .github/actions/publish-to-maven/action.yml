@@ -9,28 +9,40 @@ description: 'Sign, stage, and automatically publish Maven artifacts.'
 
 inputs:
   signing-artifacts-path:
+    description: 'Path containing the Maven manifest to sign'
     required: true
   maven-artifacts-path:
+    description: 'Path containing Maven artifacts to stage and publish'
     required: true
   email:
+    description: 'Email address used for Maven signing'
     required: true
   sonatype-username:
+    description: 'Sonatype username for Maven publication'
     required: true
   sonatype-password:
+    description: 'Sonatype password for Maven publication'
     required: true
   staging-profile-id:
+    description: 'Sonatype staging profile identifier'
     required: true
   signer-client-role:
+    description: 'Signer client AWS IAM role'
     required: true
   signer-client-external-id:
+    description: 'Signer client external ID'
     required: true
   signer-client-unsigned-bucket:
+    description: 'S3 bucket used for unsigned signer-client artifacts'
     required: true
   signer-client-signed-bucket:
+    description: 'S3 bucket used for signed signer-client artifacts'
     required: true
   github-user:
+    description: 'GitHub bot username passed to the signer client'
     required: true
   github-token:
+    description: 'GitHub bot token passed to the signer client'
     required: true
 
 runs:

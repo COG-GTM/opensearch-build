@@ -8,44 +8,64 @@ description: 'Download, sign, checksum, and publish a distribution artifact.'
 
 inputs:
   distribution-job-name:
+    description: 'Jenkins distribution job that produced the artifact'
     required: true
   distribution-build-number:
+    description: 'Build number of the distribution job to promote'
     required: true
   input-manifest:
+    description: 'Input manifest path associated with the distribution build'
     required: true
   distribution-platform:
+    description: 'Distribution platform, such as linux or windows'
     required: true
   distribution-name:
+    description: 'Distribution type to promote, such as tar, rpm, deb, or zip'
     required: true
   distribution-architecture:
+    description: 'Distribution architecture, such as arm64 or x64'
     required: true
   filename:
+    description: 'Distribution filename stem used in artifact paths'
     required: true
   revision:
+    description: 'Release revision used in artifact paths and names'
     required: true
   signing-email:
+    description: 'Email address used for artifact signing'
     required: true
   aws-account-public:
+    description: 'AWS account containing the artifact download role'
     required: true
   artifact-bucket-name:
+    description: 'S3 bucket containing staged distribution artifacts'
     required: true
   artifact-promotion-role-name:
+    description: 'AWS IAM role used to publish promoted artifacts'
     required: true
   aws-account-artifact:
+    description: 'AWS account containing the artifact promotion role'
     required: true
   artifact-production-bucket-name:
+    description: 'S3 bucket receiving production artifacts'
     required: true
   signer-client-role:
+    description: 'Signer client AWS IAM role'
     required: true
   signer-client-external-id:
+    description: 'Signer client external ID'
     required: true
   signer-client-unsigned-bucket:
+    description: 'S3 bucket used for unsigned signer-client artifacts'
     required: true
   signer-client-signed-bucket:
+    description: 'S3 bucket used for signed signer-client artifacts'
     required: true
   github-user:
+    description: 'GitHub bot username passed to the signer client'
     required: true
   github-token:
+    description: 'GitHub bot token passed to the signer client'
     required: true
 
 runs:

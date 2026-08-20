@@ -8,54 +8,79 @@ description: 'Update and publish a yum or apt distribution repository.'
 
 inputs:
   distribution-job-name:
+    description: 'Jenkins distribution job that produced the artifacts'
     required: true
   distribution-repo-type:
+    description: 'Repository type to publish, yum or apt'
     required: true
   distribution-build-number:
+    description: 'Build number of the distribution job to promote'
     required: true
   input-manifest:
+    description: 'Input manifest path associated with the distribution build'
     required: true
   filename:
+    description: 'Distribution filename stem used in repository paths'
     required: true
   revision:
+    description: 'Release revision used to locate distribution artifacts'
     required: true
   repo-version:
+    description: 'Repository version used in the production repository path'
     required: true
   signing-email:
+    description: 'Email address used for repository metadata signing'
     required: true
   artifact-production-bucket-name:
+    description: 'S3 bucket containing the production repository'
     required: true
   artifact-promotion-role-name:
+    description: 'AWS IAM role used to publish the repository'
     required: true
   aws-account-artifact:
+    description: 'AWS account containing the artifact promotion role'
     required: true
   rpm-signing-account:
+    description: 'AWS account containing the RPM signing role'
     required: true
   rpm-release-signing-passphrase-secrets-arn:
+    description: 'Secrets Manager ARN for the RPM release-key passphrase'
     required: true
   rpm-release-signing-secret-key-id-secrets-arn:
+    description: 'Secrets Manager ARN for the RPM release signing key'
     required: true
   rpm-release-signing-key-id:
+    description: 'RPM release signing key identifier'
     required: true
   rpm-signing-passphrase-secrets-arn:
+    description: 'Secrets Manager ARN for the legacy RPM key passphrase'
     required: true
   rpm-signing-secret-key-id-secrets-arn:
+    description: 'Secrets Manager ARN for the legacy RPM signing key'
     required: true
   rpm-signing-key-id:
+    description: 'Legacy RPM signing key identifier'
     required: true
   public-artifact-url:
+    description: 'Base URL used to download public distribution artifacts'
     required: true
   signer-client-role:
+    description: 'Signer client AWS IAM role'
     required: true
   signer-client-external-id:
+    description: 'Signer client external ID'
     required: true
   signer-client-unsigned-bucket:
+    description: 'S3 bucket used for unsigned signer-client artifacts'
     required: true
   signer-client-signed-bucket:
+    description: 'S3 bucket used for signed signer-client artifacts'
     required: true
   github-user:
+    description: 'GitHub bot username passed to the signer client'
     required: true
   github-token:
+    description: 'GitHub bot token passed to the signer client'
     required: true
 
 runs:

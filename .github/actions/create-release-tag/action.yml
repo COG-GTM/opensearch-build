@@ -9,10 +9,13 @@ description: 'Create and push release tags for every component in a bundle manif
 
 inputs:
   dist-manifest:
+    description: 'Bundle manifest containing component repositories and commits'
     required: true
   tag-version:
+    description: 'Release version used to compute component tag versions'
     required: true
   github-bot-token:
+    description: 'GitHub bot token used to clone and push component tags'
     required: true
 
 runs:

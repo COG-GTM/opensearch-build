@@ -10,31 +10,44 @@ description: 'Promote one staging image to Docker Hub and/or ECR tags.'
 
 inputs:
   image-repository:
+    description: 'Source image repository and tag to promote'
     required: true
   release-version:
+    description: 'Official release version for production tags'
     required: true
   docker-hub-promote:
+    description: 'Whether to promote the image to Docker Hub'
     required: true
   ecr-promote:
+    description: 'Whether to promote the image to public ECR'
     required: true
   tag-latest:
+    description: 'Whether to create the latest tag'
     required: true
   tag-major-version:
+    description: 'Whether to create the major-version tag'
     required: true
   data-prepper-staging-container-repository:
+    description: 'Data Prepper staging registry used for data-prepper images'
     required: false
     default: ''
   readonly-dockerhub-username:
+    description: 'Read-only Docker Hub username for staging pulls'
     required: true
   readonly-dockerhub-password:
+    description: 'Read-only Docker Hub password for staging pulls'
     required: true
   production-dockerhub-username:
+    description: 'Production Docker Hub username'
     required: true
   production-dockerhub-password:
+    description: 'Production Docker Hub password'
     required: true
   artifact-promotion-role-name:
+    description: 'AWS IAM role used for ECR promotion'
     required: true
   aws-account-artifact:
+    description: 'AWS account containing the artifact promotion role'
     required: true
 
 runs:

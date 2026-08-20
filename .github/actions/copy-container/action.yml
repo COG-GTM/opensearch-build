@@ -10,33 +10,47 @@ description: 'Copy one or more container tags between staging and production reg
 
 inputs:
   source-registry:
+    description: 'Source container registry namespace'
     required: true
   source-image:
+    description: 'Source image repository and tag'
     required: true
   destination-registry:
+    description: 'Destination container registry namespace'
     required: true
   destination-image:
+    description: 'Destination image repository and tag'
     required: true
   release-version:
+    description: 'Release tag to copy'
     required: true
   tag-major-version:
+    description: 'Whether to copy the major-version tag'
     required: true
   tag-latest:
+    description: 'Whether to copy the latest tag'
     required: true
   all-tags:
+    description: 'Whether to copy every tag for the image'
     required: false
     default: 'false'
   readonly-dockerhub-username:
+    description: 'Read-only Docker Hub username for staging pulls'
     required: true
   readonly-dockerhub-password:
+    description: 'Read-only Docker Hub password for staging pulls'
     required: true
   production-dockerhub-username:
+    description: 'Production Docker Hub username'
     required: true
   production-dockerhub-password:
+    description: 'Production Docker Hub password'
     required: true
   artifact-promotion-role-name:
+    description: 'AWS IAM role used for artifact promotion'
     required: true
   aws-account-artifact:
+    description: 'AWS account containing the artifact promotion role'
     required: true
 
 runs:
