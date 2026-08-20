@@ -89,7 +89,10 @@ jobs:
           REPOSITORY: ${{ inputs.DOCKER_BUILD_GIT_REPOSITORY }}
         run: |
           set -euo pipefail
-          printf 'repository=%s\n' "${REPOSITORY#https://github.com/}" >> "${GITHUB_OUTPUT}"
+          repository="${REPOSITORY#https://github.com/}"
+          repository="${repository%/}"
+          repository="${repository%.git}"
+          printf 'repository=%s\n' "${repository}" >> "${GITHUB_OUTPUT}"
 
   docker-build:
     name: docker-build-${{ inputs.DOCKER_BUILD_OS }}

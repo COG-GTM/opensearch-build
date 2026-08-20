@@ -120,7 +120,8 @@ jobs:
                 skip_core_plugins="${option#*=}"
                 [[ -z "${skip_core_plugins}" ]] && skip_core_plugins='__skip_all__'
                 ;;
-              allow-http|allow-http=true) allow_http='true' ;;
+              allow-http|allow-http=true|allow-http=1) allow_http='true' ;;
+              allow-http=false|allow-http=0) allow_http='false' ;;
               platform=*) platform="${option#*=}"; platform="${platform//,/ }" ;;
               '') ;;
               *) echo "::error::Unsupported OPTIONS value: ${option}"; exit 1 ;;
@@ -224,13 +225,12 @@ jobs:
               "zip": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-windows2019-opensearch-build-v1",
               "deb": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-ubuntu2404-systemd-base-integtest-v1",
           }
+          # Job containers cannot override --entrypoint, so rpm/yum/deb run systemd via
+          # `docker run` in a dedicated step instead of a job container.
           options = {
               "tar": "-u 1000",
-              "rpm": "--entrypoint=/usr/lib/systemd/systemd -u root --privileged -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host",
-              "yum": "--entrypoint=/usr/lib/systemd/systemd -u root --privileged -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host",
-              "zip": "-u ContainerAdministrator",
-              "deb": "--entrypoint=/usr/lib/systemd/systemd -u root --privileged -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host",
           }
+          systemd_distributions = ("rpm", "yum", "deb")
           platforms = os.environ["PLATFORM"].split()
           matrix = []
           for distribution in os.environ["DISTRIBUTION"].split():
@@ -243,7 +243,7 @@ jobs:
                   runner = "windows-2022" if platform == "windows" else (
                       "ubuntu-24.04-arm" if architecture == "arm64" else "ubuntu-24.04"
                   )
-                  container = "" if distribution in ("docker", "zip") else images[distribution]
+                  container = "" if distribution in ("docker", "zip") or distribution in systemd_distributions else images[distribution]
                   matrix.append({
                       "distribution": distribution,
                       "architecture": architecture,
@@ -251,6 +251,7 @@ jobs:
                       "runner": runner,
                       "container": container,
                       "container_options": options.get(distribution, ""),
+                      "systemd_image": images[distribution] if distribution in systemd_distributions else "",
                   })
           if not matrix:
               raise SystemExit("validation matrix is empty")
@@ -272,8 +273,9 @@ jobs:
       contents: read
     # docker and zip intentionally have no job container. Jenkins used a Windows ci-runner container for zip,
     # but GitHub Actions cannot run Windows job containers with that Docker setup.
-    # Jenkins' systemd-entrypoint containers are retained for other distributions; hosted-runner support is a smell
-    # documented in docs/jenkins-to-actions.md.
+    # rpm/yum/deb also have no job container: job containers cannot override the entrypoint, so those
+    # legs start a systemd container with `docker run` below (the port of Jenkins docker.image().inside
+    # with the systemd/privileged args) and run validation inside it via docker exec.
     container: ${{ matrix.container != '' && fromJSON(format('{{"image":"{0}","options":"{1}"}}', matrix.container, matrix.container_options)) || null }}
     steps:
       - name: Checkout validation workspace
@@ -283,14 +285,29 @@ jobs:
       # run.sh's python3/pip/pipenv prerequisites must be installed (setup-python also provides
       # a python3 shim on windows-2022 for the bash invocation).
       - name: Set up Python for container-less runners
-        if: ${{ matrix.container == '' }}
+        if: ${{ matrix.container == '' && matrix.systemd_image == '' }}
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
           python-version: '3.9'
 
       - name: Install pipenv for container-less runners
-        if: ${{ matrix.container == '' }}
+        if: ${{ matrix.container == '' && matrix.systemd_image == '' }}
         run: python -m pip install pipenv
+
+      # Port of Jenkins docker.image().inside('--entrypoint=/usr/lib/systemd/systemd -u root --privileged
+      # -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host') for rpm/yum/deb: systemd must be PID 1 for
+      # systemctl-based validation, which a GitHub Actions job container cannot provide.
+      - name: Start systemd validation container
+        if: ${{ matrix.systemd_image != '' }}
+        env:
+          SYSTEMD_IMAGE: ${{ matrix.systemd_image }}
+        run: |
+          set -euo pipefail
+          docker pull "${SYSTEMD_IMAGE}"
+          docker run -d --name validate --privileged -u root \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host \
+            -v "${GITHUB_WORKSPACE}:/work" -w /work \
+            "${SYSTEMD_IMAGE}" /usr/lib/systemd/systemd
 
       - name: Validate artifacts
         uses: ./.github/actions/validate-artifacts
@@ -309,3 +326,4 @@ jobs:
           allow-http: ${{ matrix.distribution != 'docker' && needs.verify-parameters.outputs.allow-http || '' }}
           docker-args: ${{ matrix.distribution == 'docker' && needs.verify-parameters.outputs.optional-args || '' }}
           skip-core-plugins: ${{ (matrix.distribution == 'docker' || needs.verify-parameters.outputs.version != '') && needs.verify-parameters.outputs.skip-core-plugins || '' }}
+          docker-exec-container: ${{ matrix.systemd_image != '' && 'validate' || '' }}

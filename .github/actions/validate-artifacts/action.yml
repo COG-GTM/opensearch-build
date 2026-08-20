@@ -46,8 +46,15 @@ inputs:
     description: >-
       Comma-separated native plugins to skip. 'None' omits the flag, '__skip_all__' emits a bare
       --skip-core-plugins (Jenkins empty-string semantics), and empty means not applicable.
+      Callers must pass an explicit value; there is intentionally no non-empty default.
     required: false
-    default: arrow-base,arrow-flight-rpc
+    default: ''
+  docker-exec-container:
+    description: >-
+      Optional name of a running container; when set, validation.sh runs inside it with
+      `docker exec` (used for the systemd rpm/yum/deb legs).
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -67,9 +74,14 @@ runs:
         ALLOW_HTTP: ${{ inputs.allow-http }}
         DOCKER_ARGS: ${{ inputs.docker-args }}
         SKIP_CORE_PLUGINS: ${{ inputs.skip-core-plugins }}
+        DOCKER_EXEC_CONTAINER: ${{ inputs.docker-exec-container }}
       run: |
         set -uo pipefail
-        command=(./validation.sh)
+        command=()
+        if [[ -n "${DOCKER_EXEC_CONTAINER}" ]]; then
+          command+=(docker exec "${DOCKER_EXEC_CONTAINER}")
+        fi
+        command+=(./validation.sh)
         [[ -n "${VERSION}" ]] && command+=(--version "${VERSION}")
         # --file-path, --projects, --docker-source, and --skip-core-plugins are argparse
         # nargs='+'/'*' flags (src/validation_workflow/validation_args.py), so multi-value

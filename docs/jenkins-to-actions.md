@@ -100,8 +100,12 @@ roles and their OIDC trust policies for this repository before dispatching the w
 * `currentBuild.description` maps to `$GITHUB_STEP_SUMMARY` for copy, scan, and validation parameter checks.
 * `copyContainer.groovy:55-57` assumed ambient credentials for staging ECR. This port makes that assumption explicit by
   requiring an OIDC role ARN and configuring it inside the composite action.
-* RPM/YUM/DEB systemd-entrypoint containers retain Jenkins' privileged/cgroup options verbatim. Systemd containers
-  on GitHub-hosted runners are dubious and require runtime validation or a self-hosted runner decision.
+* RPM/YUM/DEB legs do not use job containers because Actions job containers cannot override the entrypoint
+  and never run systemd as PID 1. Instead a step starts the ci-runner image with
+  `docker run -d --privileged -u root -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host` and
+  `/usr/lib/systemd/systemd`, mounting the workspace at `/work`, and validation runs inside via `docker exec`
+  (the composite's `docker-exec-container` input). This mirrors Jenkins `docker.image().inside(...)` with the
+  same arguments; systemd-in-container behavior on hosted runners still deserves runtime validation.
 
 ### Validation
 
