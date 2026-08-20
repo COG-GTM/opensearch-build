@@ -55,10 +55,11 @@ jobs:
     permissions:
       contents: read
     container:
-      image: public.ecr.aws/opensearchstaging/ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1
+      image: public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1
       options: -u root -v /var/run/docker.sock:/var/run/docker.sock
     outputs:
       version: ${{ steps.patch.outputs.version }}
+      build-version: ${{ steps.patch.outputs.build-version }}
       build-number: ${{ steps.patch.outputs.build-number }}
       build-date: ${{ steps.patch.outputs.build-date }}
       filename: ${{ steps.patch.outputs.filename }}
@@ -118,9 +119,9 @@ jobs:
     uses: ./.github/workflows/docker-copy.yml
     with:
       SOURCE_IMAGE_REGISTRY: opensearchstaging
-      SOURCE_IMAGE: ${{ needs.prepare.outputs.filename }}:${{ needs.prepare.outputs.version }}${{ needs.prepare.outputs.build-qualifier }}
+      SOURCE_IMAGE: ${{ needs.prepare.outputs.filename }}:${{ needs.prepare.outputs.build-version }}${{ needs.prepare.outputs.build-qualifier }}
       DESTINATION_IMAGE_REGISTRY: opensearchstaging
-      DESTINATION_IMAGE: ${{ needs.prepare.outputs.filename }}:${{ needs.prepare.outputs.version }}${{ needs.prepare.outputs.build-qualifier }}.${{ needs.prepare.outputs.build-number }}.${{ needs.prepare.outputs.build-date }}
+      DESTINATION_IMAGE: ${{ needs.prepare.outputs.filename }}:${{ needs.prepare.outputs.build-version }}${{ needs.prepare.outputs.build-qualifier }}.${{ needs.prepare.outputs.build-number }}.${{ needs.prepare.outputs.build-date }}
       ALL_TAGS: false
     secrets: inherit
 
@@ -131,4 +132,4 @@ jobs:
       contents: read
     uses: ./.github/workflows/docker-scan.yml
     with:
-      IMAGE_FULL_NAME: opensearchstaging/${{ needs.prepare.outputs.filename }}:${{ needs.prepare.outputs.version }}${{ needs.prepare.outputs.build-qualifier }}
+      IMAGE_FULL_NAME: opensearchstaging/${{ needs.prepare.outputs.filename }}:${{ needs.prepare.outputs.build-version }}${{ needs.prepare.outputs.build-qualifier }}

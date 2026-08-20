@@ -37,7 +37,7 @@ jobs:
     permissions:
       contents: read
     container:
-      image: public.ecr.aws/opensearchstaging/ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1
+      image: public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1
       options: -u root -v /var/run/docker.sock:/var/run/docker.sock
     steps:
       - name: Checkout workflow actions

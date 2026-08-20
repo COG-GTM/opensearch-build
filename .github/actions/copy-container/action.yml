@@ -65,23 +65,23 @@ runs:
         printf '%s' "${PASSWORD}" | docker login --username "${USERNAME}" --password-stdin
 
     - name: Configure staging ECR credentials
-      if: inputs.source-registry == 'public.ecr.aws/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchstaging'
+      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchorg/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchorg/opensearchstaging' }}
       uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6
       with:
         role-to-assume: ${{ inputs.ecr-staging-role-arn }}
         aws-region: us-east-1
 
     - name: Login to staging ECR Public
-      if: inputs.source-registry == 'public.ecr.aws/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchstaging'
+      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchorg/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchorg/opensearchstaging' }}
       shell: bash
       env:
-        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+        ECR_REGISTRY: public.ecr.aws
       run: |
         set +x
-        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${DESTINATION_REGISTRY}"
+        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
     - name: Configure artifact promotion credentials
-      if: inputs.source-registry == 'public.ecr.aws/opensearchproject' || inputs.destination-registry == 'public.ecr.aws/opensearchproject'
+      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchorg/opensearchproject' || inputs.destination-registry == 'public.ecr.aws/opensearchorg/opensearchproject' }}
       uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6
       with:
         role-to-assume: arn:aws:iam::${{ inputs.aws-account-artifact }}:role/${{ inputs.artifact-promotion-role-name }}
@@ -90,13 +90,13 @@ runs:
         aws-region: us-east-1
 
     - name: Login to production ECR Public
-      if: inputs.source-registry == 'public.ecr.aws/opensearchproject' || inputs.destination-registry == 'public.ecr.aws/opensearchproject'
+      if: ${{ inputs.source-registry == 'public.ecr.aws/opensearchorg/opensearchproject' || inputs.destination-registry == 'public.ecr.aws/opensearchorg/opensearchproject' }}
       shell: bash
       env:
-        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+        ECR_REGISTRY: public.ecr.aws
       run: |
         set +x
-        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${DESTINATION_REGISTRY}"
+        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
     - name: Install crane
       shell: bash
@@ -108,7 +108,7 @@ runs:
         tool_dir="${RUNNER_TEMP}/crane"
         mkdir -p "${tool_dir}"
         version='0.20.6'
-        curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v${version}/go-containerregistry-${version}-linux-x86_64.tar.gz" \
+        curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v${version}/go-containerregistry_Linux_x86_64.tar.gz" \
           | tar -xz -C "${tool_dir}" crane
         echo "${tool_dir}" >> "${GITHUB_PATH}"
 

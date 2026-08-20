@@ -15,6 +15,9 @@ outputs:
   version:
     description: Image version label.
     value: ${{ steps.metadata.outputs.version }}
+  build-version:
+    description: Manifest build version.
+    value: ${{ steps.metadata.outputs.build-version }}
   build-number:
     description: Image build number label.
     value: ${{ steps.metadata.outputs.build-number }}
@@ -101,6 +104,7 @@ runs:
 
         {
           printf 'version=%s\n' "${version}"
+          printf 'build-version=%s\n' "${build_version}"
           printf 'build-number=%s\n' "${build_number}"
           printf 'build-date=%s\n' "${build_date}"
           printf 'filename=%s\n' "${filename}"

@@ -101,7 +101,7 @@ jobs:
     # Jenkins docker-build used a Windows container with a Docker Engine named-pipe mount
     # (docker-build-lf.jenkinsfile:18-21). GitHub Actions cannot run that Windows job container,
     # so the Windows branch runs directly on the hosted Windows runner.
-    container: ${{ inputs.DOCKER_BUILD_OS == 'linux' && fromJSON('{"image":"public.ecr.aws/opensearchstaging/ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1","options":"-u root -v /var/run/docker.sock:/var/run/docker.sock"}') || null }}
+    container: ${{ inputs.DOCKER_BUILD_OS == 'linux' && fromJSON('{"image":"public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1","options":"-u root -v /var/run/docker.sock:/var/run/docker.sock"}') || null }}
     steps:
       - name: Checkout requested repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6

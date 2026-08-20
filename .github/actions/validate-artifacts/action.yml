@@ -85,10 +85,11 @@ runs:
         fi
         for attempt in 1 2; do
           echo "validation attempt ${attempt}/2"
-          if "${command[@]}"; then
+          status=0
+          "${command[@]}" || status=$?
+          if [[ "${status}" == 0 ]]; then
             exit 0
           fi
-          status=$?
           if [[ "${attempt}" == 2 ]]; then
             exit "${status}"
           fi

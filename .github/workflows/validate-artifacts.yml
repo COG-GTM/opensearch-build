@@ -61,10 +61,11 @@ on:
       OPTIONS:
         description: >-
           '<Optional> Space-separated packed values because workflow_dispatch allows at most ten inputs:
-          os-build-number=<n> osd-build-number=<n> optional-args=<using-staging-artifact-only|validate-digest-only>
+          os-build-number=<n> osd-build-number=<n> optional-args=<using-staging-artifact-only|validate-digest-only,
+          default using-staging-artifact-only>
           skip-core-plugins=<csv, default arrow-base,arrow-flight-rpc> allow-http platform=<linux windows>.'
         required: false
-        default: 'skip-core-plugins=arrow-base,arrow-flight-rpc platform=linux,windows'
+        default: 'optional-args=using-staging-artifact-only skip-core-plugins=arrow-base,arrow-flight-rpc platform=linux,windows'
         type: string
 
 permissions: {}
@@ -103,7 +104,7 @@ jobs:
           set -euo pipefail
           os_build_number=''
           osd_build_number=''
-          optional_args=''
+          optional_args='using-staging-artifact-only'
           skip_core_plugins='arrow-base,arrow-flight-rpc'
           allow_http='false'
           platform='linux windows'
