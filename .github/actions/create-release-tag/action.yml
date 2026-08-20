@@ -30,7 +30,8 @@ runs:
           echo '::error::GITHUB_BOT_TOKEN must be configured; the default GITHUB_TOKEN cannot push to component repositories.'
           exit 1
         fi
-        python3 -m pip install --quiet pyyaml
+        python3 -m pip install --quiet pyyaml \
+          || python3 -m pip install --quiet --break-system-packages pyyaml
         components_json=$(python3 .github/scripts/release_manifest_facts.py bundle-manifest-components \
           --manifest "${DIST_MANIFEST}" --version "${VERSION}")
         untagged=()

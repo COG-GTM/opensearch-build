@@ -109,9 +109,15 @@ runs:
           build_root="${local_root}/${artifact_path}/builds/${FILENAME}"
           build_manifest="${build_root}/manifest.yml"
           core_plugins="${build_root}/core-plugins"
-          matched_dir="${RUNNER_TEMP}/promote-artifacts-matched"
-          rm -rf "${matched_dir}"
-          mkdir -p "${matched_dir}"
+          # Composite actions cannot be invoked from inside a shell loop, so the matched
+          # artifacts are staged into flat directories and the checksum/signing actions run
+          # once over each. Two directories are needed because Jenkins applies both closures
+          # per file (promoteArtifacts.groovy:80-88), so the signer never sees a .sha512:
+          # checksums are produced in one copy, signatures in the other.
+          matched_dir="${RUNNER_TEMP}/promote-artifacts-checksums"
+          sign_dir="${RUNNER_TEMP}/promote-artifacts-signing"
+          rm -rf "${matched_dir}" "${sign_dir}"
+          mkdir -p "${matched_dir}" "${sign_dir}"
           : > "${matched_dir}/mapping"
           index=0
           while IFS= read -r -d '' file; do
@@ -119,17 +125,18 @@ runs:
             if [[ "${base}" == "${FILENAME}-min-${REVISION}"*".${distribution}"* ||
                   "${base}" == "${FILENAME}-${REVISION}"*".${distribution}"* ]]; then
               # Stage under the original basename so the .sha512 body names the published file.
-              staged="${matched_dir}/${base}"
-              if [[ -e "${staged}" ]]; then
+              if [[ -e "${matched_dir}/${base}" ]]; then
                 echo "::error::Duplicate artifact basename ${base}; cannot stage it for signing."
                 exit 1
               fi
-              cp -- "${file}" "${staged}"
-              printf '%s\t%s\n' "${staged}" "${file}" >> "${matched_dir}/mapping"
+              cp -- "${file}" "${matched_dir}/${base}"
+              cp -- "${file}" "${sign_dir}/${base}"
+              printf '%s\t%s\n' "${base}" "${file}" >> "${matched_dir}/mapping"
               index=$((index + 1))
             fi
           done < <(find "${local_root}/${artifact_path}" -type f -print0)
-          echo "artifact-path=${matched_dir}" >> "${GITHUB_OUTPUT}"
+          echo "checksum-path=${matched_dir}" >> "${GITHUB_OUTPUT}"
+          echo "sign-path=${sign_dir}" >> "${GITHUB_OUTPUT}"
           echo "mapping=${matched_dir}/mapping" >> "${GITHUB_OUTPUT}"
           if [[ "${distribution}" == tar && -d "${core_plugins}" ]]; then
             echo 'has-core=true' >> "${GITHUB_OUTPUT}"
@@ -148,6 +155,9 @@ runs:
           exit 1
         fi
 
+    # promoteArtifacts.groovy:72-77 passes the whole core-plugins directory to both
+    # closures, so unlike the per-file branch below the signer does see the freshly
+    # created .sha512 files here. That is faithful; do not split this into two dirs.
     - name: Create core-plugin checksums
       if: ${{ steps.prepare.outputs.has-core == 'true' }}
       uses: ./.github/actions/create-sha512-checksums
@@ -173,13 +183,14 @@ runs:
       if: ${{ steps.prepare.outputs.has-matched == 'true' }}
       uses: ./.github/actions/create-sha512-checksums
       with:
-        artifact-path: ${{ steps.prepare.outputs.artifact-path }}
+        artifact-path: ${{ steps.prepare.outputs.checksum-path }}
 
+    # Signs the artifact-only copies: Jenkins never submits a .sha512 to the signer.
     - name: Sign distribution artifacts
       if: ${{ steps.prepare.outputs.has-matched == 'true' }}
       uses: ./.github/actions/sign-artifacts-client
       with:
-        artifact-path: ${{ steps.prepare.outputs.artifact-path }}
+        artifact-path: ${{ steps.prepare.outputs.sign-path }}
         sigtype: '.sig'
         platform: ${{ inputs.distribution-platform }}
         email: ${{ inputs.signing-email }}
@@ -195,14 +206,17 @@ runs:
       shell: bash
       env:
         MAPPING: ${{ steps.prepare.outputs.mapping }}
+        CHECKSUM_DIR: ${{ steps.prepare.outputs.checksum-path }}
+        SIGN_DIR: ${{ steps.prepare.outputs.sign-path }}
       run: |
         set -euo pipefail
-        while IFS=$'\t' read -r staged original; do
-          for suffix in .sha512 .sig; do
-            if [[ -f "${staged}${suffix}" ]]; then
-              cp -- "${staged}${suffix}" "${original}${suffix}"
-            fi
-          done
+        while IFS=$'\t' read -r base original; do
+          if [[ -f "${CHECKSUM_DIR}/${base}.sha512" ]]; then
+            cp -- "${CHECKSUM_DIR}/${base}.sha512" "${original}.sha512"
+          fi
+          if [[ -f "${SIGN_DIR}/${base}.sig" ]]; then
+            cp -- "${SIGN_DIR}/${base}.sig" "${original}.sig"
+          fi
         done < "${MAPPING}"
 
     - name: Assume the artifact promotion role
@@ -233,7 +247,8 @@ runs:
         dist_root="${build_root}/dist"
         build_manifest="${build_root}/manifest.yml"
         if [[ "${DISTRIBUTION_NAME}" == tar && -d "${build_root}/core-plugins" ]]; then
-          python3 -m pip install --quiet pyyaml
+          python3 -m pip install --quiet pyyaml \
+            || python3 -m pip install --quiet --break-system-packages pyyaml
           # Ant "**/x*" means any depth including none; the aws-cli "*" already crosses "/",
           # so the faithful translation of the Jenkins includePathPattern is "*x*".
           while IFS= read -r plugin_subpath; do
@@ -248,6 +263,8 @@ runs:
             "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/releases/core/${FILENAME}/${REVISION}/" \
             --exclude '*' --include "*${FILENAME}-min-${REVISION}-${DISTRIBUTION_PLATFORM}-${DISTRIBUTION_ARCHITECTURE}*"
         fi
-        aws s3 cp --recursive "${dist_root}/${FILENAME}/" \
+        # promoteArtifacts.groovy:120-124 uploads from the top-level dist/<filename>/,
+        # a sibling of builds/, not from builds/<filename>/dist/.
+        aws s3 cp --recursive "${local_root}/${artifact_path}/dist/${FILENAME}/" \
           "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/releases/bundle/${FILENAME}/${REVISION}/" \
           --exclude '*' --include "*${FILENAME}-${REVISION}-${DISTRIBUTION_PLATFORM}-${DISTRIBUTION_ARCHITECTURE}*"

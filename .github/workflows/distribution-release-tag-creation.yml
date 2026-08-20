@@ -44,7 +44,7 @@ jobs:
           - opensearch
           - opensearch-dashboards
     env:
-      GITHUB_BOT_TOKEN: ${{ secrets.GITHUB_BOT_TOKEN }}
+      RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       - name: Download release manifest
@@ -64,7 +64,7 @@ jobs:
         with:
           dist-manifest: ${{ github.workspace }}/release-manifests/${{ matrix.product }}-${{ inputs.VERSION }}/${{ matrix.product }}-${{ inputs.VERSION }}/manifest.yml
           tag-version: ${{ inputs.VERSION }}
-          github-bot-token: ${{ env.GITHUB_BOT_TOKEN }}
+          github-bot-token: ${{ env.RELEASE_BOT_TOKEN }}
   lock-manifests:
     needs: create-tags
     runs-on: ubuntu-24.04
@@ -72,22 +72,37 @@ jobs:
     permissions:
       actions: write
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_BOT_TOKEN || github.token }}
+      GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
     steps:
       - name: Report or trigger manifest lock
         shell: bash
         env:
           VERSION: ${{ inputs.VERSION }}
           LOCK_WORKFLOW: ${{ inputs.MANIFEST_LOCK_WORKFLOW }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           if [[ -z "${LOCK_WORKFLOW}" ]]; then
             echo "::notice::Jenkins would have triggered release-manifest-commit-lock with RELEASE_VERSION=${VERSION} and MANIFEST_LOCK_ACTION=UPDATE_TO_TAGS"
             exit 0
           fi
+          dispatched_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           gh workflow run "${LOCK_WORKFLOW}" \
             --field "RELEASE_VERSION=${VERSION}" \
             --field 'MANIFEST_LOCK_ACTION=UPDATE_TO_TAGS' \
             --ref main
-          run_id=$(gh run list --workflow "${LOCK_WORKFLOW}" --limit 1 --json databaseId --jq '.[0].databaseId')
+          # Only accept a run created after the dispatch; "--limit 1" alone can watch
+          # a previous run and report success for a lock that never started.
+          run_id=''
+          for _ in $(seq 1 30); do
+            sleep 10
+            run_id=$(gh run list --workflow "${LOCK_WORKFLOW}" --limit 30 \
+              --json databaseId,createdAt \
+              --jq "[.[] | select(.createdAt >= \"${dispatched_at}\")] | sort_by(.createdAt) | last | .databaseId // empty")
+            if [[ -n "${run_id}" ]]; then break; fi
+          done
+          if [[ -z "${run_id}" ]]; then
+            echo "::error::No ${LOCK_WORKFLOW} run appeared within 5 minutes of the dispatch."
+            exit 1
+          fi
           gh run watch "${run_id}" --exit-status

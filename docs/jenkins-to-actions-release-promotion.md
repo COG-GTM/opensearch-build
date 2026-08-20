@@ -124,19 +124,20 @@ source.
 | `SIGNER_CLIENT_EXTERNAL_ID` | signer client | `op://opensearch-release-secrets/client-signing/jenkins-signer-client-external-id` |
 | `SIGNER_CLIENT_UNSIGNED_BUCKET` | signer client | `op://opensearch-release-secrets/client-signing/jenkins-signer-client-unsigned-bucket` |
 | `SIGNER_CLIENT_SIGNED_BUCKET` | signer client | `op://opensearch-release-secrets/client-signing/jenkins-signer-client-signed-bucket` |
-| `GITHUB_BOT_USER` | signer client GitHub access | `op://opensearch-release-secrets/github-bot/ci-bot-username` |
-| `GITHUB_BOT_TOKEN` | signer client GitHub access, component tag pushes, optional workflow dispatch | `op://opensearch-release-secrets/github-bot/ci-bot-token` |
+| `RELEASE_BOT_USER` | signer client GitHub access | `op://opensearch-release-secrets/github-bot/ci-bot-username` |
+| `RELEASE_BOT_TOKEN` | signer client GitHub access, component tag pushes, optional workflow dispatch | `op://opensearch-release-secrets/github-bot/ci-bot-token` |
 | `DOCKERHUB_READONLY_USERNAME` / `DOCKERHUB_READONLY_PASSWORD` | read-only Docker Hub login for staging pulls | `op://opensearch-release-secrets/dockerhub-production-readonly-credentials/{username,password}` |
 | `DOCKERHUB_PRODUCTION_USERNAME` / `DOCKERHUB_PRODUCTION_PASSWORD` | production Docker Hub login | `op://opensearch-release-secrets/dockerhub-production-credentials/{username,password}` |
 | `SONATYPE_USERNAME` / `SONATYPE_PASSWORD` | Maven Central publication | `op://opensearch-release-secrets/maven-central-portal-credentials/{username,password}` |
 | `SONATYPE_STAGING_PROFILE_ID` | Maven staging profile | `opensearch-release-secrets` Jenkins environment binding; configure the profile ID as a GitHub secret |
 
-GitHub rejects repository and environment secret names that start with
-`GITHUB_`, and a job-level `env: GITHUB_TOKEN:` would shadow the automatic
-token. The Jenkins 1Password bindings named `GITHUB_USER`/`GITHUB_TOKEN`
-(`createReleaseTag.groovy:10-13`, `signArtifacts.groovy`) are therefore
-configured as `GITHUB_BOT_USER`/`GITHUB_BOT_TOKEN` and exported into the
-composite actions under the Jenkins names inside the signing step only.
+GitHub rejects **any** repository or environment secret name that starts with
+`GITHUB_` — including `GITHUB_BOT_TOKEN`, which therefore always resolves to an
+empty string — and a job-level `env: GITHUB_TOKEN:` would additionally shadow
+the automatic token. The Jenkins 1Password bindings named
+`GITHUB_USER`/`GITHUB_TOKEN` (`createReleaseTag.groovy:10-13`, `signArtifacts`)
+are therefore configured as `RELEASE_BOT_USER`/`RELEASE_BOT_TOKEN` and exported
+into the composite actions under the Jenkins names inside the signing step only.
 
 `PUBLIC_ARTIFACT_URL` is a repository variable, not a secret, and replaces the
 Jenkins `PUBLIC_ARTIFACT_URL` environment value in `promoteRepos.groovy:56-57`.
@@ -222,6 +223,29 @@ outside the repository, and the tag job pushes to many component repositories.
 * The local Docker copy implementation intentionally duplicates the
   out-of-scope `docker-copy` job until the two migrations can be folded
   together.
+* `copy-container` logs in to the *destination* registry inside both ECR steps
+  even when only the *source* registry satisfied the condition. That is
+  `copyContainer.groovy:55-66` verbatim; the redundant login is harmless but is
+  not tidied here.
+* The registry conditions in `copy-container` compare registries with exact
+  equality while the `allTags` guard uses substring matching. The asymmetry is
+  Jenkins': `copyContainer.groovy:44-66` versus `:73`.
+* `create-release-tag` compares the output of `git ls-remote --tags` with the
+  component commit id. For an **annotated** tag `ls-remote` returns the tag
+  object SHA, not the commit SHA, so an already-correct tag takes the
+  hard-error branch. This is a latent bug in `createReleaseTag.groovy:43-64`
+  that is carried over unchanged rather than fixed in the migration.
+* `sign-artifacts-client` exports the ci-bot token to `sign.sh` as
+  `GITHUB_TOKEN`. `createReleaseTag.groovy:10-13` and `signArtifacts` bind the
+  same `github-bot/ci-bot-token`, so this is a faithful port; it is nonetheless
+  over-privileged for signing and a narrower credential is a recommended
+  hardening step, not a port change.
+* The apt path removes the synced repository contents
+  (`rm -rf "${REPO_PATH:?}"/*`) before copying `~/.aptly/public/*` into place —
+  `promoteRepos.groovy:231-233` verbatim. The step is non-idempotent and has no
+  local rollback point. Likewise `mkdir "${REPO_PATH}/base"` is called without
+  `-p`, matching `promoteRepos.groovy:216`, so a re-run over a dirty workspace
+  fails rather than continuing.
 
 ## 9. Validation performed
 

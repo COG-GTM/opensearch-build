@@ -98,8 +98,8 @@ jobs:
       SIGNER_CLIENT_EXTERNAL_ID: ${{ secrets.SIGNER_CLIENT_EXTERNAL_ID }}
       SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_UNSIGNED_BUCKET }}
       SIGNER_CLIENT_SIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_SIGNED_BUCKET }}
-      GITHUB_BOT_USER: ${{ secrets.GITHUB_BOT_USER }}
-      GITHUB_BOT_TOKEN: ${{ secrets.GITHUB_BOT_TOKEN }}
+      RELEASE_BOT_USER: ${{ secrets.RELEASE_BOT_USER }}
+      RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       - name: Read input manifest facts
@@ -113,7 +113,8 @@ jobs:
           INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
         run: |
           set -euo pipefail
-          python3 -m pip install --quiet pyyaml
+          python3 -m pip install --quiet pyyaml \
+            || python3 -m pip install --quiet --break-system-packages pyyaml
           python3 .github/scripts/release_manifest_facts.py input-manifest-facts \
             --manifest "manifests/${INPUT_MANIFEST}" >> "${GITHUB_OUTPUT}"
           printf '%s %s %s %s %s\n' \
@@ -141,5 +142,5 @@ jobs:
           signer-client-external-id: ${{ env.SIGNER_CLIENT_EXTERNAL_ID }}
           signer-client-unsigned-bucket: ${{ env.SIGNER_CLIENT_UNSIGNED_BUCKET }}
           signer-client-signed-bucket: ${{ env.SIGNER_CLIENT_SIGNED_BUCKET }}
-          github-user: ${{ env.GITHUB_BOT_USER }}
-          github-token: ${{ env.GITHUB_BOT_TOKEN }}
+          github-user: ${{ env.RELEASE_BOT_USER }}
+          github-token: ${{ env.RELEASE_BOT_TOKEN }}

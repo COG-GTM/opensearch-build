@@ -21,13 +21,20 @@ runs:
       run: |
         set -euo pipefail
         allowed_types=('.tar.gz' '.zip' '.rpm' '.deb')
-        mapfile -d '' files < <(find "${ARTIFACT_PATH}" -type f -print0)
+        if [[ ! -e "${ARTIFACT_PATH}" ]]; then
+          echo "::error::Artifact path ${ARTIFACT_PATH} does not exist."
+          exit 1
+        fi
+        # "mapfile -d" needs bash 4.4; the centos7 ci-runner container ships bash 4.2.
+        files=()
+        while IFS= read -r -d '' found; do
+          files+=("${found}")
+        done < <(find "${ARTIFACT_PATH}" -type f -print0)
         if [[ "${#files[@]}" -eq 0 ]]; then
           echo "No files found under ${ARTIFACT_PATH}"
           exit 0
         fi
         for file in "${files[@]}"; do
-          file="${file%$'\0'}"
           accepted=false
           for file_type in "${allowed_types[@]}"; do
             if [[ "${file}" == *"${file_type}" ]]; then

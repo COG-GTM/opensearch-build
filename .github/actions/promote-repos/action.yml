@@ -43,6 +43,8 @@ inputs:
     required: true
   rpm-signing-key-id:
     required: true
+  public-artifact-url:
+    required: true
   signer-client-role:
     required: true
   signer-client-external-id:
@@ -90,9 +92,13 @@ runs:
         REVISION: ${{ inputs.revision }}
         REPO_VERSION: ${{ inputs.repo-version }}
         PROD_BUCKET: ${{ inputs.artifact-production-bucket-name }}
-        PUBLIC_ARTIFACT_URL: ${{ vars.PUBLIC_ARTIFACT_URL }}
+        PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
       run: |
         set -euo pipefail
+        if [[ -z "${PUBLIC_ARTIFACT_URL}" ]]; then
+          echo '::error::PUBLIC_ARTIFACT_URL is empty; configure the repository variable of that name.'
+          exit 1
+        fi
         case "${REPO_TYPE}" in
           yum) DIST_TYPE=rpm ;;
           apt) DIST_TYPE=deb ;;
