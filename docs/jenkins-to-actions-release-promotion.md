@@ -26,10 +26,9 @@ registries, and publishing credentials.
 | `.github/actions/download-from-s3/action.yml` | `opensearch-build-libraries:vars/downloadFromS3.groovy`; copied byte-for-byte from PR #1 |
 | `.github/scripts/release_manifest_facts.py` | `opensearch-build-libraries:src/jenkins/InputManifest.groovy:74-147`, `BundleManifest.groovy:14-109` |
 
-The five workflows are dispatch-only (`workflow_dispatch`). The artifact,
-repository, Docker, and Maven workflows also expose `workflow_call` so the
-out-of-scope release pipeline can chain them later. No workflow has a
-`push` or `pull_request` trigger.
+All five workflows are dispatch-only (`workflow_dispatch`) and all five also
+expose `workflow_call` so the out-of-scope release pipeline can chain them
+later. No workflow has a `push` or `pull_request` trigger.
 
 ## 2. Construct mapping
 
@@ -37,7 +36,7 @@ out-of-scope release pipeline can chain them later. No workflow has a
 | --- | --- |
 | `parameters {}` (`promote-artifacts.jenkinsfile:23-56`; `promote-repos.jenkinsfile:28-51`; `promote-docker-ecr-lf.jenkinsfile:30-61`; `publish-to-maven-lf.jenkinsfile:32-42`; `release-tag.jenkinsfile:30-35`) | `workflow_dispatch.inputs` plus matching `workflow_call.inputs`. Jenkins choices become dispatch choices; reusable workflows receive strings because `workflow_call` has no choice type. |
 | `agent { docker { ... } }` (`promote-artifacts.jenkinsfile:59-65`; `promote-repos.jenkinsfile:54-60`; `promote-docker-ecr-lf.jenkinsfile:22-28`; `publish-to-maven-lf.jenkinsfile:24-30`; `release-tag.jenkinsfile:23-27`) | `runs-on: ubuntu-24.04` with a job `container`. The repository job container is selected in `resolve-image` for yum versus apt. Hosted runners are smaller than the Jenkins `m5.4xlarge` Docker hosts. Docker promotion omits the Jenkins Docker socket mount because a job container cannot reproduce that host mount; `crane` does not need the daemon. |
-| `options { timeout(...) }` (`promote-artifacts.jenkinsfile:19-21`; `promote-repos.jenkinsfile:24-26`; `promote-docker-ecr-lf.jenkinsfile:19-21`; `release-tag.jenkinsfile:19-21`) | Job `timeout-minutes` (60 minutes for the first four jobs and 120 minutes for release tags). |
+| `options { timeout(...) }` (`promote-artifacts.jenkinsfile:19-21`; `promote-repos.jenkinsfile:24-26`; `promote-docker-ecr-lf.jenkinsfile:19-21`; `release-tag.jenkinsfile:19-21`) | Job `timeout-minutes`: 60 minutes for artifact, repository and Docker promotion, 120 minutes for release tags. `publish-to-maven-lf.jenkinsfile` has **no** `options { timeout }`; its 60-minute cap is an addition, not a port. |
 | `post { always { cleanWs() } }` (`promote-artifacts.jenkinsfile:75-81`; `release-tag.jenkinsfile:79-84`) | No cleanup step: Actions jobs use ephemeral workspaces. `postCleanup()` and `cleanWs()` are intentionally not recreated. |
 | `post { always { postCleanup() } }` (`promote-repos.jenkinsfile:72-77`; `promote-docker-ecr-lf.jenkinsfile:94-100`; `publish-to-maven-lf.jenkinsfile:80-85`) | No equivalent is needed on an ephemeral runner. Docker logout remains in `copy-container` because it is part of the Jenkins copy behavior. |
 | `currentBuild.description = ...` (`promote-artifacts.jenkinsfile:69`; `promote-repos.jenkinsfile:64`; `promote-docker-ecr-lf.jenkinsfile:67`) | `$GITHUB_STEP_SUMMARY` in the parameter-check job or the corresponding action. |
@@ -48,7 +47,7 @@ out-of-scope release pipeline can chain them later. No workflow has a
 | `withSecrets` / 1Password (`promoteArtifacts.groovy:13-19,43`; `promoteRepos.groovy:63-67,169-180`; `copyContainer.groovy:20-33,44-64`; `publishToMaven.groovy:34-40`) | Repository or environment secrets are exported by the caller job and passed into composite-action inputs. Composite actions cannot read the `secrets` context. |
 | `library(identifier: 'jenkins@12.0.0')` (`promote-artifacts.jenkinsfile:13-16`; `promote-repos.jenkinsfile:13-16`; `release-tag.jenkinsfile:13-16`) | Source behavior was read from the cloned shared library. The action code is local and reviewable. |
 | `library(identifier: 'jenkins@lf-jenkins')` (`promote-docker-ecr-lf.jenkinsfile:13-16`; `publish-to-maven-lf.jenkinsfile:13-16`) | Docker behavior is local for this slice; the Maven resource `resources/publish/stage-maven-release.sh` is fetched from the `lf-jenkins` ref at runtime rather than copied into this repository. |
-| `readYaml` / `findFiles` / `s3Download` / `s3Upload` / `cleanWs` (`promoteArtifacts.groovy:24-25,59-60,84-87,101-124`; `promoteRepos.groovy:22-23,72,240`; `promote-artifacts.jenkinsfile:78`) | `release_manifest_facts.py`, `find`, `aws s3 cp/sync` with `--exclude '*' --include`, and ephemeral job workspaces. |
+| `readYaml` / `findFiles` / `s3Download` / `s3Upload` / `cleanWs` (`promoteArtifacts.groovy:24-25,59-60,84-87,101-124`; `promoteRepos.groovy:22-23,72,240`; `promote-artifacts.jenkinsfile:78`) | `release_manifest_facts.py`, `find`, `aws s3 cp/sync` with `--exclude '*' --include`, and ephemeral job workspaces. The glob dialects differ: the Jenkins Ant pattern `**/x*` means "any depth, including none", while an aws-cli `--include "**/x*"` requires a literal `/`; the faithful aws-cli translation is `*x*`, because aws-cli `*` already crosses `/`. |
 
 ## 3. Shared-library steps converted
 
@@ -125,19 +124,28 @@ source.
 | `SIGNER_CLIENT_EXTERNAL_ID` | signer client | `op://opensearch-release-secrets/client-signing/jenkins-signer-client-external-id` |
 | `SIGNER_CLIENT_UNSIGNED_BUCKET` | signer client | `op://opensearch-release-secrets/client-signing/jenkins-signer-client-unsigned-bucket` |
 | `SIGNER_CLIENT_SIGNED_BUCKET` | signer client | `op://opensearch-release-secrets/client-signing/jenkins-signer-client-signed-bucket` |
-| `GITHUB_USER` | signer client GitHub access | `op://opensearch-release-secrets/github-bot/ci-bot-username` |
-| `GITHUB_TOKEN` | signer client GitHub access | `op://opensearch-release-secrets/github-bot/ci-bot-token` |
-| `GITHUB_BOT_TOKEN` | component tag pushes and optional workflow dispatch | `op://opensearch-release-secrets/github-bot/ci-bot-token` |
-| `DOCKERHUB_STAGING_USERNAME` / `DOCKERHUB_STAGING_PASSWORD` | staging Docker Hub login | `op://opensearch-release-secrets/dockerhub-production-readonly-credentials/{username,password}` |
+| `GITHUB_BOT_USER` | signer client GitHub access | `op://opensearch-release-secrets/github-bot/ci-bot-username` |
+| `GITHUB_BOT_TOKEN` | signer client GitHub access, component tag pushes, optional workflow dispatch | `op://opensearch-release-secrets/github-bot/ci-bot-token` |
+| `DOCKERHUB_READONLY_USERNAME` / `DOCKERHUB_READONLY_PASSWORD` | read-only Docker Hub login for staging pulls | `op://opensearch-release-secrets/dockerhub-production-readonly-credentials/{username,password}` |
 | `DOCKERHUB_PRODUCTION_USERNAME` / `DOCKERHUB_PRODUCTION_PASSWORD` | production Docker Hub login | `op://opensearch-release-secrets/dockerhub-production-credentials/{username,password}` |
 | `SONATYPE_USERNAME` / `SONATYPE_PASSWORD` | Maven Central publication | `op://opensearch-release-secrets/maven-central-portal-credentials/{username,password}` |
 | `SONATYPE_STAGING_PROFILE_ID` | Maven staging profile | `opensearch-release-secrets` Jenkins environment binding; configure the profile ID as a GitHub secret |
 
+GitHub rejects repository and environment secret names that start with
+`GITHUB_`, and a job-level `env: GITHUB_TOKEN:` would shadow the automatic
+token. The Jenkins 1Password bindings named `GITHUB_USER`/`GITHUB_TOKEN`
+(`createReleaseTag.groovy:10-13`, `signArtifacts.groovy`) are therefore
+configured as `GITHUB_BOT_USER`/`GITHUB_BOT_TOKEN` and exported into the
+composite actions under the Jenkins names inside the signing step only.
+
 `PUBLIC_ARTIFACT_URL` is a repository variable, not a secret, and replaces the
 Jenkins `PUBLIC_ARTIFACT_URL` environment value in `promoteRepos.groovy:56-57`.
-`DATA_PREPPER_STAGING_CONTAINER_REPOSITORY` is an optional repository variable;
-the Docker action falls back to `opensearchstaging`, matching
-`promoteContainer.groovy:32`.
+`DATA_PREPPER_STAGING_CONTAINER_REPOSITORY` is a repository variable that must
+be configured before any `data-prepper:*` image is promoted. Jenkins references
+the variable directly (`promoteContainer.groovy:32`) and would have failed on an
+unset value. The action fails explicitly instead of falling back to
+`opensearchstaging`: a silent fallback would publish a production image pulled
+from the wrong source registry.
 
 OIDC setup follows the PR #1 model:
 
@@ -156,7 +164,7 @@ OIDC setup follows the PR #1 model:
 | --- | --- | --- |
 | `distribution-promote-artifacts.yml` | `production-artifacts` | A wrong build number or input manifest can irreversibly publish the wrong tar/rpm/deb/zip, plugin, or min artifact into the public production release bucket. This is the most dangerous mis-migration target in this slice. |
 | `distribution-promote-repos.yml` | `production-repositories` | Wrong version, build, or repo type can replace yum metadata/signatures or publish an incorrect apt repository. |
-| `docker-promotion.yml` | `production-containers` | Wrong source image or release version can publish to Docker Hub/public ECR. `TAG_LATEST` and `TAG_MAJOR_VERSION` default to `true`, so a mis-dispatched run can move the public `latest` and major tags. |
+| `docker-promotion.yml` | `production-containers` | Wrong source image or release version can publish to Docker Hub/public ECR. `TAG_LATEST` and `TAG_MAJOR_VERSION` default to `true`, so a mis-dispatched run can move the public `latest` and major tags. An unset `DATA_PREPPER_STAGING_CONTAINER_REPOSITORY` would, with a silent fallback, publish a production `data-prepper` image copied from the wrong source registry; the action fails instead. |
 | `publish-to-maven.yml` | `production-maven` | `autoPublish: true` publishes to Maven Central and is effectively irreversible. |
 | `distribution-release-tag-creation.yml` | `production-release-tags` | Wrong release version or manifest can push tags across every component repository. |
 
@@ -217,21 +225,26 @@ outside the repository, and the tag job pushes to many component repositories.
 
 ## 9. Validation performed
 
-Validation is intentionally static. No workflow was dispatched and no
-production AWS, signing, Docker, or Maven operation was attempted. The final
-handoff records the exact command results for:
+Validation is static. No workflow was dispatched and no production AWS,
+signing, Docker, or Maven operation was attempted.
 
-* `actionlint` over all five new workflows;
-* repository-configured `yamllint` over every new YAML workflow/action;
-* YAML parsing of every new workflow and composite action;
-* `flake8`, `isort --check`, and `mypy` for
-  `.github/scripts/release_manifest_facts.py`;
-* `release_manifest_facts.py input-manifest-facts` against
-  `manifests/3.9.0/opensearch-3.9.0.yml`;
-* pre-commit hooks;
-* a merge-base diff audit proving no `jenkins/` or `tests/jenkins/` file was
-  touched and a trigger audit proving no new workflow has `push` or
-  `pull_request`.
+| Check | Result |
+| --- | --- |
+| `actionlint` (v1.7.12) over the five new workflows | clean, zero findings |
+| `yamllint` with the repository `.yamllint.yml` over every new workflow and composite action | exit 0; one `too few spaces before comment` warning remains in `download-from-s3/action.yml`, which is copied byte-for-byte from PR #1 and deliberately unmodified |
+| Python YAML parse and trailing-newline check over every new file | passed |
+| `flake8`, `isort --check`, `mypy` for `.github/scripts/release_manifest_facts.py` | passed |
+| `release_manifest_facts.py input-manifest-facts --manifest manifests/3.9.0/opensearch-3.9.0.yml` | `filename=opensearch`, `version=3.9.0`, `qualifier=`, `revision=3.9.0`, `major-version=3`, `signing-email=release@opensearch.org`, `repo-version=3.x` |
+| `release_manifest_facts.py bundle-manifest-components` against the released `opensearch-2.19.0-linux-x64.tar.gz` manifest | 27 components; `OpenSearch` tagged `2.19.0`, every other component tagged `2.19.0.0` |
+| Same subcommand against the released `opensearch-3.0.0-alpha1` manifest (qualifier case) | 27 components; `OpenSearch` tagged `3.0.0-alpha1`, every other component tagged `3.0.0.0-alpha1`, matching `createReleaseTag.groovy:33-42` |
+| `pre-commit run --all-files` (isort, flake8, mypy, pytest, yamllint) | all hooks passed |
+| Merge-base diff audit | no file under `jenkins/` or `tests/jenkins/` is touched |
+| Trigger audit | no new workflow declares `push` or `pull_request` |
+
+`release_manifest_facts.py build-manifest-core-plugins` is exercised only by
+unit-level reasoning against `promoteArtifacts.groovy:95`: no build manifest
+containing `components[0].artifacts.core-plugins` is published as a downloadable
+artifact, so that accessor is **unverified against real data**.
 
 Live cloud behavior, approval configuration, signer-client credentials,
 runner capacity, the remote Maven resource, and component-repository push

@@ -24,9 +24,9 @@ inputs:
   all-tags:
     required: false
     default: 'false'
-  staging-dockerhub-username:
+  readonly-dockerhub-username:
     required: true
-  staging-dockerhub-password:
+  readonly-dockerhub-password:
     required: true
   production-dockerhub-username:
     required: true
@@ -53,12 +53,12 @@ runs:
           exit 1
         fi
 
-    - name: Login to staging Docker Hub
+    - name: Login to read-only Docker Hub
       if: ${{ inputs.source-registry == 'opensearchstaging' || inputs.destination-registry == 'opensearchstaging' }}
       shell: bash
       env:
-        USERNAME: ${{ inputs.staging-dockerhub-username }}
-        PASSWORD: ${{ inputs.staging-dockerhub-password }}
+        USERNAME: ${{ inputs.readonly-dockerhub-username }}
+        PASSWORD: ${{ inputs.readonly-dockerhub-password }}
       run: |
         set -euo pipefail
         printf '%s' "${PASSWORD}" | docker login --username "${USERNAME}" --password-stdin

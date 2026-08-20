@@ -1,5 +1,5 @@
 ---
-# Ports jenkins/vars/promoteArtifacts.groovy:21-130 and
+# Ports opensearch-build-libraries vars/promoteArtifacts.groovy:21-130 and
 # jenkins/release-workflows/promote-artifacts.jenkinsfile:68-73. See
 # docs/jenkins-to-actions-release-promotion.md. Jenkins had no approval gate;
 # this migration deliberately adds the caller's production-artifacts environment.
@@ -81,8 +81,6 @@ runs:
         SIGNER_CLIENT_EXTERNAL_ID: ${{ inputs.signer-client-external-id }}
         SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ inputs.signer-client-unsigned-bucket }}
         SIGNER_CLIENT_SIGNED_BUCKET: ${{ inputs.signer-client-signed-bucket }}
-        GITHUB_USER: ${{ inputs.github-user }}
-        GITHUB_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
         case "${DISTRIBUTION_PLATFORM}" in
@@ -107,7 +105,7 @@ runs:
           local_root="${GITHUB_WORKSPACE}/artifacts/${distribution}"
           echo "S3 download ${DISTRIBUTION_PLATFORM} ${DISTRIBUTION_ARCHITECTURE} ${distribution} ${REVISION} from ${DISTRIBUTION_JOB_NAME} build number ${DISTRIBUTION_BUILD_NUMBER} artifacts before creating signatures"
           mkdir -p "${local_root}"
-          aws s3 cp --recursive --quiet "s://${ARTIFACT_BUCKET_NAME}/${artifact_path}" "${local_root}/${artifact_path}"
+          aws s3 cp --recursive --quiet "s3://${ARTIFACT_BUCKET_NAME}/${artifact_path}" "${local_root}/${artifact_path}"
           build_root="${local_root}/${artifact_path}/builds/${FILENAME}"
           build_manifest="${build_root}/manifest.yml"
           core_plugins="${build_root}/core-plugins"
@@ -120,16 +118,15 @@ runs:
             base=$(basename "${file}")
             if [[ "${base}" == "${FILENAME}-min-${REVISION}"*".${distribution}"* ||
                   "${base}" == "${FILENAME}-${REVISION}"*".${distribution}"* ]]; then
-              suffix=
-              for candidate in .tar.gz .zip .rpm .deb; do
-                if [[ "${base}" == *"${candidate}" ]]; then suffix="${candidate}"; break; fi
-              done
-              if [[ -n "${suffix}" ]]; then
-                staged="${matched_dir}/artifact-${index}${suffix}"
-                cp -- "${file}" "${staged}"
-                printf '%s\t%s\n' "${staged}" "${file}" >> "${matched_dir}/mapping"
-                index=$((index + 1))
+              # Stage under the original basename so the .sha512 body names the published file.
+              staged="${matched_dir}/${base}"
+              if [[ -e "${staged}" ]]; then
+                echo "::error::Duplicate artifact basename ${base}; cannot stage it for signing."
+                exit 1
               fi
+              cp -- "${file}" "${staged}"
+              printf '%s\t%s\n' "${staged}" "${file}" >> "${matched_dir}/mapping"
+              index=$((index + 1))
             fi
           done < <(find "${local_root}/${artifact_path}" -type f -print0)
           echo "artifact-path=${matched_dir}" >> "${GITHUB_OUTPUT}"
@@ -236,25 +233,21 @@ runs:
         dist_root="${build_root}/dist"
         build_manifest="${build_root}/manifest.yml"
         if [[ "${DISTRIBUTION_NAME}" == tar && -d "${build_root}/core-plugins" ]]; then
+          python3 -m pip install --quiet pyyaml
+          # Ant "**/x*" means any depth including none; the aws-cli "*" already crosses "/",
+          # so the faithful translation of the Jenkins includePathPattern is "*x*".
           while IFS= read -r plugin_subpath; do
             plugin_file=$(basename "${plugin_subpath}")
             plugin_name="${plugin_file%-${REVISION}.zip}"
             aws s3 cp --recursive "${build_root}/core-plugins/" \
               "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/releases/plugins/${plugin_name}/${REVISION}/" \
-              --exclude '*' --include "**/${plugin_name}*"
-          done < <(python - "${build_manifest}" <<'PY'
-        import sys
-        import yaml
-        with open(sys.argv[1], encoding='utf-8') as manifest_file:
-            data = yaml.safe_load(manifest_file)
-        for item in data.get('components', {}).get('artifacts', {}).get('core-plugins', [[]])[0]:
-            print(item)
-        PY
-          )
+              --exclude '*' --include "*${plugin_name}*"
+          done < <(python3 .github/scripts/release_manifest_facts.py build-manifest-core-plugins \
+            --manifest "${build_manifest}")
           aws s3 cp --recursive "${dist_root}/" \
             "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/releases/core/${FILENAME}/${REVISION}/" \
-            --exclude '*' --include "**/${FILENAME}-min-${REVISION}-${DISTRIBUTION_PLATFORM}-${DISTRIBUTION_ARCHITECTURE}*"
+            --exclude '*' --include "*${FILENAME}-min-${REVISION}-${DISTRIBUTION_PLATFORM}-${DISTRIBUTION_ARCHITECTURE}*"
         fi
         aws s3 cp --recursive "${dist_root}/${FILENAME}/" \
           "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/releases/bundle/${FILENAME}/${REVISION}/" \
-          --exclude '*' --include "**/${FILENAME}-${REVISION}-${DISTRIBUTION_PLATFORM}-${DISTRIBUTION_ARCHITECTURE}*"
+          --exclude '*' --include "*${FILENAME}-${REVISION}-${DISTRIBUTION_PLATFORM}-${DISTRIBUTION_ARCHITECTURE}*"

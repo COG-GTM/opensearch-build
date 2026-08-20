@@ -1,5 +1,5 @@
 ---
-# Ports jenkins/vars/publishToMaven.groovy:17-41 and
+# Ports opensearch-build-libraries vars/publishToMaven.groovy:17-41 and
 # jenkins/release-workflows/publish-to-maven-lf.jenkinsfile:51-77. See
 # docs/jenkins-to-actions-release-promotion.md. Jenkins loadCustomScript()
 # became a fetch of the pinned lf-jenkins library resource; review that trust

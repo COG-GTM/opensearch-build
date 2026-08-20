@@ -52,8 +52,8 @@ jobs:
       SIGNER_CLIENT_EXTERNAL_ID: ${{ secrets.SIGNER_CLIENT_EXTERNAL_ID }}
       SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_UNSIGNED_BUCKET }}
       SIGNER_CLIENT_SIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_SIGNED_BUCKET }}
-      GITHUB_USER: ${{ secrets.GITHUB_USER }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_BOT_USER: ${{ secrets.GITHUB_BOT_USER }}
+      GITHUB_BOT_TOKEN: ${{ secrets.GITHUB_BOT_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       - name: Download Maven artifacts
@@ -67,10 +67,11 @@ jobs:
       - name: Compute signing email
         id: manifest
         shell: bash
+        env:
+          VERSION: ${{ inputs.VERSION }}
         run: |
           set -euo pipefail
-          major="${{ inputs.VERSION }}"
-          major="${major%%.*}"
+          major="${VERSION%%.*}"
           if (( major > 2 )); then
             echo 'email=release@opensearch.org' >> "${GITHUB_OUTPUT}"
           else
@@ -89,5 +90,5 @@ jobs:
           signer-client-external-id: ${{ env.SIGNER_CLIENT_EXTERNAL_ID }}
           signer-client-unsigned-bucket: ${{ env.SIGNER_CLIENT_UNSIGNED_BUCKET }}
           signer-client-signed-bucket: ${{ env.SIGNER_CLIENT_SIGNED_BUCKET }}
-          github-user: ${{ env.GITHUB_USER }}
-          github-token: ${{ env.GITHUB_TOKEN }}
+          github-user: ${{ env.GITHUB_BOT_USER }}
+          github-token: ${{ env.GITHUB_BOT_TOKEN }}

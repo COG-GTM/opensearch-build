@@ -23,9 +23,9 @@ inputs:
   data-prepper-staging-container-repository:
     required: false
     default: ''
-  staging-dockerhub-username:
+  readonly-dockerhub-username:
     required: true
-  staging-dockerhub-password:
+  readonly-dockerhub-password:
     required: true
   production-dockerhub-username:
     required: true
@@ -39,19 +39,37 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    - name: Resolve source registry
+      id: source
+      shell: bash
+      env:
+        IMAGE_REPOSITORY: ${{ inputs.image-repository }}
+        DATA_PREPPER_STAGING_CONTAINER_REPOSITORY: ${{ inputs.data-prepper-staging-container-repository }}
+      run: |
+        set -euo pipefail
+        registry='opensearchstaging'
+        if [[ "${IMAGE_REPOSITORY}" == data-prepper:* ]]; then
+          if [[ -z "${DATA_PREPPER_STAGING_CONTAINER_REPOSITORY}" ]]; then
+            echo '::error::DATA_PREPPER_STAGING_CONTAINER_REPOSITORY is not configured; refusing to promote a data-prepper image from the default staging registry.'
+            exit 1
+          fi
+          registry="${DATA_PREPPER_STAGING_CONTAINER_REPOSITORY}"
+        fi
+        echo "registry=${registry}" >> "${GITHUB_OUTPUT}"
+
     - name: Copy to Docker Hub
       if: ${{ inputs.docker-hub-promote == 'true' }}
       uses: ./.github/actions/copy-container
       with:
-        source-registry: ${{ startsWith(inputs.image-repository, 'data-prepper:') && (inputs.data-prepper-staging-container-repository || 'opensearchstaging') || 'opensearchstaging' }}
+        source-registry: ${{ steps.source.outputs.registry }}
         source-image: ${{ inputs.image-repository }}
         destination-registry: opensearchproject
         destination-image: ${{ inputs.image-repository }}
         release-version: ${{ inputs.release-version }}
         tag-major-version: ${{ inputs.tag-major-version }}
         tag-latest: ${{ inputs.tag-latest }}
-        staging-dockerhub-username: ${{ inputs.staging-dockerhub-username }}
-        staging-dockerhub-password: ${{ inputs.staging-dockerhub-password }}
+        readonly-dockerhub-username: ${{ inputs.readonly-dockerhub-username }}
+        readonly-dockerhub-password: ${{ inputs.readonly-dockerhub-password }}
         production-dockerhub-username: ${{ inputs.production-dockerhub-username }}
         production-dockerhub-password: ${{ inputs.production-dockerhub-password }}
         artifact-promotion-role-name: ${{ inputs.artifact-promotion-role-name }}
@@ -61,15 +79,15 @@ runs:
       if: ${{ inputs.ecr-promote == 'true' }}
       uses: ./.github/actions/copy-container
       with:
-        source-registry: ${{ startsWith(inputs.image-repository, 'data-prepper:') && (inputs.data-prepper-staging-container-repository || 'opensearchstaging') || 'opensearchstaging' }}
+        source-registry: ${{ steps.source.outputs.registry }}
         source-image: ${{ inputs.image-repository }}
         destination-registry: public.ecr.aws/opensearchproject
         destination-image: ${{ inputs.image-repository }}
         release-version: ${{ inputs.release-version }}
         tag-major-version: ${{ inputs.tag-major-version }}
         tag-latest: ${{ inputs.tag-latest }}
-        staging-dockerhub-username: ${{ inputs.staging-dockerhub-username }}
-        staging-dockerhub-password: ${{ inputs.staging-dockerhub-password }}
+        readonly-dockerhub-username: ${{ inputs.readonly-dockerhub-username }}
+        readonly-dockerhub-password: ${{ inputs.readonly-dockerhub-password }}
         production-dockerhub-username: ${{ inputs.production-dockerhub-username }}
         production-dockerhub-password: ${{ inputs.production-dockerhub-password }}
         artifact-promotion-role-name: ${{ inputs.artifact-promotion-role-name }}

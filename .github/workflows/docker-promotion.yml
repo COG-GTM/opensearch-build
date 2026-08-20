@@ -111,8 +111,8 @@ jobs:
       contents: read
     env:
       DATA_PREPPER_STAGING_CONTAINER_REPOSITORY: ${{ vars.DATA_PREPPER_STAGING_CONTAINER_REPOSITORY }}
-      DOCKERHUB_STAGING_USERNAME: ${{ secrets.DOCKERHUB_STAGING_USERNAME }}
-      DOCKERHUB_STAGING_PASSWORD: ${{ secrets.DOCKERHUB_STAGING_PASSWORD }}
+      DOCKERHUB_READONLY_USERNAME: ${{ secrets.DOCKERHUB_READONLY_USERNAME }}
+      DOCKERHUB_READONLY_PASSWORD: ${{ secrets.DOCKERHUB_READONLY_PASSWORD }}
       DOCKERHUB_PRODUCTION_USERNAME: ${{ secrets.DOCKERHUB_PRODUCTION_USERNAME }}
       DOCKERHUB_PRODUCTION_PASSWORD: ${{ secrets.DOCKERHUB_PRODUCTION_PASSWORD }}
       ARTIFACT_PROMOTION_ROLE_NAME: ${{ secrets.ARTIFACT_PROMOTION_ROLE_NAME }}
@@ -129,8 +129,8 @@ jobs:
           tag-latest: ${{ inputs.TAG_LATEST }}
           tag-major-version: ${{ inputs.TAG_MAJOR_VERSION }}
           data-prepper-staging-container-repository: ${{ env.DATA_PREPPER_STAGING_CONTAINER_REPOSITORY }}
-          staging-dockerhub-username: ${{ env.DOCKERHUB_STAGING_USERNAME }}
-          staging-dockerhub-password: ${{ env.DOCKERHUB_STAGING_PASSWORD }}
+          readonly-dockerhub-username: ${{ env.DOCKERHUB_READONLY_USERNAME }}
+          readonly-dockerhub-password: ${{ env.DOCKERHUB_READONLY_PASSWORD }}
           production-dockerhub-username: ${{ env.DOCKERHUB_PRODUCTION_USERNAME }}
           production-dockerhub-password: ${{ env.DOCKERHUB_PRODUCTION_PASSWORD }}
           artifact-promotion-role-name: ${{ env.ARTIFACT_PROMOTION_ROLE_NAME }}

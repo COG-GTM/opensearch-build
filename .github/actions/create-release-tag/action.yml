@@ -1,5 +1,5 @@
 ---
-# Ports jenkins/vars/createReleaseTag.groovy:9-70 and
+# Ports opensearch-build-libraries vars/createReleaseTag.groovy:9-70 and
 # jenkins/release-workflows/release-tag.jenkinsfile:42-77. See
 # docs/jenkins-to-actions-release-promotion.md. Jenkins embedded the bot token
 # in an HTTPS URL; this action uses git http.extraheader so it never reaches
@@ -30,7 +30,9 @@ runs:
           echo '::error::GITHUB_BOT_TOKEN must be configured; the default GITHUB_TOKEN cannot push to component repositories.'
           exit 1
         fi
-        components_json=$(python .github/scripts/release_manifest_facts.py bundle-manifest-components --manifest "${DIST_MANIFEST}")
+        python3 -m pip install --quiet pyyaml
+        components_json=$(python3 .github/scripts/release_manifest_facts.py bundle-manifest-components \
+          --manifest "${DIST_MANIFEST}" --version "${VERSION}")
         untagged=()
         while IFS= read -r component; do
           name=$(jq -r '.name' <<< "${component}")

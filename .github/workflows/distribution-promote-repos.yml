@@ -61,8 +61,11 @@ jobs:
     steps:
       - id: image
         shell: bash
+        env:
+          DISTRIBUTION_REPO_TYPE: ${{ inputs.DISTRIBUTION_REPO_TYPE }}
         run: |
-          if [[ '${{ inputs.DISTRIBUTION_REPO_TYPE }}' == yum ]]; then
+          set -euo pipefail
+          if [[ "${DISTRIBUTION_REPO_TYPE}" == yum ]]; then
             echo 'image=public.ecr.aws/opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-build-v1' >> "${GITHUB_OUTPUT}"
           else
             echo 'image=public.ecr.aws/opensearchstaging/ci-runner:ci-runner-ubuntu2404-opensearch-build-v1' >> "${GITHUB_OUTPUT}"
@@ -92,8 +95,8 @@ jobs:
       SIGNER_CLIENT_EXTERNAL_ID: ${{ secrets.SIGNER_CLIENT_EXTERNAL_ID }}
       SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_UNSIGNED_BUCKET }}
       SIGNER_CLIENT_SIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_SIGNED_BUCKET }}
-      GITHUB_USER: ${{ secrets.GITHUB_USER }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_BOT_USER: ${{ secrets.GITHUB_BOT_USER }}
+      GITHUB_BOT_TOKEN: ${{ secrets.GITHUB_BOT_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       - name: Read input manifest facts
@@ -105,8 +108,10 @@ jobs:
           DISTRIBUTION_BUILD_NUMBER: ${{ inputs.DISTRIBUTION_BUILD_NUMBER }}
           INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
         run: |
-          python .github/scripts/release_manifest_facts.py input-manifest-facts \
-            --manifest "manifests/${{ inputs.INPUT_MANIFEST }}" >> "${GITHUB_OUTPUT}"
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          python3 .github/scripts/release_manifest_facts.py input-manifest-facts \
+            --manifest "manifests/${INPUT_MANIFEST}" >> "${GITHUB_OUTPUT}"
           printf '%s %s %s %s\n' \
             "${DISTRIBUTION_REPO_TYPE}" "${DISTRIBUTION_JOB_NAME}" \
             "${DISTRIBUTION_BUILD_NUMBER}" "${INPUT_MANIFEST}" \
@@ -136,5 +141,5 @@ jobs:
           signer-client-external-id: ${{ env.SIGNER_CLIENT_EXTERNAL_ID }}
           signer-client-unsigned-bucket: ${{ env.SIGNER_CLIENT_UNSIGNED_BUCKET }}
           signer-client-signed-bucket: ${{ env.SIGNER_CLIENT_SIGNED_BUCKET }}
-          github-user: ${{ env.GITHUB_USER }}
-          github-token: ${{ env.GITHUB_TOKEN }}
+          github-user: ${{ env.GITHUB_BOT_USER }}
+          github-token: ${{ env.GITHUB_BOT_TOKEN }}

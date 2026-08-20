@@ -47,6 +47,16 @@ def input_manifest_facts(path: str) -> None:
     )
 
 
+def build_manifest_core_plugins(path: str) -> None:
+    """Print the core-plugin sub-paths a build manifest advertises."""
+    manifest = load_manifest(path)
+    components = manifest["components"]
+    if not isinstance(components, list):
+        raise ValueError(f"Manifest {path} has no component list")
+    for plugin in components[0]["artifacts"]["core-plugins"]:
+        print(plugin)
+
+
 def component_tag_version(version: str, component: str) -> str:
     """Reproduce createReleaseTag.groovy's component tag rule."""
     if "-" in version:
@@ -58,11 +68,11 @@ def component_tag_version(version: str, component: str) -> str:
     return tag_version
 
 
-def bundle_manifest_components(path: str) -> None:
+def bundle_manifest_components(path: str, version: str = "") -> None:
     """Print release-tag component data as a JSON list."""
     manifest = load_manifest(path)
     build = manifest["build"]
-    version = str(build["version"])
+    version = version or str(build["version"])
     components: List[Dict[str, str]] = []
     for component in manifest["components"]:
         name = str(component["name"])
@@ -87,12 +97,18 @@ def main() -> None:
 
     bundle_parser = subparsers.add_parser("bundle-manifest-components")
     bundle_parser.add_argument("--manifest", required=True)
+    bundle_parser.add_argument("--version", default="")
+
+    core_plugins_parser = subparsers.add_parser("build-manifest-core-plugins")
+    core_plugins_parser.add_argument("--manifest", required=True)
 
     args = parser.parse_args()
     if args.command == "input-manifest-facts":
         input_manifest_facts(args.manifest)
+    elif args.command == "build-manifest-core-plugins":
+        build_manifest_core_plugins(args.manifest)
     else:
-        bundle_manifest_components(args.manifest)
+        bundle_manifest_components(args.manifest, args.version)
 
 
 if __name__ == "__main__":

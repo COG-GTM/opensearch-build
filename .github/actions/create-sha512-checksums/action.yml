@@ -1,5 +1,5 @@
 ---
-# Ports jenkins/vars/createSha512Checksums.groovy:9-63, used by
+# Ports opensearch-build-libraries vars/createSha512Checksums.groovy:9-63, used by
 # jenkins/release-workflows/promote-artifacts.jenkinsfile:71. See
 # docs/jenkins-to-actions-release-promotion.md. The Windows `bat` branch is
 # intentionally omitted because this action runs in a Linux container job.
@@ -22,13 +22,17 @@ runs:
         set -euo pipefail
         allowed_types=('.tar.gz' '.zip' '.rpm' '.deb')
         mapfile -d '' files < <(find "${ARTIFACT_PATH}" -type f -print0)
+        if [[ "${#files[@]}" -eq 0 ]]; then
+          echo "No files found under ${ARTIFACT_PATH}"
+          exit 0
+        fi
         for file in "${files[@]}"; do
           file="${file%$'\0'}"
           accepted=false
           for file_type in "${allowed_types[@]}"; do
             if [[ "${file}" == *"${file_type}" ]]; then
               hash=$(sha512sum "${file}" | awk '{print $1}')
-              printf '%s  %s' "${hash}" "$(basename "${file}")" > "${file}.sha512"
+              printf '%s  %s\n' "${hash}" "$(basename "${file}")" > "${file}.sha512"
               accepted=true
               break
             fi

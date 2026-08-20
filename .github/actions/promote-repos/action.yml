@@ -1,5 +1,5 @@
 ---
-# Ports jenkins/vars/promoteRepos.groovy:19-243 and
+# Ports opensearch-build-libraries vars/promoteRepos.groovy:19-243 and
 # jenkins/release-workflows/promote-repos.jenkinsfile:62-69. See
 # docs/jenkins-to-actions-release-promotion.md. The hosted runner/container is
 # smaller than Jenkins' m5.4xlarge Docker host.
@@ -79,6 +79,7 @@ runs:
         aws-region: us-east-1
 
     - name: Download and stage repository
+      id: stage
       shell: bash
       env:
         REPO_TYPE: ${{ inputs.distribution-repo-type }}
@@ -100,24 +101,22 @@ runs:
         repo_path="releases/bundle/${FILENAME}/${REPO_VERSION}/${REPO_TYPE}"
         artifact_path="${GITHUB_WORKSPACE}/artifacts/${repo_path}"
         mkdir -p "${artifact_path}"
-        aws s3 sync "s://${PROD_BUCKET}/${repo_path}/" "${artifact_path}/" --no-progress
+        aws s3 sync "s3://${PROD_BUCKET}/${repo_path}/" "${artifact_path}/" --no-progress
         cd "${artifact_path}"
         curl -fsSLO "${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${REVISION}/${BUILD_NUMBER}/linux/x64/${DIST_TYPE}/dist/${FILENAME}/${FILENAME}-${REVISION}-linux-x64.${DIST_TYPE}"
         curl -fsSLO "${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${REVISION}/${BUILD_NUMBER}/linux/arm64/${DIST_TYPE}/dist/${FILENAME}/${FILENAME}-${REVISION}-linux-arm64.${DIST_TYPE}"
         ls -l
-        echo "artifact-path=${artifact_path}" >> "${GITHUB_WORKSPACE}/repo-path.env"
-        echo "dist-type=${DIST_TYPE}" >> "${GITHUB_WORKSPACE}/repo-path.env"
+        echo "artifact-path=${artifact_path}" >> "${GITHUB_OUTPUT}"
+        echo "dist-type=${DIST_TYPE}" >> "${GITHUB_OUTPUT}"
 
     - name: Update yum metadata
       if: ${{ inputs.distribution-repo-type == 'yum' }}
       shell: bash
       env:
-        REPO_PATH_FILE: ${{ github.workspace }}/repo-path.env
+        ARTIFACT_PATH: ${{ steps.stage.outputs.artifact-path }}
       run: |
         set -euo pipefail
-        # shellcheck disable=SC1090
-        source "${REPO_PATH_FILE}"
-        cd "${artifact_path}"
+        cd "${ARTIFACT_PATH}"
         rm -vf repodata/repomd.xml.asc
         createrepo --update .
         # Rename .xml to .pom for signing. Please do not add .xml to signer filter:
@@ -128,7 +127,7 @@ runs:
       if: ${{ inputs.distribution-repo-type == 'yum' }}
       uses: ./.github/actions/sign-artifacts-client
       with:
-        artifact-path: ${{ github.workspace }}/artifacts/releases/bundle/${{ inputs.filename }}/${{ inputs.repo-version }}/yum/repodata/repomd.pom
+        artifact-path: ${{ steps.stage.outputs.artifact-path }}/repodata/repomd.pom
         sigtype: '.asc'
         platform: 'linux'
         email: ${{ inputs.signing-email }}
@@ -142,11 +141,15 @@ runs:
     - name: Restore yum metadata names
       if: ${{ inputs.distribution-repo-type == 'yum' }}
       shell: bash
+      env:
+        ARTIFACT_PATH: ${{ steps.stage.outputs.artifact-path }}
       run: |
         set -euo pipefail
-        cd "${GITHUB_WORKSPACE}/artifacts/releases/bundle/${{ inputs.filename }}/${{ inputs.repo-version }}/yum/repodata"
+        cd "${ARTIFACT_PATH}/repodata"
+        ls -l
         mv -v repomd.pom repomd.xml
         mv -v repomd.pom.asc repomd.xml.asc
+        ls -l
 
     - name: Check apt utility versions
       if: ${{ inputs.distribution-repo-type == 'apt' }}
@@ -176,7 +179,8 @@ runs:
       if: ${{ inputs.distribution-repo-type == 'apt' }}
       shell: bash
       env:
-        REPO_PATH: ${{ github.workspace }}/artifacts/releases/bundle/${{ inputs.filename }}/${{ inputs.repo-version }}/apt
+        REPO_PATH: ${{ steps.stage.outputs.artifact-path }}
+        FILENAME: ${{ inputs.filename }}
         JOB_NAME: ${{ inputs.distribution-job-name }}
         REPO_VERSION: ${{ inputs.repo-version }}
         SIGNING_EMAIL: ${{ inputs.signing-email }}
@@ -215,9 +219,10 @@ runs:
           -passphrase-file=passphrase "${JOB_NAME}-${REPO_VERSION}"
         gpg --batch --yes --delete-secret-keys "${key_id}"
         gpg --batch --yes --delete-keys "${key_id}"
-        rm -f passphrase
+        rm -v passphrase
         rm -rf "${REPO_PATH:?}"/*
         cp -rvp ~/.aptly/public/* "${REPO_PATH}/"
+        ls "${REPO_PATH}"
 
     - name: Assume artifact promotion role for upload
       uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6
@@ -230,11 +235,11 @@ runs:
     - name: Upload promoted repository
       shell: bash
       env:
-        REPO_PATH: ${{ github.workspace }}/artifacts/releases/bundle/${{ inputs.filename }}/${{ inputs.repo-version }}/${{ inputs.distribution-repo-type }}
+        REPO_PATH: ${{ steps.stage.outputs.artifact-path }}
         PROD_BUCKET: ${{ inputs.artifact-production-bucket-name }}
         FILENAME: ${{ inputs.filename }}
         REPO_VERSION: ${{ inputs.repo-version }}
         REPO_TYPE: ${{ inputs.distribution-repo-type }}
       run: |
         set -euo pipefail
-        aws s3 sync "${REPO_PATH}/" "s://${PROD_BUCKET}/releases/bundle/${FILENAME}/${REPO_VERSION}/${REPO_TYPE}/" --no-progress
+        aws s3 sync "${REPO_PATH}/" "s3://${PROD_BUCKET}/releases/bundle/${FILENAME}/${REPO_VERSION}/${REPO_TYPE}/" --no-progress
