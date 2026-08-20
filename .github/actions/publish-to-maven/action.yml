@@ -73,5 +73,4 @@ runs:
           echo '::error::SONATYPE_USERNAME, SONATYPE_PASSWORD, and STAGING_PROFILE_ID must be configured.'
           exit 1
         fi
-        export REPO_URL='https://aws.oss.sonatype.org/'
         "${RUNNER_TEMP}/stage-maven-release.sh" -d "${MAVEN_ARTIFACTS_PATH}" -a true
