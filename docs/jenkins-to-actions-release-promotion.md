@@ -216,6 +216,15 @@ outside the repository, and the tag job pushes to many component repositories.
 * `docker-copy` is out of scope and owned by another migration. This branch
   duplicates its needed copy behavior locally; once that workflow lands,
   `promote-container` should probably call its reusable workflow instead.
+* The LF `copyContainer` ECR login condition includes an ECR source even when
+  the destination is Docker Hub. Because `destination_registry_root` remains
+  `opensearchproject` unless the destination starts with `public.ecr.aws/`
+  (`lf-jenkins:vars/copyContainer.groovy:37-44`), that combination makes the
+  ECR credential login target Docker Hub and fail before `crane cp`
+  (`:60-62`). Whether it is reachable depends on the deployed
+  `DATA_PREPPER_STAGING_CONTAINER_REPOSITORY`; guarding the login on an ECR
+  destination would diverge from the shared library and is a release-owner
+  decision.
 * Warm Jenkins workspaces, `cleanWs`, and agent-specific capacity do not map to
   hosted runners. The Docker socket mount from
   `promote-docker-ecr-lf.jenkinsfile:27` is not reproduced; `crane` is used
@@ -248,10 +257,11 @@ outside the repository, and the tag job pushes to many component repositories.
 * The local Docker copy implementation intentionally duplicates the
   out-of-scope `docker-copy` job until the two migrations can be folded
   together.
-* `copy-container` logs in to the *destination* registry inside both ECR steps
-  even when only the *source* registry satisfied the condition. That is
-  `copyContainer.groovy:55-66` verbatim; the redundant login is harmless but is
-  not tidied here.
+* `copy-container` can attempt an ECR login with ECR credentials against the
+  Docker Hub destination when only the source registry is the LF ECR staging
+  namespace. The login then fails before `crane cp`; this is verbatim
+  `lf-jenkins:vars/copyContainer.groovy:37-44,60-62`, and reachability depends
+  on the deployed `DATA_PREPPER_STAGING_CONTAINER_REPOSITORY`.
 * The registry conditions in `copy-container` compare registries with exact
   equality while the `allTags` guard uses substring matching. The asymmetry is
   Jenkins': `copyContainer.groovy:44-66` versus `:73`.
