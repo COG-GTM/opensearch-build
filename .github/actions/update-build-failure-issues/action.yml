@@ -142,7 +142,9 @@ runs:
               gh issue edit "${RECENTLY_CLOSED}" --repo "${REPO_URL}" --body "${BODY}"
             else
               echo "Creating a new issue for ${COMPONENT}"
-              for LABEL in autocut "v${VERSION}"; do
+              # `gh issue create` fails outright on a label the repository does not have, which under `set -e` would
+              # abort the loop and leave every remaining component unprocessed, so `untriaged` is ensured too.
+              for LABEL in autocut "v${VERSION}" untriaged; do
                 if [ "$(gh label list --repo "${REPO_URL}" -S "${LABEL}" --json name --jq '.[0].name // empty' || true)" != "${LABEL}" ]; then
                   gh label create "${LABEL}" --repo "${REPO_URL}" || true
                 fi

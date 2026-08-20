@@ -248,8 +248,10 @@ Fidelity was preferred over cleanliness; these are ported as-is and flagged rath
 * **rpm/deb tests run as uid 1000.** `integ-test.jenkinsfile:152` switches the user for those distributions only;
   `run-integ-test-script` keeps the switch behind the same condition.
 * **The build matrix is a hand-written stage list.** Jenkins declares seven near-identical stages
-  (`distribution-build.jenkinsfile:239-957`); `BUILD_TARGETS` in `manifest_paths.py` mirrors that list, including
-  the fact that the arm64 rpm stage is pinned to the x64 agent label (`distribution-build.jenkinsfile:650`).
+  (`distribution-build.jenkinsfile:239-957`); `BUILD_TARGETS` in `manifest_paths.py` mirrors that list. Note that the
+  `AGENT_LINUX_X64` label on the arm64 rpm/deb *wrapper* stage (`distribution-build.jenkinsfile:650`) only placed the
+  coordinating stage; both nested stages that actually build run on `AGENT_LINUX_ARM64` (`:653-655`, `:690-694`), which
+  is why `RUNNERS['linux-arm64']` maps to an arm64 runner here.
 * **The rpm/deb build stage mixes images.** `distribution-build.jenkinsfile:337-339` builds the archive on the
   *tar* image but with the *package* docker args, and `:373-376` runs the assemble stage on the package image with no
   args at all. `manifest_paths.py` reproduces that pairing (`image`/`args` for the build job, `assemble-image`/empty

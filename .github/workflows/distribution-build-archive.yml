@@ -128,6 +128,15 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
+      - name: Resolve the manifest java major version
+        # inputs.java-version is the manifest form, e.g. openjdk-21; setup-java wants the bare major version.
+        if: inputs.platform == 'windows'
+        id: java
+        shell: bash
+        env:
+          JAVA_VERSION: ${{ inputs.java-version }}
+        run: echo "major=$(echo "${JAVA_VERSION}" | tr -dc '0-9')" >> "$GITHUB_OUTPUT"
+
       - name: Set up Python on the Windows runner
         # The composite actions call `python3 .github/scripts/...`; the Linux CI images provide it, the Windows runner
         # only exposes `python` unless a version is provisioned explicitly (repo convention: .github/workflows/python-tests.yml).
@@ -149,17 +158,36 @@ jobs:
           fi
           python3 --version
 
+      - name: Set up the Windows JDK
+        # distribution-build.jenkinsfile:901-904 selected the manifest java version with scoop, which only exists in the
+        # Windows CI-runner image. A GitHub-hosted runner provisions JDKs through the tool cache instead, so the version
+        # is installed here and the scoop path below still runs on a self-hosted runner using that image.
+        if: inputs.platform == 'windows'
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5
+        with:
+          distribution: 'temurin'
+          java-version: ${{ steps.java.outputs.major || '21' }}
+
       - name: Switch the Windows JDK
-        # distribution-build.jenkinsfile:901-904, kept verbatim: the Windows image ships several JDKs and the build
-        # needs the one the manifest asks for.
+        # distribution-build.jenkinsfile:901-904, kept for a self-hosted runner running the Windows CI-runner image;
+        # scoop is absent on a GitHub-hosted runner, where setup-java above has already pinned JAVA_HOME.
         if: inputs.platform == 'windows'
         shell: bash
         env:
           JAVA_VERSION: ${{ inputs.java-version }}
         run: |
           set -euo pipefail
+          if ! command -v scoop > /dev/null 2>&1; then
+            echo "::notice::scoop is not installed, keeping the JAVA_HOME provisioned by setup-java (${JAVA_HOME:-unset})."
+            exit 0
+          fi
           JAVA_VERSION_NUMBER=$(echo "${JAVA_VERSION}" | tr -dc '0-9')
-          scoop reset "$(scoop list jdk | cut -d ' ' -f1 | grep "${JAVA_VERSION_NUMBER}" | head -1)"
+          SCOOP_JDK=$(scoop list jdk | cut -d ' ' -f1 | grep "${JAVA_VERSION_NUMBER}" | head -1)
+          if [ -z "${SCOOP_JDK}" ]; then
+            echo "::warning::scoop has no jdk matching ${JAVA_VERSION_NUMBER}, keeping the current JAVA_HOME."
+            exit 0
+          fi
+          scoop reset "${SCOOP_JDK}"
 
       - name: Build, assemble and upload
         id: build

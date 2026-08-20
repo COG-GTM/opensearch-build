@@ -128,6 +128,13 @@ runs:
         PACKAGE_NAME: ${{ steps.info.outputs.package-name }}
       run: |
         set -euo pipefail
+        # uploadArtifacts.groovy:60-64 interpolated getMinArtifact() unconditionally; it is empty when the build
+        # manifest has no core component (a COMPONENT_NAME dispatch), which makes the copy below a directory copy that
+        # the CLI rejects with a confusing message after the artifacts have already been uploaded.
+        if [ -z "${MIN_ARTIFACT}" ]; then
+          echo "::error::The build manifest has no ${DISTRIBUTION} core artifact, so there is nothing to promote to the release-candidates prefix. Dispatch a full build, or leave the production bucket secrets unset for component builds."
+          exit 1
+        fi
         echo "Uploading to s3://${BUCKET}/release-candidates"
         aws s3 cp --quiet "${DISTRIBUTION}/builds/${FILENAME}/${MIN_ARTIFACT}" \
           "s3://${BUCKET}/release-candidates/core/${FILENAME}/${VERSION}/"
