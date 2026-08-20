@@ -85,13 +85,18 @@ jobs:
           tag: ${{ inputs.TAG }}
 
       - name: Report prepared release
+        env:
+          PRODUCT: ${{ inputs.PRODUCT }}
+          TAG: ${{ inputs.TAG }}
+          VERSION: ${{ steps.patch.outputs.version }}
+          BUILD_NUMBER: ${{ steps.patch.outputs.build-number }}
         run: |
           {
             echo "### Docker re-release"
-            echo "- Product: ${{ inputs.PRODUCT }}"
-            echo "- Tag: ${{ inputs.TAG }}"
-            echo "- Version: ${{ steps.patch.outputs.version }}"
-            echo "- Build number: ${{ steps.patch.outputs.build-number }}"
+            echo "- Product: ${PRODUCT}"
+            echo "- Tag: ${TAG}"
+            echo "- Version: ${VERSION}"
+            echo "- Build number: ${BUILD_NUMBER}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
   docker-build:

@@ -340,3 +340,7 @@ jobs:
           docker-args: ${{ matrix.distribution == 'docker' && needs.verify-parameters.outputs.optional-args || '' }}
           skip-core-plugins: ${{ (matrix.distribution == 'docker' || needs.verify-parameters.outputs.version != '') && needs.verify-parameters.outputs.skip-core-plugins || '' }}
           docker-exec-container: ${{ matrix.systemd_image != '' && 'validate' || '' }}
+
+      - name: Cleanup systemd validation container
+        if: ${{ always() && matrix.systemd_image != '' }}
+        run: docker rm -f validate || true

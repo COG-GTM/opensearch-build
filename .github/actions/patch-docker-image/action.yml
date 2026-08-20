@@ -86,7 +86,7 @@ runs:
             build = yaml.safe_load(stream)["build"]
         filename = build["name"].lower().replace(" ", "-")
         qualifier = build.get("qualifier")
-        qualifier = f"-{qualifier}" if qualifier not in (None, "null") else ""
+        qualifier = f"-{qualifier}" if qualifier not in (None, "", "null") else ""
         print(filename)
         print(qualifier)
         print(build["version"])

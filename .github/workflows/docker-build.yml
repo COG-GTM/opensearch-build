@@ -122,7 +122,6 @@ jobs:
           echo 'The docker-build workflow will only push docker images to staging, please use docker-copy to move the image to other repositories'
           set +x
           printf '%s' "${DOCKERHUB_STAGING_PASSWORD}" | docker login --username "${DOCKERHUB_STAGING_USERNAME}" --password-stdin
-          set -x
           eval "${DOCKER_BUILD_SCRIPT_WITH_COMMANDS}"
 
       - name: Logout and prune Docker images
