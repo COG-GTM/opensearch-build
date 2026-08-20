@@ -74,11 +74,11 @@ on:
       DOCKERHUB_PRODUCTION_PASSWORD:
         required: true
       AWS_ACCOUNT_ARTIFACT:
-        required: true
+        required: false
       ARTIFACT_PROMOTION_ROLE_NAME:
-        required: true
+        required: false
       ECR_STAGING_ROLE_ARN:
-        required: true
+        required: false
 
 permissions: {}
 
@@ -149,6 +149,6 @@ jobs:
       - name: Logout and prune Docker images
         if: always()
         run: |
-          docker logout || true
-          docker logout public.ecr.aws || true
-          docker image prune -f --all || true
+          docker logout
+          docker logout public.ecr.aws
+          docker image prune -f --all

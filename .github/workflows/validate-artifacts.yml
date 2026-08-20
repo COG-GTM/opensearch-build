@@ -309,6 +309,19 @@ jobs:
             -v "${GITHUB_WORKSPACE}:/work" -w /work \
             "${SYSTEMD_IMAGE}" /usr/lib/systemd/systemd
 
+      - name: Wait for systemd in validation container
+        if: ${{ matrix.systemd_image != '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$(docker inspect --format '{{.State.Running}}' validate)" != 'true' ]]; then
+            echo "::error::systemd validation container failed to start"
+            docker logs validate || true
+            exit 1
+          fi
+          # A degraded state is acceptable: some units may fail inside a container,
+          # but systemd is up as PID 1 and systemctl is usable.
+          docker exec validate systemctl is-system-running --wait || true
+
       - name: Validate artifacts
         uses: ./.github/actions/validate-artifacts
         # Match validate-artifacts-lf.jenkinsfile:220-232 (docker), :251-263 (version), and :264-268 (file path).
