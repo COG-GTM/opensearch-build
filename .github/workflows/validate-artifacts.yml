@@ -274,17 +274,18 @@ jobs:
 
       - name: Validate artifacts
         uses: ./.github/actions/validate-artifacts
+        # Match validate-artifacts-lf.jenkinsfile:220-232 (docker), :251-263 (version), and :264-268 (file path).
         with:
-          version: ${{ needs.verify-parameters.outputs.version }}
-          file-path: ${{ needs.verify-parameters.outputs.file-path }}
-          distribution: ${{ matrix.distribution }}
-          platform: ${{ matrix.platform }}
-          arch: ${{ matrix.architecture }}
-          projects: ${{ needs.verify-parameters.outputs.projects }}
-          docker-source: ${{ needs.verify-parameters.outputs.docker-source }}
-          os-build-number: ${{ needs.verify-parameters.outputs.os-build-number }}
-          osd-build-number: ${{ needs.verify-parameters.outputs.osd-build-number }}
-          artifact-type: ${{ needs.verify-parameters.outputs.artifact-type }}
-          allow-http: ${{ needs.verify-parameters.outputs.allow-http }}
-          docker-args: ${{ needs.verify-parameters.outputs.optional-args }}
-          skip-core-plugins: ${{ needs.verify-parameters.outputs.skip-core-plugins }}
+          version: ${{ matrix.distribution == 'docker' && needs.verify-parameters.outputs.version || (matrix.distribution != 'docker' && needs.verify-parameters.outputs.version != '' && needs.verify-parameters.outputs.version) || '' }}
+          file-path: ${{ matrix.distribution != 'docker' && needs.verify-parameters.outputs.version == '' && needs.verify-parameters.outputs.file-path || '' }}
+          distribution: ${{ matrix.distribution == 'docker' && matrix.distribution || (matrix.distribution != 'docker' && needs.verify-parameters.outputs.version != '' && matrix.distribution) || '' }}
+          platform: ${{ matrix.distribution != 'docker' && needs.verify-parameters.outputs.version != '' && matrix.platform || '' }}
+          arch: ${{ (matrix.distribution == 'docker' || needs.verify-parameters.outputs.version != '') && matrix.architecture || '' }}
+          projects: ${{ (matrix.distribution == 'docker' || needs.verify-parameters.outputs.version != '') && needs.verify-parameters.outputs.projects || '' }}
+          docker-source: ${{ matrix.distribution == 'docker' && needs.verify-parameters.outputs.docker-source || '' }}
+          os-build-number: ${{ (matrix.distribution == 'docker' || needs.verify-parameters.outputs.version != '') && needs.verify-parameters.outputs.os-build-number || '' }}
+          osd-build-number: ${{ (matrix.distribution == 'docker' || needs.verify-parameters.outputs.version != '') && needs.verify-parameters.outputs.osd-build-number || '' }}
+          artifact-type: ${{ matrix.distribution != 'docker' && needs.verify-parameters.outputs.version != '' && needs.verify-parameters.outputs.artifact-type || '' }}
+          allow-http: ${{ matrix.distribution != 'docker' && needs.verify-parameters.outputs.allow-http || '' }}
+          docker-args: ${{ matrix.distribution == 'docker' && needs.verify-parameters.outputs.optional-args || '' }}
+          skip-core-plugins: ${{ (matrix.distribution == 'docker' || needs.verify-parameters.outputs.version != '') && needs.verify-parameters.outputs.skip-core-plugins || '' }}
