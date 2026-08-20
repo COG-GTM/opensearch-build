@@ -36,7 +36,9 @@ runs:
         set -e
         touch "${IMAGE_RESULT_FILE}.txt" "${IMAGE_RESULT_FILE}.json"
         trivy clean --all
-        docker rmi "$(docker images -f "dangling=true" -q)" || echo
+        # Jenkins word-split the unquoted command substitution into one argument per image id.
+        # shellcheck disable=SC2046
+        docker rmi $(docker images -f "dangling=true" -q) || echo
         docker rmi "${IMAGE_FULL_NAME}" || echo
         trivy image --format table --table-mode detailed --output "${IMAGE_RESULT_FILE}.txt" "${IMAGE_FULL_NAME}"
         trivy image --format json --output "${IMAGE_RESULT_FILE}.json" "${IMAGE_FULL_NAME}"

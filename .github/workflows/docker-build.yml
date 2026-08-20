@@ -83,6 +83,18 @@ jobs:
             exit 1
           fi
 
+      # workflow_call inputs cannot be `choice`, so preserve Jenkins' fail-fast on an unknown
+      # agent/OS value here instead of silently selecting the Linux runner without the container.
+      - name: Validate operating system
+        env:
+          DOCKER_BUILD_OS: ${{ inputs.DOCKER_BUILD_OS }}
+        run: |
+          set -euo pipefail
+          if [[ "${DOCKER_BUILD_OS}" != 'linux' && "${DOCKER_BUILD_OS}" != 'windows' ]]; then
+            echo "::error::DOCKER_BUILD_OS must be linux or windows, got: ${DOCKER_BUILD_OS}"
+            exit 1
+          fi
+
       - name: Strip GitHub URL prefix
         id: repository
         env:
