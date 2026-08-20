@@ -2,8 +2,8 @@
 # Ports opensearch-build-libraries vars/createReleaseTag.groovy:9-70 and
 # jenkins/release-workflows/release-tag.jenkinsfile:42-77. See
 # docs/jenkins-to-actions-release-promotion.md. Jenkins embedded the bot token
-# in an HTTPS URL; this action uses git http.extraheader so it never reaches
-# .git/config or command output.
+# in an HTTPS URL; this action uses environment-based git http.extraheader
+# configuration so it never reaches .git/config or command arguments.
 name: 'Create component release tags'
 description: 'Create and push release tags for every component in a bundle manifest.'
 
@@ -46,15 +46,23 @@ runs:
           echo "Tagging ${name} at ${commit_id} ..."
           workdir="${RUNNER_TEMP}/release-tag-${name//[^A-Za-z0-9_.-]/-}"
           rm -rf "${workdir}"
-          git -c "http.extraheader=Authorization: Bearer ${RELEASE_BOT_TOKEN}" clone --quiet "${repo}" "${workdir}"
+          GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0=http.extraheader \
+            GIT_CONFIG_VALUE_0="Authorization: Bearer ${RELEASE_BOT_TOKEN}" \
+            git clone --quiet "${repo}" "${workdir}"
           git -C "${workdir}" fetch --quiet origin "${commit_id}"
           git -C "${workdir}" checkout --quiet --detach "${commit_id}"
-          tag_id=$(git -c "http.extraheader=Authorization: Bearer ${RELEASE_BOT_TOKEN}" ls-remote --tags "${repo}" "${tag_version}" | awk 'NR==1{print $1}')
+          tag_id=$(GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0=http.extraheader \
+            GIT_CONFIG_VALUE_0="Authorization: Bearer ${RELEASE_BOT_TOKEN}" \
+            git ls-remote --tags "${repo}" "${tag_version}" | awk 'NR==1{print $1}')
           if [[ -z "${tag_id}" ]]; then
             echo "Creating ${tag_version} tag for ${name}"
             git -C "${workdir}" tag "${tag_version}"
-            if ! git -C "${workdir}" -c "http.extraheader=Authorization: Bearer ${RELEASE_BOT_TOKEN}" \
-              push origin "${tag_version}" >/dev/null; then
+            if ! GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0=http.extraheader \
+              GIT_CONFIG_VALUE_0="Authorization: Bearer ${RELEASE_BOT_TOKEN}" \
+              git -C "${workdir}" push origin "${tag_version}" >/dev/null; then
               untagged+=("${name}")
             fi
           elif [[ "${tag_id}" == "${commit_id}" ]]; then

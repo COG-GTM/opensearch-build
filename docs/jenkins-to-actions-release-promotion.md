@@ -262,6 +262,13 @@ outside the repository, and the tag job pushes to many component repositories.
   namespace. The login then fails before `crane cp`; this is verbatim
   `lf-jenkins:vars/copyContainer.groovy:37-44,60-62`, and reachability depends
   on the deployed `DATA_PREPPER_STAGING_CONTAINER_REPOSITORY`.
+* `copy-container` logs in to the ECR registry root
+  `public.ecr.aws/opensearchorg` but logs out with `docker logout public.ecr.aws`,
+  so the root credential remains in Docker's config for the rest of the job.
+  This is verbatim `lf-jenkins:vars/copyContainer.groovy:37-44,60-62,85`;
+  `promote-container` invokes the copy action twice in one job, so the stale
+  entry persists across both invocations. Aligning logout with the login string
+  would diverge from the shared library.
 * The registry conditions in `copy-container` compare registries with exact
   equality while the `allTags` guard uses substring matching. The asymmetry is
   Jenkins': `copyContainer.groovy:44-66` versus `:73`.
