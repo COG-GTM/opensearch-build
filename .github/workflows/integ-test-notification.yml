@@ -1,0 +1,147 @@
+---
+name: integ-test-notification
+
+# Port of jenkins/integ-test-notification.jenkinsfile (job name integ-test-notification).
+# The Jenkins job stays authoritative until a human cuts over, so this workflow is manual-only.
+#
+# At cutover the migrated integ-test workflow calls this one as a reusable workflow
+# (jobs.<id>.uses: ./.github/workflows/integ-test-notification.yml), which is the mapping for
+# Jenkins' downstream `build job:` invocation. Until integ-test itself is migrated there is no
+# in-repo caller, so the trigger below stays disabled:
+#
+# on:
+#   workflow_run:
+#     workflows: [integ-test]  # enable at cutover; Jenkins job integ-test-notification still runs this
+#     types: [completed]
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_manifest:
+        description: 'Input manifest under the manifests folder, e.g. 2.0.0/opensearch-2.0.0.yml.'
+        required: true
+        type: string
+      distribution_number:
+        description: 'Distribution number of the OpenSearch/OpenSearch-Dashboards build used to run the integration tests, e.g. 10345.'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      input_manifest:
+        description: 'Input manifest under the manifests folder, e.g. 2.0.0/opensearch-2.0.0.yml.'
+        required: true
+        type: string
+      distribution_number:
+        description: 'Distribution number of the OpenSearch/OpenSearch-Dashboards build used to run the integration tests, e.g. 10345.'
+        required: true
+        type: string
+    secrets:
+      METRICS_HOST_URL:
+        description: 'Endpoint of the OpenSearch metrics cluster holding the integration test results.'
+        required: false
+      METRICS_CLUSTER_AWS_ROLE_ARN:
+        description: 'IAM role assumed via OIDC to sign metrics cluster requests, replacing the Jenkins OpenSearchJenkinsAccessRole assumption.'
+        required: false
+      OPENSEARCH_CI_BOT_TOKEN:
+        description: 'GitHub token used to create, update and close the AUTOCUT issues on component repositories.'
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  update-integ-test-failure-issues:
+    # Jenkins runs this on Jenkins-Agent-AL2023-X64-M54xlarge-Docker-Host inside the ci-runner
+    # container. The work is GitHub and OpenSearch API calls only, so a hosted runner is enough;
+    # swap in a self-hosted label here if decision 4a of the migration doc lands that way.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PYTHON_VERSION: 3.9
+      REPORT_DIR: integ-test-notification-report
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Verify input manifest exists
+        env:
+          INPUT_MANIFEST: ${{ inputs.input_manifest }}
+        run: |
+          if [ -z "$INPUT_MANIFEST" ] || [ ! -f "manifests/$INPUT_MANIFEST" ]; then
+            echo "Failed to start the workflow. Input manifest was not provided or not found in manifests/$INPUT_MANIFEST."
+            exit 1
+          fi
+
+      - name: Write build description
+        env:
+          INPUT_MANIFEST: ${{ inputs.input_manifest }}
+          DISTRIBUTION_NUMBER: ${{ inputs.distribution_number }}
+        run: |
+          {
+            echo "### integ-test-notification"
+            echo ""
+            echo "Input manifest: \`$INPUT_MANIFEST\`"
+            echo "Distribution build number: \`$DISTRIBUTION_NUMBER\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # TODO(migration): the Jenkins job reads the integration test results from the OpenSearch
+      # metrics cluster through the shared library (ComponentIntegTestStatus), authenticated with
+      # 1Password-provided values and an assumed OpenSearchJenkinsAccessRole. Those inputs have no
+      # in-repo equivalent, so fail fast rather than reporting success without touching any issue.
+      - name: Verify required secrets are provisioned
+        env:
+          METRICS_HOST_URL: ${{ secrets.METRICS_HOST_URL }}
+          METRICS_CLUSTER_AWS_ROLE_ARN: ${{ secrets.METRICS_CLUSTER_AWS_ROLE_ARN }}
+          OPENSEARCH_CI_BOT_TOKEN: ${{ secrets.OPENSEARCH_CI_BOT_TOKEN }}
+        run: |
+          missing=''
+          [ -z "$METRICS_HOST_URL" ] && missing="$missing METRICS_HOST_URL"
+          [ -z "$METRICS_CLUSTER_AWS_ROLE_ARN" ] && missing="$missing METRICS_CLUSTER_AWS_ROLE_ARN"
+          [ -z "$OPENSEARCH_CI_BOT_TOKEN" ] && missing="$missing OPENSEARCH_CI_BOT_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "Missing required secrets:$missing"
+            echo "integ-test-notification cannot read the metrics cluster or write AUTOCUT issues without them."
+            exit 1
+          fi
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Pipenv and Dependencies
+        run: |
+          python -m pip install --upgrade pipenv wheel
+          pipenv install --deploy
+
+      - name: Configure AWS credentials for the metrics cluster
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6
+        with:
+          role-to-assume: ${{ secrets.METRICS_CLUSTER_AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 900
+          role-session-name: integ-test-notification
+
+      - name: Collect integ test failures
+        env:
+          METRICS_HOST_URL: ${{ secrets.METRICS_HOST_URL }}
+        run: |
+          pipenv run python .github/scripts/integ-test-notification/fetch_integ_test_failures.py \
+            --input-manifest "manifests/${{ inputs.input_manifest }}" \
+            --distribution-number "${{ inputs.distribution_number }}" \
+            --output-dir "$REPORT_DIR"
+
+      - name: Update integ test failure issues
+        env:
+          GH_TOKEN: ${{ secrets.OPENSEARCH_CI_BOT_TOKEN }}
+        run: |
+          bash .github/scripts/integ-test-notification/update_issues.sh "$REPORT_DIR/report.json"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: integ-test-notification-report
+          path: ${{ env.REPORT_DIR }}
+          if-no-files-found: ignore
+          retention-days: 30
