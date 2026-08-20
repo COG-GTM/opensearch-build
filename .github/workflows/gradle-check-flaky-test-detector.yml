@@ -73,7 +73,7 @@ jobs:
           set -euo pipefail
           if [ -n "$FLAKY_TESTS_JSON" ]; then
             echo "$FLAKY_TESTS_JSON" > flaky-tests.json
-            python -c "import json,sys; json.load(open('flaky-tests.json'))"
+            python -c "import json,sys; d=json.load(open('flaky-tests.json')); sys.exit(0) if isinstance(d, list) else sys.exit('flaky_tests_json must be a JSON array of flaky test objects')"
             echo "Using flaky_tests_json input (${TIME_FRAME} time frame is ignored in this mode)."
             exit 0
           fi
