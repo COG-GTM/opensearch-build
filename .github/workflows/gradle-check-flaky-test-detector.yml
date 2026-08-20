@@ -73,7 +73,7 @@ jobs:
           set -euo pipefail
           if [ -n "$FLAKY_TESTS_JSON" ]; then
             echo "$FLAKY_TESTS_JSON" > flaky-tests.json
-            python -c "import json,sys; d=json.load(open('flaky-tests.json')); sys.exit(0) if isinstance(d, list) else sys.exit('flaky_tests_json must be a JSON array of flaky test objects')"
+            python3 -c "import json,sys; d=json.load(open('flaky-tests.json')); sys.exit(0) if isinstance(d, list) else sys.exit('flaky_tests_json must be a JSON array of flaky test objects')"
             echo "Using flaky_tests_json input (${TIME_FRAME} time frame is ignored in this mode)."
             exit 0
           fi
@@ -103,6 +103,11 @@ jobs:
               const name = test.test_name || test.name;
               if (!name) {
                 core.setFailed(`Entry without a test_name: ${JSON.stringify(test)}`);
+                return;
+              }
+              // A double quote would break the quoted-title search query below.
+              if (name.includes('"')) {
+                core.setFailed(`test_name must not contain a double quote: ${name}`);
                 return;
               }
               const title = `[AUTOCUT] Gradle Check Flaky Test Report for ${name}`;
