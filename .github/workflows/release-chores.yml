@@ -106,7 +106,14 @@ jobs:
             exit 1
           fi
 
-          if ! grep -qw -- "$ACTION" <<< "$ALLOWED"; then
+          MATCHED=0
+          for allowed_action in $ALLOWED; do
+            if [[ "$ACTION" == "$allowed_action" ]]; then
+              MATCHED=1
+              break
+            fi
+          done
+          if [[ "$MATCHED" -ne 1 ]]; then
             echo "Invalid action '$ACTION' for chore '$CHORE'. Allowed actions: $ALLOWED"
             exit 1
           fi
@@ -116,9 +123,14 @@ jobs:
             exit 1
           fi
 
-          if [[ -n "$GIT_LOG_DATE" ]] && ! date -d "$GIT_LOG_DATE" +%Y-%m-%d > /dev/null 2>&1; then
-            echo "git_log_date '$GIT_LOG_DATE' is not a valid yyyy-mm-dd date"
-            exit 1
+          # Matches datetime.strptime(s, "%Y-%m-%d") in src/release_notes_workflow/release_notes_check_args.py,
+          # which is stricter than `date -d`.
+          if [[ -n "$GIT_LOG_DATE" ]]; then
+            if ! [[ "$GIT_LOG_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || \
+               [[ "$(date -d "$GIT_LOG_DATE" +%Y-%m-%d 2> /dev/null)" != "$GIT_LOG_DATE" ]]; then
+              echo "git_log_date '$GIT_LOG_DATE' is not a valid yyyy-mm-dd date"
+              exit 1
+            fi
           fi
 
           for manifest in "manifests/${RELEASE_VERSION}/opensearch-${RELEASE_VERSION}.yml" \
