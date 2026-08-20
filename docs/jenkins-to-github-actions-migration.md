@@ -249,3 +249,80 @@ The ordering is by blast radius: jobs whose failure delays nobody first, jobs wh
 **Phase 6 — release workflows.** `promote-artifacts`, `promote-repos`, `promote-docker-ecr`, `publish-to-maven`, `release-branch`, `release-tag`, `release-promotion`. Last, behind environment protection rules, and ideally rehearsed against a staging account for a full release candidate before a real release depends on them.
 
 **Phase 7 — decommission.** Retire `jenkins/legacy/**`, the Jenkins controller, and `packer-build` if the runner strategy no longer needs AMIs. Keep the Jenkinsfiles in git history; the pipelines encode a decade of accumulated release behaviour that is worth being able to read.
+
+## 7. Appendix: per-pipeline blocker map
+
+Every pipeline in `jenkins/**`, with the open decisions from section 4 that must be answered before it can be migrated. Blockers are derived from what each file actually uses: agent labels, `op://` secret references, shared-library calls, and construction of artifact URLs from `JOB_NAME`/`BUILD_NUMBER`.
+
+Legend: **(a)** runner strategy · **(b)** secret management · **(c)** shared-library replacement · **(e)** artifact identity / S3 layout. Decision (d), cutover style, applies to every row and is not repeated. "(a)" is marked only where the job needs hardware that GitHub-hosted runners cannot supply (size, ARM64, Windows, macOS, or a >6h runtime); jobs that are just scripts against the GitHub or AWS API are marked unblocked on (a).
+
+### Ready to migrate once (d) is decided — no other blocker
+
+| Pipeline | Notes |
+| --- | --- |
+| `release-workflows/release-schedule.jenkinsfile` | cron + scrape of opensearch.org; pure `schedule` workflow |
+| `release-workflows/release-chores.jenkinsfile` | GitHub-API chores, no `op://` refs, no library calls |
+| `gradle/gradle-check-flaky-test-issue-creation.jenkinsfile` | issue creation from gradle-check results |
+| `integ-test-notification.jenkinsfile` | `if: failure()` job + `actions/github-script` |
+| `legacy/rpm-validation.jenkinsfile` | no secrets, no library; audit whether it is still used at all |
+
+### Blocked on one decision
+
+| Pipeline | Blocked on | Why |
+| --- | --- | --- |
+| `release-workflows/release-tag.jenkinsfile` | (c) | `createReleaseTag` |
+| `release-workflows/release-notes-check-lf.jenkinsfile` | (b) | 2 `op://` refs (GitHub bot) |
+| `release-workflows/release-manifest-commit-lock-lf.jenkinsfile` | (b) | 2 `op://` refs |
+| `release-workflows/promote-docker-ecr-lf.jenkinsfile` | (b) | ECR/DockerHub credentials via OIDC or secrets |
+| `release-workflows/publish-to-maven-lf.jenkinsfile` | (c) | `publishToMaven`; signing path lives in the library |
+| `docker/docker-copy-lf.jenkinsfile` | (b) | registry credentials |
+| `docker/docker-scan-lf.jenkinsfile` | (b) | registry credentials |
+| `docker/docker-re-release-lf.jenkinsfile` | (b) | registry credentials, cron-triggered |
+| `packer/packer-build-lf.jenkinsfile` | (b) | 5 `op://` refs (VPC/subnet/SG/region); retire entirely if (a) lands on ARC |
+| `legacy/vulnerability-scan/whitesource-scan.jenkinsfile` | (b) | Mend token |
+| `legacy/maven-sign-release.jenkinsfile` | (c) | `signArtifacts` |
+| `legacy/maven-publish-1.3.x.jenkinsfile` | (c) | `detectDockerAgent`; likely retire (1.3.x line) |
+| `release-workflows/release-notes-generate.jenkinsfile` | (e) | writes release notes artifacts keyed by build |
+| `release-workflows/promote-repos.jenkinsfile` | (e) | yum/apt repo paths derived from the artifact layout |
+
+### Blocked on two or more decisions
+
+| Pipeline | Blocked on | Why |
+| --- | --- | --- |
+| `opensearch/distribution-build.jenkinsfile` | (a) (b) (c) (e) | 3 agent classes incl. Windows; 4 `op://`; `buildArchive`, `buildAssembleUpload`, `archiveAssembleUpload`, `buildDockerImage`, `detectDockerAgent`; 29 artifact-URL constructions |
+| `opensearch-dashboards/distribution-build.jenkinsfile` | (a) (b) (c) (e) | same shape, 30 artifact-URL constructions, plus cross-job URL built from `JOB_NAME_OPENSEARCH` |
+| `opensearch/feature-build.jenkinsfile` | (a) (c) (e) | x64 + arm64; `buildAssembleUpload`, `detectDockerAgent` |
+| `opensearch/publish-min-snapshots.jenkinsfile` | (a) (c) | 5 agent classes including **macOS x64 and ARM64**, the only macOS dependency in `jenkins/**` |
+| `opensearch/integ-test.jenkinsfile` | (a) (b) (c) (e) | 12h timeout exceeds the hosted-runner cap; `downloadBuildManifest`, `uploadTestResults` |
+| `opensearch-dashboards/integ-test.jenkinsfile` | (a) (b) (c) (e) | same |
+| `opensearch/bwc-test.jenkinsfile` | (a) (c) (e) | `downloadBuildManifest`, `uploadTestResults` |
+| `opensearch-dashboards/bwc-test.jenkinsfile` | (a) (c) (e) | same |
+| `opensearch/smoke-test-lf.jenkinsfile` | (a) (c) (e) | 3 agent classes incl. Windows |
+| `legacy/gradle/gradle-check.jenkinsfile` | (a) (b) (c) | m5.8xlarge single-host, 45-way throttle; `runGradleCheck`, `publishGradleCheckTestResults`, `abortStaleJenkinsJobs` |
+| `check-for-build.jenkinsfile` | (a) (c) (e) | `getManifestSHA`, `buildUploadManifestSHA`, `detectDockerAgent`; also the `skipIfLocked` gap in section 5 |
+| `validate-artifacts/validate-artifacts-lf.jenkinsfile` | (a) (e) | 5 agent classes incl. Windows and single-host systemd runners; 9 artifact-URL constructions |
+| `release-workflows/release-promotion.jenkinsfile` | (a) (b) (e) | 3 `op://` incl. the promotion IAM role; 35 artifact-URL constructions; ~23 parallel stages |
+| `release-workflows/promote-artifacts.jenkinsfile` | (b) (c) (e) | `promoteArtifacts` against the production account |
+| `release-workflows/release-branch.jenkinsfile` | (b) (c) | GitHub bot credentials; `downloadBuildManifest` |
+| `docker/docker-build-lf.jenkinsfile` | (a) (b) | dedicated docker-builder agents (linux + Windows), staging DockerHub credentials |
+| `opensearch/benchmark-test.jenkinsfile` | (a) (b) (e) | benchmark-test agent class; `downloadBuildManifest` |
+| `opensearch/benchmark-test-datafusion.jenkinsfile` | (a) (b) (e) | same |
+| `opensearch/benchmark-test-vectorsearch.jenkinsfile` | (a) (b) (e) | dedicated vector-benchmark agent class |
+| `opensearch/benchmark-test-endpoint.jenkinsfile` | (a) | runs against an existing cluster endpoint |
+| `opensearch/benchmark-pull-request.jenkinsfile` | (a) (b) | webhook-triggered, 3 `op://`, 20-way throttle |
+| `opensearch/benchmark-compare.jenkinsfile` | (a) (b) | 2 `op://`, 20-way throttle |
+| `legacy/perf-test.jenkinsfile` | (a) (c) (e) | superseded by `benchmark-*`; confirm before migrating |
+| `legacy/cross-cluster-replication/perf-test.jenkinsfile` | (a) (c) (e) | same |
+| `legacy/data-prepper/release-data-prepper-all-artifacts.jenkinsfile` | (b) (c) (e) | `signArtifacts`, direct `s3Upload` |
+| `legacy/sign-artifacts/sign-standalone-artifacts.jenkinsfile` | (b) (c) (e) | `signArtifacts` |
+
+### Not to be migrated
+
+`jenkins/legacy/build.ci.backups/**` (9 files: docker ×4, smoke-test, packer-build, promote-docker-ecr, publish-to-maven, release-manifest-commit-lock, release-notes-check, validate-artifacts) are backups of pipelines that already exist in their current form elsewhere in `jenkins/`. They should be confirmed dead and deleted rather than migrated.
+
+### Where the decisions bite hardest
+
+- **(a) runner strategy** blocks 26 pipelines, including everything that produces a release artifact. It is the critical path.
+- **(c) shared library** blocks 22 pipelines and is the only blocker that cannot be resolved inside this repository.
+- **(e) artifact identity** blocks 19 pipelines and, unlike the others, is externally visible: it fixes the `ci.opensearch.org` URL layout.
+- **(b) secrets** blocks 20 pipelines but is mostly mechanical once the pattern is chosen; the exception is the production promotion role.
