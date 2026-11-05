@@ -133,7 +133,10 @@ class TestResolve(unittest.TestCase):
         row = resolve("benchmark-pull-request", "payload", {"DISTRIBUTION_URL": "https://a", "DISTRIBUTION_VERSION": "1",
                                                             "WORKLOAD_PARAMS": '{"number_of_shards": 1, "k": "v"}'})["matrix"]["include"][0]
         self.assertEqual(json.loads(row["params"])["WORKLOAD_PARAMS"], '{"number_of_shards":1,"k":"v"}')
-        for bad in ["{bad", '{"k": "a b"}']:
+        row = resolve("benchmark-pull-request", "payload", {"DISTRIBUTION_URL": "https://a", "DISTRIBUTION_VERSION": "1",
+                                                            "WORKLOAD_PARAMS": "number_of_replicas:1,number_of_shards:5"})["matrix"]["include"][0]
+        self.assertEqual(json.loads(row["params"])["WORKLOAD_PARAMS"], "number_of_replicas:1,number_of_shards:5")
+        for bad in ["{bad", '{"k": "a b"}', "a:1, b:2"]:
             with self.assertRaises(ValueError, msg=bad):
                 resolve("benchmark-pull-request", "payload", {"DISTRIBUTION_URL": "https://a", "DISTRIBUTION_VERSION": "1", "WORKLOAD_PARAMS": bad})
 
