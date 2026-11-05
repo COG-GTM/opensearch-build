@@ -1,0 +1,137 @@
+---
+# Port of jenkins/manifests-update-lf.jenkinsFile (Jenkins job manifest-update). Runs `./manifests.sh update` in the
+# same ci-runner image to add input/test manifests for new OpenSearch and OpenSearch Dashboards versions (plus the
+# check-for-build / publish-min-snapshots cron entries and the version-increment workflow branches it edits), then
+# opens or updates the `[AUTO] Update input manifests` pull request from the `update-manifest` branch.
+# The pull request is pushed with a GitHub App token scoped to this repository instead of the opensearch-ci-bot PAT
+# and fork; manifests.yml only checks manifests changed by a pull request, so it does not overlap with this job.
+# Dry runs compute the manifest changes and publish them as a patch artifact and in the job summary, without a PR.
+name: manifests-update
+run-name: manifests-update${{ inputs.dry-run && ' (dry run)' || '' }}
+
+on:
+  schedule:
+    # Jenkins cron('H 0 * * *'), hashed into a stable minute of the 00:00 UTC hour
+    - cron: '23 0 * * *'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Only compute the manifest changes; do not push the branch or open the pull request.'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: manifests-update
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  update:
+    name: Update Manifests
+    # Jenkins agent label Jenkins-Agent-AL2023-X64-M54xlarge-Docker-Host; dry runs stay on a hosted runner.
+    runs-on: ${{ fromJSON(inputs.dry-run && '["ubuntu-24.04"]' || '["self-hosted","linux","x64","al2023-x64-m5-4xlarge-docker-host"]') }}
+    container:
+      image: public.ecr.aws/opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-build-v1
+      options: --user root
+      env:
+        JAVA_HOME: /opt/java/openjdk-11
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - name: Require the default branch for pull requests
+        if: ${{ !inputs.dry-run && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error::The update-manifest pull request targets main; run from main or set dry-run."
+          exit 1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Update manifests
+        run: |
+          # shellcheck disable=SC1091
+          source /etc/profile.d/java_home.sh
+          ./manifests.sh update
+      - name: Manifest diff
+        id: diff
+        run: |
+          git status --porcelain
+          git add -A
+          git diff --cached --binary > "$RUNNER_TEMP/manifests-update.patch"
+          if [ -s "$RUNNER_TEMP/manifests-update.patch" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Manifest changes"
+              echo
+              git diff --cached --stat | sed 's/^/    /'
+              echo
+              echo '```diff'
+              git diff --cached
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to commit!" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: manifests-update-patch
+          path: ${{ runner.temp }}/manifests-update.patch
+          if-no-files-found: error
+
+  pull-request:
+    name: Open or update the pull request
+    needs: update
+    if: ${{ !inputs.dry-run && needs.update.outputs.changed == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        with:
+          name: manifests-update-patch
+          path: ${{ runner.temp }}
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          # manifests.sh update also adds branches to os/osd-increment-plugin-versions.yml
+          permission-workflows: write
+      - name: Push update-manifest and open or update the pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          PR_BODY: I have noticed that a repo has incremented a version. This change updates the corresponding input manifests.
+        run: |
+          set -euo pipefail
+          git apply --index "$RUNNER_TEMP/manifests-update.patch"
+          bot_id=$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)
+          git checkout -b update-manifest
+          git -c user.name="${APP_SLUG}[bot]" -c user.email="${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com" \
+            commit -sm "Update manifests"
+          gh auth setup-git
+          git push "https://github.com/${GITHUB_REPOSITORY}.git" update-manifest --force
+          existing_pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head update-manifest --state open --json number --jq '.[0].number')
+          if [ -n "$existing_pr" ]; then
+            gh pr edit "$existing_pr" --repo "$GITHUB_REPOSITORY" --body "$PR_BODY"
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --title '[AUTO] Update input manifests' --body "$PR_BODY" \
+              --head update-manifest --base main
+          fi
