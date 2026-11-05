@@ -219,6 +219,25 @@ class TestValidation(unittest.TestCase):
 
                 self.assertEqual(["analysis-icu", "analysis-nori"], result)
 
+    @patch.dict(os.environ, {"GITHUB_TOKEN": "test-token"})
+    @patch('requests.get')
+    @patch('manifests.bundle_manifest.BundleManifest.from_path')
+    @patch('validation_workflow.validation.ValidationArgs')
+    @patch('system.temporary_directory.TemporaryDirectory')
+    def test_get_native_plugin_list_github_token(self, mock_temporary_directory: Mock, mock_validation_args: Mock,
+                                                 mock_manifest_from_path: Mock, mock_get: Mock) -> None:
+        mock_component = Mock()
+        mock_component.commit_id = "abc123"
+        mock_manifest_from_path.return_value.components = {"OpenSearch": mock_component}
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = [{'name': 'analysis-icu'}, {'name': 'examples'}, {'name': 'build.gradle'}]
+        mock_validation_args.return_value.version = "3.5.0"
+        validate_tar = ValidateTar(mock_validation_args.return_value, mock_temporary_directory.return_value)
+
+        self.assertEqual(["analysis-icu"], validate_tar.get_native_plugin_list("/tmp/trytytyuit/", []))
+        mock_get.assert_called_once_with("https://api.github.com/repos/opensearch-project/OpenSearch/contents/plugins?ref=abc123",
+                                         headers={"Authorization": "Bearer test-token"})
+
     @patch('requests.get')
     @patch('manifests.bundle_manifest.BundleManifest.from_path')
     @patch('validation_workflow.validation.ValidationArgs')

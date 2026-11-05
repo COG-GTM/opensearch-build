@@ -443,6 +443,16 @@ jobs:
           # A degraded state is acceptable: some units may fail inside a container,
           # but systemd is up as PID 1 and systemctl is usable.
           timeout 180 docker exec validate systemctl is-system-running --wait || true
+          # On hosted runners root cannot read the image's mode-000 /etc/shadow, so pam_unix account checks fail
+          # and every `sudo` in validation_rpm.py/validation_yum.py exits 1 ("PAM account management error").
+          # The container already runs as root; skip the PAM account check so sudo behaves as on the Jenkins agents.
+          docker exec validate sh -c "echo 'Defaults !pam_acct_mgmt' > /etc/sudoers.d/99-gha-no-pam-acct-mgmt && chmod 0440 /etc/sudoers.d/99-gha-no-pam-acct-mgmt"
+
+      # windows-2022 exports JAVA_HOME=<JDK 8>, which opensearch-plugin.bat prefers over the bundled JDK and which
+      # cannot run OpenSearch 3.x (UnsupportedClassVersionError); clear it so the bundled JDK is used.
+      - name: Use the bundled JDK for zip legs
+        if: ${{ matrix.distribution == 'zip' }}
+        run: echo "JAVA_HOME=" >> "${GITHUB_ENV}"
 
       - name: Validate artifacts
         uses: ./.github/actions/validate-artifacts
