@@ -92,8 +92,12 @@ class TestManifestPaths(unittest.TestCase):
         self.assertEqual(manifest_paths.extension("tar"), "tar.gz")
 
     def test_runs_on_unknown_platform(self) -> None:
-        with self.assertRaisesRegex(ValueError, "no runner pool for darwin-x64"):
-            manifest_paths.runs_on("darwin", "x64")
+        with self.assertRaisesRegex(ValueError, "no runner pool for freebsd-x64"):
+            manifest_paths.runs_on("freebsd", "x64")
+
+    def test_runs_on_macos_pools(self) -> None:
+        self.assertEqual(manifest_paths.runs_on("darwin", "x64"), '["self-hosted","macos","x64","macos14-x64-mac1"]')
+        self.assertEqual(manifest_paths.runs_on("darwin", "arm64"), '["self-hosted","macos","arm64","macos14-arm64-mac2"]')
 
     @patch("argparse._sys.argv", ["manifest_paths.py", "build-manifest-info", BUILD_MANIFEST, "--job-name", "distribution-build-opensearch"])
     def test_main_build_manifest_info_defaults_build_number(self) -> None:
