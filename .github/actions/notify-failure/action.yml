@@ -132,7 +132,7 @@ runs:
         "$PYTHON" "$SCRIPT" "${args[@]}"
 
     - name: Post webhook notification
-      if: inputs.webhook-message != ''
+      if: ${{ !cancelled() && inputs.webhook-message != '' }}
       shell: bash
       env:
         WEBHOOK_URL: ${{ inputs.webhook-url }}
