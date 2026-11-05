@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import yaml
 
 from release_git_workflow.git_remote import GitHubRefs, branch_head, repo_slug, tag_commit
-from release_git_workflow.release_branch import plan_release_branches
+from release_git_workflow.release_branch import load_manifest, plan_release_branches
 from release_git_workflow.release_manifest_lock import ReleaseManifestLock
 from release_git_workflow.release_plan import RefChange, RefPlan
 from release_git_workflow.release_tag import plan_release_tags
@@ -61,6 +61,13 @@ class TestGitRemote(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess([], 0, stdout="light\trefs/tags/3.10.0\n")
         self.assertEqual("light", tag_commit(OS_REPO, "3.10.0"))
 
+    def test_ref_commit_peels_annotated_tags(self) -> None:
+        refs = GitHubRefs("token")
+        refs.session = MagicMock()
+        refs.session.get.return_value.json.side_effect = [{"object": {"type": "tag", "sha": "t1", "url": "https://api.github.com/tag/t1"}}, {"object": {"type": "commit", "sha": "c1"}}]
+        self.assertEqual("c1", refs.ref_commit("opensearch-project", "OpenSearch", "refs/tags/3.10.0"))
+        refs.session.get.assert_called_with("https://api.github.com/tag/t1", timeout=60)
+
     def test_create_ref(self) -> None:
         refs = GitHubRefs("token")
         refs.session = MagicMock()
@@ -70,7 +77,12 @@ class TestGitRemote(unittest.TestCase):
             "https://api.github.com/repos/opensearch-project/OpenSearch/git/refs", json={"ref": "refs/tags/3.10.0", "sha": "abc"}, timeout=60
         )
         refs.session.post.return_value = MagicMock(status_code=422, text="Reference already exists")
+        refs.session.get.return_value.json.return_value = {"object": {"type": "commit", "sha": "abc"}}
         self.assertFalse(refs.create_ref(OS_REPO, "refs/tags/3.10.0", "abc"))
+        refs.session.get.assert_called_with("https://api.github.com/repos/opensearch-project/OpenSearch/git/refs/tags/3.10.0", timeout=60)
+        refs.session.get.return_value.json.return_value = {"object": {"type": "commit", "sha": "other"}}
+        with self.assertRaisesRegex(RuntimeError, "at other since the plan ran, expected abc"):
+            refs.create_ref(OS_REPO, "refs/tags/3.10.0", "abc")
         refs.session.post.return_value = MagicMock(status_code=403, text="denied")
         with self.assertRaisesRegex(RuntimeError, "HTTP status: 403"):
             refs.create_ref(OS_REPO, "refs/tags/3.10.0", "abc")
@@ -112,6 +124,23 @@ class TestReleaseBranch(unittest.TestCase):
         get.return_value = MagicMock(text=yaml.safe_dump({"components": [{"name": "OpenSearch", "repository": OS_REPO, "commit_id": "c1"}]}))
         plan = plan_release_branches(["https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/3.10.0/1/linux/x64/tar/builds/opensearch/manifest.yml"], "main", "3.10")
         self.assertEqual([("refs/heads/3.10", "c1", "create")], [(c.ref, c.commit, c.action) for c in plan.changes])
+
+    def test_load_manifest_rejects_other_hosts_and_paths(self) -> None:
+        for url in ["http://ci.opensearch.org/builds/manifest.yml", "https://169.254.169.254/builds/manifest.yml", "https://ci.opensearch.org.evil.com/builds/x.yml"]:
+            with self.assertRaisesRegex(ValueError, "must be https URLs"):
+                load_manifest(url)
+        for path in ["../Pipfile", "/etc/passwd"]:
+            with self.assertRaisesRegex(ValueError, "must be under"):
+                load_manifest(path, self.dir.name)
+
+    @patch("release_git_workflow.release_branch.branch_head", return_value=None)
+    @patch("release_git_workflow.release_branch.requests.get")
+    def test_build_manifests_disagreeing_on_a_commit_conflict(self, get: MagicMock, head: MagicMock) -> None:
+        get.side_effect = [MagicMock(text=yaml.safe_dump({"components": [{"name": "notifications-core", "repository": JS_REPO, "commit_id": commit}]})) for commit in ["c1", "c1", "c2"]]
+        url = "https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/3.10.0/{}/linux/x64/tar/builds/opensearch/manifest.yml"
+        plan = plan_release_branches([url.format(1), url.format(2), url.format(3)], "main", "3.10")
+        self.assertEqual([("create", "c1"), ("conflict", "c2")], [(c.action, c.commit) for c in plan.changes])
+        self.assertIn("build manifests disagree: c1 vs c2", plan.conflicts[0].detail)
 
 
 class TestReleaseTag(unittest.TestCase):

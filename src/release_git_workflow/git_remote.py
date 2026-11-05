@@ -60,9 +60,24 @@ class GitHubRefs:
         owner, name = repo_slug(repository)
         response = self.session.post(f"{self.API}/repos/{owner}/{name}/git/refs", json={"ref": ref, "sha": sha}, timeout=60)
         if response.status_code == 422 and "already exists" in response.text:
-            logging.warning(f"{ref} already exists in {owner}/{name}, leaving it unchanged.")
+            existing = self.ref_commit(owner, name, ref)
+            if existing != sha:
+                raise RuntimeError(f"{ref} was created in {owner}/{name} at {existing} since the plan ran, expected {sha}.")
+            logging.warning(f"{ref} already exists in {owner}/{name} at {sha}, leaving it unchanged.")
             return False
         if response.status_code != 201:
             raise RuntimeError(f"Creating {ref} at {sha} in {owner}/{name} failed. HTTP status: {response.status_code}: {response.text}")
         logging.info(f"Created {ref} at {sha} in {owner}/{name}.")
         return True
+
+    def ref_commit(self, owner: str, name: str, ref: str) -> Optional[str]:
+        """Commit ref points at, peeling annotated tags."""
+        response = self.session.get(f"{self.API}/repos/{owner}/{name}/git/{ref}", timeout=60)
+        response.raise_for_status()
+        target = response.json()["object"]
+        if target["type"] == "tag":
+            response = self.session.get(target["url"], timeout=60)
+            response.raise_for_status()
+            target = response.json()["object"]
+        commit: Optional[str] = target.get("sha")
+        return commit

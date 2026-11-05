@@ -95,6 +95,27 @@ class TestRunReleaseSchedule(unittest.TestCase):
             with open(output) as output_file:
                 self.assertEqual(len(json.load(output_file)), 2)
 
+    @patch("argparse._sys.argv", ["run_release_schedule.py", "--releases-url", "https://metadata.internal/releases.html"])
+    @patch("run_release_schedule.requests.get")
+    def test_main_rejects_other_hosts(self, requests_get: MagicMock) -> None:
+        with self.assertRaisesRegex(ValueError, "must be an https URL on opensearch.org"):
+            main()
+        requests_get.assert_not_called()
+
+    @patch("run_release_schedule.metrics_auth")
+    @patch("run_release_schedule.ReleaseScheduleRegister")
+    @patch("run_release_schedule.requests.get")
+    def test_main_registers_approved_documents(self, requests_get: MagicMock, register: MagicMock, metrics_auth: MagicMock) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            approved = os.path.join(tmp, "approved.json")
+            with open(approved, "w") as f:
+                json.dump([{"version": "3.10.0", "rc_date": "2026-11-03", "release_date": "2026-11-17", "status": "active"}], f)
+            with patch("argparse._sys.argv", ["run_release_schedule.py", "--from-json", approved, "--register", "--output", os.path.join(tmp, "out.json")]):
+                with patch.dict(os.environ, {"METRICS_HOST_URL": "https://metrics"}):
+                    self.assertEqual(0, main())
+        requests_get.assert_not_called()
+        register.return_value.register.assert_called_once_with("3.10.0", {"version": "3.10.0", "rc_date": "2026-11-03", "release_date": "2026-11-17", "status": "active"})
+
     @patch("argparse._sys.argv", ["run_release_schedule.py"])
     @patch("run_release_schedule.requests.get")
     def test_main_errors_on_zero_rows(self, requests_get: MagicMock) -> None:
