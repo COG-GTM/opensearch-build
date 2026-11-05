@@ -66,10 +66,10 @@ runs:
           public.ecr.aws/opensearchorg/opensearchstaging|public.ecr.aws/opensearchstaging) login=true ;;
           public.ecr.aws/opensearchproject) login=true; production=true ;;
         esac
-        root="${DESTINATION_REGISTRY}"
-        if [[ "${DESTINATION_REGISTRY}" == public.ecr.aws/* ]]; then
-          root="$(echo "${DESTINATION_REGISTRY}" | cut -d/ -f1-2)"
-        fi
+        # log in to the ECR side of the copy: the destination when it is ECR, otherwise the source
+        ecr_registry="${DESTINATION_REGISTRY}"
+        [[ "${ecr_registry}" == public.ecr.aws/* ]] || ecr_registry="${SOURCE_REGISTRY}"
+        root="$(echo "${ecr_registry}" | cut -d/ -f1-2)"
         {
           echo "login=${login}"
           echo "production=${production}"

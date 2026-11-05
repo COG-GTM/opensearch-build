@@ -269,6 +269,8 @@ def docker_plan(source_images: str, release_version: str, docker_hub: bool, ecr:
         image_product = image_repo.split(":")[0]
         source_tag = image_repo.split(":")[-1]
         source_registry = data_prepper_registry if image_product == "data-prepper" else "opensearchstaging"
+        if not source_registry:
+            raise SystemExit("data-prepper needs the DATA_PREPPER_STAGING_CONTAINER_REPOSITORY repository variable.")
         for enabled, destination in ((docker_hub, DOCKER_PRODUCTION), (ecr, ECR_PRODUCTION)):
             if not enabled:
                 continue

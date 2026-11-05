@@ -154,6 +154,10 @@ class TestPromoteContainer(unittest.TestCase):
         self.assertEqual(copies, [{"SOURCE_IMAGE_REGISTRY": "public.ecr.aws/x", "SOURCE_IMAGE": "data-prepper:1.5.0-19",
                                    "DESTINATION_IMAGE_REGISTRY": "opensearchproject", "DESTINATION_IMAGE": "data-prepper:1.5.0"}])
 
+    def test_data_prepper_needs_registry(self) -> None:
+        with self.assertRaises(SystemExit):
+            plan.docker_plan("data-prepper:2.10.0-1", "2.10.0", True, True, True, True, "")
+
     def test_parameters_check(self) -> None:
         with self.assertRaises(SystemExit):
             plan.docker_plan(" ", "3.9.0", True, True, True, True)
