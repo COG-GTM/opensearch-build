@@ -63,7 +63,7 @@ Every AWS call uses `aws-actions/configure-aws-credentials` (pinned by SHA) with
 
 | Jenkins role (`withAWS role` @ account secret) | GHA secret (role ARN) | Trust | Session | Used by |
 | --- | --- | --- | --- | --- |
-| `OpenSearchJenkinsAccessRole` @ `aws-accounts/jenkins-health-metrics-account-number` | `AWS_ROLE_METRICS` | main / ci | 900 s (1800 s where Jenkins used it) | distribution builds, integ/smoke tests, `integ-test-notification`, `gradle-check-flaky-test-detector`, `release-chores`, `release-schedule` |
+| `OpenSearchJenkinsAccessRole` @ `aws-accounts/jenkins-health-metrics-account-number` | `AWS_ROLE_METRICS` | main / ci, plus `environment:release` for the `release-schedule` registration job | 900 s (1800 s where Jenkins used it) | distribution builds, integ/smoke tests, `integ-test-notification`, `gradle-check-flaky-test-detector`, `release-chores`, `release-schedule` |
 | `opensearch-test` @ `aws-accounts/jenkins-aws-account-public` | `AWS_ROLE_TEST_RESULTS` | main / ci, benchmark | 900 s | bwc/integ/smoke tests, `benchmark-test` (test-result upload) |
 | `opensearch-bundle` @ `aws-accounts/jenkins-aws-account-public` | `AWS_ROLE_ARTIFACTS` | main / ci, release | 900 s | `promote-artifacts`, `sign-standalone-artifacts` (`uploadToS3`), artifact reads (`downloadFromS3`) |
 | `jenkins-artifact-promotion-role` (`aws-iam-roles/`) @ `aws-accounts/jenkins-aws-production-account` | `AWS_ROLE_PROMOTION` | release | 900 s | `promote-artifacts`, `promote-repos`, `promote-docker-ecr` / production `docker-copy` (ECR Public login), `publish-min-snapshots`, `release-promotion` (CloudFront invalidation) |

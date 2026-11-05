@@ -1,0 +1,97 @@
+---
+# Port of jenkins/release-workflows/release-schedule.jenkinsfile (Jenkins job release-schedule-register).
+# Parses the release schedule table on https://opensearch.org/releases.html and upserts one document per release
+# into the opensearch_release_schedule metrics index (registerReleaseSchedule), keyed like the Jenkins job so
+# both write the same documents.
+# Dry runs (the default, and every scheduled run until s6.2 disables the Jenkins job) only parse and show the
+# documents; registration runs in the `release` environment with the AWS_ROLE_METRICS OIDC role.
+name: release-schedule
+
+on:
+  schedule:
+    # Jenkins cron('H 1 * * *'), hashed into a stable minute of the 01:00 UTC hour
+    - cron: '37 1 * * *'
+  workflow_dispatch:
+    inputs:
+      releases-url:
+        description: 'URL of the OpenSearch releases page to parse.'
+        required: false
+        default: 'https://opensearch.org/releases.html'
+        type: string
+      dry-run:
+        description: 'Only parse and show the schedule documents.'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  # inputs are empty on scheduled runs
+  RELEASES_URL: ${{ inputs.releases-url || 'https://opensearch.org/releases.html' }}
+  REGISTERED_BY: '${{ github.workflow }} #${{ github.run_number }}'
+
+jobs:
+  parse:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: '3.9'
+      - name: Install Pipenv and dependencies
+        run: |
+          python -m pip install --upgrade pipenv==2023.6.12 wheel
+          pipenv install --deploy --dev
+      - name: Parse release schedule
+        run: pipenv run python src/run_release_schedule.py --releases-url "$RELEASES_URL" --output release-schedule.json
+      - name: Summarize
+        run: |
+          {
+            echo "### Release schedule documents from $RELEASES_URL"
+            echo
+            echo "| Version | RC date | Release date | Status | Release managers | GitHub handles | Release issue |"
+            echo "| --- | --- | --- | --- | --- | --- | --- |"
+            jq -r 'def cell: if type == "array" then join(", ") else tostring end | gsub("\\|"; "\\|");
+                 .[] | "| \(.version | cell) | \(.rc_date | cell) | \(.release_date | cell) | \(.status | cell) | \(.release_manager | cell) | \(.release_manager_gh_handle | cell) | \(.release_issue // "" | cell) |"' release-schedule.json
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: release-schedule
+          path: release-schedule.json
+
+  register:
+    needs: parse
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry-run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: '3.9'
+      - name: Install Pipenv and dependencies
+        run: |
+          python -m pip install --upgrade pipenv==2023.6.12 wheel
+          pipenv install --deploy --dev
+      - uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_METRICS }}
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 900
+          audience: sts.amazonaws.com
+          aws-region: us-east-1
+      - name: Register release schedule
+        env:
+          METRICS_HOST_URL: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+        run: pipenv run python src/run_release_schedule.py --releases-url "$RELEASES_URL" --register --output release-schedule.json
