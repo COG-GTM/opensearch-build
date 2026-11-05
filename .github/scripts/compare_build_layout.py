@@ -87,11 +87,16 @@ def without_refs(manifest: Dict[str, Any]) -> Dict[str, Any]:
     return stripped
 
 
-def ref_differences(jenkins: Dict[str, Any], actions: Dict[str, Any], norm_jenkins: Callable[[str], str], norm_actions: Callable[[str], str]) -> List[str]:
-    jenkins_refs = {c["name"]: str(c.get("ref")) for c in jenkins.get("components") or []}
+def ref_differences(jenkins: Dict[str, Any], actions: Dict[str, Any]) -> List[str]:
+    jenkins_refs = {c["name"]: c.get("ref") for c in jenkins.get("components") or []}
     return [f"{c['name']}: jenkins {jenkins_refs[c['name']]}, actions {c.get('ref')}"
-            for c in actions.get("components") or []
-            if c["name"] in jenkins_refs and norm_jenkins(jenkins_refs[c["name"]]) != norm_actions(str(c.get("ref")))]
+            for c in actions.get("components") or [] if c["name"] in jenkins_refs and jenkins_refs[c["name"]] != c.get("ref")]
+
+
+def bundle_ref_mismatches(build: Dict[str, Any], dist: Dict[str, Any]) -> List[str]:
+    build_refs = {c["name"]: c.get("ref") for c in build.get("components") or []}
+    return [f"{c['name']}: builds {build_refs.get(c['name'])}, dist {c.get('ref')}"
+            for c in dist.get("components") or [] if c.get("ref") is None or c.get("ref") != build_refs.get(c["name"])]
 
 
 def artifact_files(manifest: Dict[str, Any], filename: str) -> List[str]:
@@ -135,7 +140,8 @@ def compare(record: str, jenkins_root: str, get: Callable[[str], str] = fetch) -
     package = jenkins_dist["build"]["location"].rsplit("/", 1)[1]
     jenkins_files = sorted({norm_jenkins(f) for f in artifact_files(jenkins_build, filename)} | {
         f"dist/{filename}/manifest.yml", f"dist/{filename}/{norm_jenkins(package)}"})
-    refs = ref_differences(jenkins_build, actions_build, norm_jenkins, norm_actions)
+    refs = ref_differences(jenkins_build, actions_build)
+    bundle_refs = bundle_ref_mismatches(actions_build, actions_dist)
     jenkins_build, jenkins_dist = without_refs(jenkins_build), without_refs(jenkins_dist)
     actions_build, actions_dist = without_refs(actions_build), without_refs(actions_dist)
     return {
@@ -144,6 +150,7 @@ def compare(record: str, jenkins_root: str, get: Callable[[str], str] = fetch) -
         "snapshot-only files": [f"{len(snapshot_only(actions_names))} per-version maven-metadata.xml files" if snapshot_vs_release else "(none)"],
         "file names": diff("files", jenkins_files, without_snapshot_only(actions_names)),
         "build manifest": diff("builds/manifest.yml", layout(jenkins_build, norm_jenkins), without_snapshot_only(layout(actions_build, norm_actions))),
+        "bundle refs": bundle_refs,
         "bundle manifest": diff("dist/manifest.yml", layout(jenkins_dist, norm_jenkins), layout(actions_dist, norm_actions)),
     }
 

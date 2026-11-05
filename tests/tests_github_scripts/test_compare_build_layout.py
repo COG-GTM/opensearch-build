@@ -76,7 +76,8 @@ class TestCompareBuildLayout(unittest.TestCase):
         self.assertEqual(sections["file names"], [])
         self.assertEqual(sections["build manifest"], [])
         self.assertEqual(sections["bundle manifest"], [])
-        self.assertEqual(sections["input refs"], ["identical"])
+        self.assertEqual(sections["input refs"], [f"OpenSearch: jenkins {SHA_A}, actions {SHA_B}"])
+        self.assertEqual(sections["bundle refs"], [])
 
     def test_input_refs_are_listed_not_diffed(self) -> None:
         self.actions_build["components"][0]["ref"] = "3.9"
@@ -84,6 +85,17 @@ class TestCompareBuildLayout(unittest.TestCase):
         sections = compare_build_layout.compare(self.record, JENKINS_ROOT, self.jenkins.__getitem__)
         self.assertEqual(sections["input refs"], [f"OpenSearch: jenkins {SHA_A}, actions 3.9"])
         self.assertEqual(sections["build manifest"], [])
+
+    def test_bundle_ref_must_match_build_ref(self) -> None:
+        dist = dist_manifest("3.9.0-SNAPSHOT", "9876543210", ACTIONS_ROOT, SHA_B, ["OpenSearch"])
+        dist["components"][0]["ref"] = "main"
+        self.write("dist/opensearch/manifest.yml", yaml.safe_dump(dist))
+        sections = compare_build_layout.compare(self.record, JENKINS_ROOT, self.jenkins.__getitem__)
+        self.assertEqual(sections["bundle refs"], [f"OpenSearch: builds {SHA_B}, dist main"])
+        del dist["components"][0]["ref"]
+        self.write("dist/opensearch/manifest.yml", yaml.safe_dump(dist))
+        sections = compare_build_layout.compare(self.record, JENKINS_ROOT, self.jenkins.__getitem__)
+        self.assertEqual(sections["bundle refs"], [f"OpenSearch: builds {SHA_B}, dist None"])
 
     def test_reports_missing_file_and_key(self) -> None:
         self.write("file-list.txt", "\n".join(self.files[1:]) + "\n")
