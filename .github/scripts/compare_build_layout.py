@@ -12,7 +12,11 @@ Inputs are the `build-record` artifact of .github/workflows/_build-distribution.
 builds/<filename>/manifest.yml and dist/<filename>/manifest.yml) and the artifact root of a Jenkins
 distribution-build-opensearch build. Versions (including -SNAPSHOT), build ids, commit SHAs and artifact roots are
 normalised, and only the components both builds contain are compared, so a component-scoped build can be checked
-against a full Jenkins build. Prints a unified diff per section; exits 1 when any section differs.
+against a full Jenkins build. Maven snapshot naming (timestamped file names and the per-version maven-metadata.xml a
+snapshot repository adds) is normalised too, so a --snapshot build can be checked against a release-style Jenkins
+build; the per-version metadata files are listed separately. Lists of plain values (artifact paths) are compared as
+sorted sets because build.sh records them in filesystem order. Prints a unified diff per section; exits 1 when any
+section differs.
 """
 
 import argparse
@@ -25,6 +29,9 @@ from typing import Any, Callable, Dict, List, Optional, Set
 import yaml
 
 SHA = re.compile(r"\b[0-9a-f]{40}\b")
+SNAPSHOT = re.compile(r"\{version\}(\.0)?-(?:SNAPSHOT|\d{8}\.\d{6}-\d+)")
+SNAPSHOT_METADATA = re.compile(r"/\{version\}/maven-metadata\.xml(\.\w+)?$")
+INFORMATIONAL = ("shared components", "snapshot-only files")
 
 
 def fetch(url: str) -> str:
@@ -36,7 +43,7 @@ def fetch(url: str) -> str:
 class Normalizer:
     def __init__(self, manifest: Dict[str, Any], root_url: Optional[str] = None) -> None:
         build = manifest["build"]
-        self.version = str(build["version"])
+        self.version = re.sub(r"-SNAPSHOT$", "", str(build["version"]))
         self.build_id = str(build.get("id", ""))
         self.root_url = root_url.rstrip("/") if root_url else None
 
@@ -44,7 +51,7 @@ class Normalizer:
         if self.root_url:
             value = value.replace(self.root_url, "{root}")
         value = SHA.sub("{sha}", value)
-        value = value.replace(f"{self.version}-SNAPSHOT", "{version}").replace(self.version, "{version}")
+        value = SNAPSHOT.sub(r"{version}\1", value.replace(self.version, "{version}"))
         if self.build_id:
             value = re.sub(rf"(?<![0-9]){re.escape(self.build_id)}(?![0-9])", "{id}", value)
         return value
@@ -56,6 +63,8 @@ def layout(node: Any, normalize: Callable[[str], str], prefix: str = "") -> List
     if isinstance(node, dict):
         for key in node:
             lines.extend(layout(node[key], normalize, f"{prefix}.{key}" if prefix else str(key)))
+    elif isinstance(node, list) and node and not any(isinstance(item, (dict, list)) for item in node):
+        lines.extend(sorted(f"{prefix}[]: {normalize(str(item))}" for item in node))
     elif isinstance(node, list):
         for index, item in enumerate(node):
             lines.extend(layout(item, normalize, f"{prefix}[{index}]"))
@@ -100,13 +109,22 @@ def compare(record: str, jenkins_root: str, get: Callable[[str], str] = fetch) -
     jenkins_build, jenkins_dist = only_components(jenkins_build, shared), only_components(jenkins_dist, shared)
     actions_build, actions_dist = only_components(actions_build, shared), only_components(actions_dist, shared)
 
+    def snapshot_only(lines: List[str]) -> List[str]:
+        return [line for line in lines if SNAPSHOT_METADATA.search(line)]
+
+    def without_snapshot_only(lines: List[str]) -> List[str]:
+        return [line for line in lines if not SNAPSHOT_METADATA.search(line)] if snapshot_vs_release else lines
+
+    snapshot_vs_release = str(actions_build["build"]["version"]).endswith("-SNAPSHOT") and not str(jenkins_build["build"]["version"]).endswith("-SNAPSHOT")
+    actions_names = sorted(norm_actions(f) for f in actions_files)
     package = jenkins_dist["build"]["location"].rsplit("/", 1)[1]
     jenkins_files = sorted({norm_jenkins(f) for f in artifact_files(jenkins_build, filename)} | {
         f"dist/{filename}/manifest.yml", f"dist/{filename}/{norm_jenkins(package)}"})
     return {
         "shared components": [", ".join(sorted(shared)) or "(none)"],
-        "file names": diff("files", jenkins_files, sorted(norm_actions(f) for f in actions_files)),
-        "build manifest": diff("builds/manifest.yml", layout(jenkins_build, norm_jenkins), layout(actions_build, norm_actions)),
+        "snapshot-only files": [f"{len(snapshot_only(actions_names))} per-version maven-metadata.xml files" if snapshot_vs_release else "(none)"],
+        "file names": diff("files", jenkins_files, without_snapshot_only(actions_names)),
+        "build manifest": diff("builds/manifest.yml", layout(jenkins_build, norm_jenkins), without_snapshot_only(layout(actions_build, norm_actions))),
         "bundle manifest": diff("dist/manifest.yml", layout(jenkins_dist, norm_jenkins), layout(actions_dist, norm_actions)),
     }
 
@@ -123,7 +141,7 @@ def main() -> int:
     different = False
     for title, lines in sections.items():
         print(f"## {title}")
-        if title == "shared components":
+        if title in INFORMATIONAL:
             print(lines[0])
         elif lines:
             different = True

@@ -84,3 +84,20 @@ class TestCompareBuildLayout(unittest.TestCase):
         sections = compare_build_layout.compare(self.record, JENKINS_ROOT, self.jenkins.__getitem__)
         self.assertIn("-builds/opensearch/dist/opensearch-min-{version}-linux-x64.tar.gz", sections["file names"])
         self.assertIn("-components[0].commit_id: {sha}", sections["build manifest"])
+
+    def test_maven_snapshot_naming_and_artifact_order(self) -> None:
+        stamped = "maven/org/opensearch/opensearch/3.9.0-SNAPSHOT/opensearch-3.9.0-20261105.193311-1.jar"
+        metadata = "maven/org/opensearch/opensearch/3.9.0-SNAPSHOT/maven-metadata.xml"
+        artifacts = self.actions_build["components"][0]["artifacts"]
+        artifacts["maven"] = [metadata, stamped]
+        self.actions_build["components"][0]["version"] = "3.9.0.0-SNAPSHOT"
+        self.write("builds/opensearch/manifest.yml", yaml.safe_dump(self.actions_build))
+        files = [f for f in self.files if "/maven/" not in f] + [f"builds/opensearch/{stamped}", f"builds/opensearch/{metadata}"]
+        self.write("file-list.txt", "\n".join(sorted(files)) + "\n")
+        jenkins = yaml.safe_load(self.jenkins[f"{JENKINS_ROOT}/builds/opensearch/manifest.yml"])
+        jenkins["components"][0]["version"] = "3.9.0.0"
+        self.jenkins[f"{JENKINS_ROOT}/builds/opensearch/manifest.yml"] = yaml.safe_dump(jenkins)
+        sections = compare_build_layout.compare(self.record, JENKINS_ROOT, self.jenkins.__getitem__)
+        self.assertEqual(sections["snapshot-only files"], ["1 per-version maven-metadata.xml files"])
+        self.assertEqual(sections["file names"], [])
+        self.assertEqual(sections["build manifest"], [])
