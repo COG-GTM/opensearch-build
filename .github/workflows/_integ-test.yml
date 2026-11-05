@@ -1,0 +1,439 @@
+---
+# Reusable integration test: jenkins/opensearch/integ-test.jenkinsfile (jenkins@12.0.1) for one build manifest.
+# verify-parameters + the component list (:67-172), one matrix leg per component running runIntegTestScript()
+# (`./test.sh integ-test`) inside the test-manifest CI image (detectTestDockerAgent) with uploadTestResults() in
+# `finally`, then createUploadTestReportManifest() (`./report.sh`) in post { always }. The image is started with
+# `docker run` + `docker exec` because the tar test image runs as `-u 1000` (actions/checkout cannot write the runner
+# file-command dir as uid 1000) and the rpm/deb images need their systemd `--entrypoint`, which job containers reject.
+name: _integ-test
+
+on:
+  workflow_call:
+    inputs:
+      test-manifest:
+        description: 'Test manifest under manifests/, e.g. 3.9.0/opensearch-3.9.0-test.yml (Jenkins TEST_MANIFEST)'
+        required: true
+        type: string
+      build-manifest-url:
+        description: 'Build manifest URL (Jenkins BUILD_MANIFEST_URL), e.g. the build-manifest-url output of _build-distribution.yml'
+        required: true
+        type: string
+      component-name:
+        description: 'Space-separated components to test (Jenkins COMPONENT_NAME); empty tests every test-manifest component'
+        required: false
+        default: ''
+        type: string
+      rc-number:
+        description: 'RC number for report.sh --release-candidate (Jenkins RC_NUMBER)'
+        required: false
+        default: '0'
+        type: string
+      build-job-name:
+        description: 'Job name of the build under test (Jenkins BUILD_JOB_NAME): first segment of its artifact root'
+        required: false
+        default: 'distribution-build-opensearch'
+        type: string
+      job-name:
+        description: 'This test job name (Jenkins JOB_NAME): first segment of the test-results path and --base-path'
+        required: false
+        default: 'integ-test'
+        type: string
+      download-artifacts:
+        description: >-
+          Download the build from the artifact bucket and test the local copy, as Jenkins did. false passes the public
+          artifact root URL to --paths instead (runIntegTestScript without localPath), for runs without AWS secrets.
+        required: false
+        default: true
+        type: boolean
+      upload-results:
+        description: 'Upload test-results/ and test-report.yml to the artifact bucket (AWS_ROLE_TEST_RESULTS)'
+        required: false
+        default: true
+        type: boolean
+      runs-on:
+        description: 'JSON label array overriding the ADR 0001 label map of the build platform/architecture'
+        required: false
+        default: ''
+        type: string
+      public-artifact-url:
+        description: 'Public base URL of the artifact bucket (Jenkins PUBLIC_ARTIFACT_URL)'
+        required: false
+        default: 'https://ci.opensearch.org/ci/dbc'
+        type: string
+    secrets:
+      AWS_ROLE_ARTIFACTS:
+        required: false
+      AWS_ROLE_TEST_RESULTS:
+        required: false
+      ARTIFACT_BUCKET_NAME:
+        required: false
+    outputs:
+      components:
+        description: 'JSON array of the components that were tested'
+        value: ${{ jobs.setup.outputs.components }}
+      test-report-url:
+        description: 'Public URL of test-report.yml'
+        value: ${{ jobs.test-report.outputs.test-report-url }}
+
+permissions: {}
+
+env:
+  BUILD_MANIFEST: build-manifest.yml
+
+jobs:
+  setup:
+    name: verify-parameters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      name: ${{ steps.build.outputs.name }}
+      version: ${{ steps.build.outputs.version }}
+      build-id: ${{ steps.build.outputs.build-id }}
+      platform: ${{ steps.build.outputs.platform }}
+      architecture: ${{ steps.build.outputs.architecture }}
+      distribution: ${{ steps.build.outputs.distribution }}
+      filename: ${{ steps.runner.outputs.filename }}
+      artifact-root: ${{ steps.build.outputs.artifact-root }}
+      artifact-root-url: ${{ steps.build.outputs.artifact-root-url }}
+      runs-on: ${{ steps.runner.outputs.runs-on }}
+      image: ${{ steps.image.outputs.image }}
+      args: ${{ steps.image.outputs.args }}
+      java-version: ${{ steps.image.outputs.java-version }}
+      components: ${{ steps.components.outputs.components }}
+      has-components: ${{ steps.components.outputs.has-components }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify the parameters
+        env:
+          TEST_MANIFEST: ${{ inputs.test-manifest }}
+          BUILD_MANIFEST_URL: ${{ inputs.build-manifest-url }}
+          COMPONENT_NAME: ${{ inputs.component-name }}
+          RC_NUMBER: ${{ inputs.rc-number }}
+          BUILD_JOB_NAME: ${{ inputs.build-job-name }}
+          JOB_NAME: ${{ inputs.job-name }}
+          RUNS_ON: ${{ inputs.runs-on }}
+          PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+        run: |
+          set -euo pipefail
+          check() {
+            if ! [[ "$2" =~ $3 ]]; then
+              echo "::error::$1 is not valid: '$2'"
+              exit 1
+            fi
+          }
+          check test-manifest "${TEST_MANIFEST}" '^[A-Za-z0-9._/-]+$'
+          check build-manifest-url "${BUILD_MANIFEST_URL}" '^https://[A-Za-z0-9._~/-]+$'
+          check component-name "${COMPONENT_NAME}" '^[A-Za-z0-9 ._-]*$'
+          check rc-number "${RC_NUMBER}" '^[0-9]+$'
+          check build-job-name "${BUILD_JOB_NAME}" '^[A-Za-z0-9._-]+$'
+          check job-name "${JOB_NAME}" '^[A-Za-z0-9._-]+$'
+          check public-artifact-url "${PUBLIC_ARTIFACT_URL}" '^https://[A-Za-z0-9._~/-]+$'
+          case "/${TEST_MANIFEST}/" in */../*) echo "::error::test-manifest must stay under manifests/."; exit 1 ;; esac
+          if [ ! -f "manifests/${TEST_MANIFEST}" ]; then
+            echo "::error::Integration Tests failed to start. Test manifest was not provided or not found in manifests/${TEST_MANIFEST}."
+            exit 1
+          fi
+          if [ -n "${RUNS_ON}" ]; then
+            python3 -c 'import json, re, sys
+          labels = json.loads(sys.argv[1])
+          assert isinstance(labels, list) and labels and all(isinstance(l, str) and re.fullmatch(r"[A-Za-z0-9._-]+", l) for l in labels)' "${RUNS_ON}" \
+              || { echo "::error::runs-on must be a JSON array of runner labels, got '${RUNS_ON}'."; exit 1; }
+          fi
+
+      - name: Download the build manifest
+        id: build
+        uses: ./.github/actions/download-build-manifest
+        with:
+          url: ${{ inputs.build-manifest-url }}
+          path: ${{ env.BUILD_MANIFEST }}
+          job-name: ${{ inputs.build-job-name }}
+          public-artifact-url: ${{ inputs.public-artifact-url }}
+
+      - name: Detect the test docker agent
+        id: image
+        env:
+          TEST_MANIFEST: ${{ inputs.test-manifest }}
+          PLATFORM: ${{ steps.build.outputs.platform }}
+          DISTRIBUTION: ${{ steps.build.outputs.distribution }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/manifest_paths.py ci-image "manifests/${TEST_MANIFEST}" --kind test \
+            --platform "${PLATFORM}" --distribution "${DISTRIBUTION}" --docker-run > image.env
+          IMAGE=$(sed -n 's/^image=//p' image.env)
+          # ADR 0001: pull through the mirror Jenkins used (docker.withRegistry('https://public.ecr.aws/')).
+          case "${IMAGE%%/*}" in
+            *.*|*:*|localhost) ;;
+            *) IMAGE="public.ecr.aws/opensearchorg/${IMAGE}" ;;
+          esac
+          {
+            echo "image=${IMAGE}"
+            grep -v '^image=' image.env
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Select the components to test
+        id: components
+        env:
+          TEST_MANIFEST: ${{ inputs.test-manifest }}
+          COMPONENT_NAME: ${{ inputs.component-name }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/manifest_paths.py integ-test-components "manifests/${TEST_MANIFEST}" \
+            --build-manifest "${BUILD_MANIFEST}" --component-name "${COMPONENT_NAME}" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Pick the runner
+        id: runner
+        env:
+          RUNS_ON: ${{ inputs.runs-on }}
+          RUNS_ON_MAP: ${{ steps.build.outputs.runs-on }}
+          NAME: ${{ steps.build.outputs.name }}
+        run: |
+          set -euo pipefail
+          # BuildManifest build.getFilename(): lower-case, spaces to dashes
+          FILENAME=$(echo "${NAME}" | tr '[:upper:] ' '[:lower:]-')
+          {
+            echo "runs-on=${RUNS_ON:-${RUNS_ON_MAP}}"
+            echo "filename=${FILENAME}"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  integ-test:
+    name: ${{ matrix.component }}
+    needs: setup
+    if: ${{ needs.setup.outputs.has-components == 'true' }}
+    runs-on: ${{ fromJSON(needs.setup.outputs.runs-on) }}
+    # timeout(time: 12, unit: 'HOURS') around each component node
+    timeout-minutes: 720
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.setup.outputs.components) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      PLATFORM: ${{ needs.setup.outputs.platform }}
+      DISTRIBUTION: ${{ needs.setup.outputs.distribution }}
+      IMAGE: ${{ needs.setup.outputs.image }}
+      IMAGE_ARGS: ${{ needs.setup.outputs.args }}
+      COMPONENT: ${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Stagger the component start
+        env:
+          JOB_INDEX: ${{ strategy.job-index }}
+        run: |
+          WAIT_SECONDS=$(( JOB_INDEX * 20 ))
+          echo "${COMPONENT} with index ${JOB_INDEX} will sleep ${WAIT_SECONDS} seconds to reduce load"
+          sleep "${WAIT_SECONDS}"
+
+      - name: Download the build manifest
+        uses: ./.github/actions/download-build-manifest
+        with:
+          url: ${{ inputs.build-manifest-url }}
+          path: ${{ env.BUILD_MANIFEST }}
+          job-name: ${{ inputs.build-job-name }}
+          public-artifact-url: ${{ inputs.public-artifact-url }}
+
+      - name: Download the build artifacts
+        if: ${{ inputs.download-artifacts }}
+        uses: ./.github/actions/s3-sync
+        with:
+          direction: download
+          role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+          bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          remote-path: ${{ needs.setup.outputs.artifact-root }}/
+          local-path: artifacts
+
+      - name: Move the artifacts into place
+        # rm -rf $WORKSPACE/$distribution && mv -v $WORKSPACE/artifacts/${artifactPath} $WORKSPACE
+        if: ${{ inputs.download-artifacts }}
+        run: |
+          set -euo pipefail
+          rm -rf "${DISTRIBUTION}"
+          mv -v artifacts "${DISTRIBUTION}"
+
+      - name: Start the test container
+        if: ${{ needs.setup.outputs.platform == 'linux' }}
+        run: |
+          set -euo pipefail
+          read -r -a OPTIONS <<< "${IMAGE_ARGS}"
+          COMMAND=(tail -f /dev/null)
+          for option in "${OPTIONS[@]}"; do
+            # systemd images keep their entrypoint as PID 1 and get no command
+            case "${option}" in --entrypoint|--entrypoint=*) COMMAND=() ;; esac
+            # docker.inside(-u 1000) ran as the agent's uid 1000, which owns the workspace on the Jenkins AMIs
+            case "${option}" in 1000|1000:*) sudo chown -R 1000:1000 "${GITHUB_WORKSPACE}" ;; esac
+          done
+          # Anonymous public.ecr.aws pulls are rate limited (toomanyrequests), so back off and retry.
+          for attempt in 1 2 3 4 5; do
+            docker pull "${IMAGE}" && break
+            [ "${attempt}" = 5 ] && exit 1
+            sleep $(( attempt * 30 ))
+          done
+          docker run -d --name integ-test -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
+            "${OPTIONS[@]}" "${IMAGE}" "${COMMAND[@]}"
+          if [ "${#COMMAND[@]}" = 0 ]; then
+            timeout 180 docker exec integ-test systemctl is-system-running --wait || true
+          fi
+
+      - name: Run the integration tests
+        env:
+          TEST_MANIFEST: manifests/${{ inputs.test-manifest }}
+          NAME: ${{ needs.setup.outputs.name }}
+          VERSION: ${{ needs.setup.outputs.version }}
+          BUILD_ID: ${{ needs.setup.outputs.build-id }}
+          ARCHITECTURE: ${{ needs.setup.outputs.architecture }}
+          FILENAME: ${{ needs.setup.outputs.filename }}
+          JAVA_VERSION: ${{ needs.setup.outputs.java-version }}
+          ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.artifact-root-url }}
+          LOCAL_ARTIFACTS: ${{ inputs.download-artifacts }}
+          JOB_NAME: ${{ inputs.job-name }}
+          PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+          TEST_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # runIntegTestScript.groovy (jenkins@12.0.1)
+          rm -rf test-results
+          if [ "${LOCAL_ARTIFACTS}" = true ]; then
+            LOCAL_PATH="${GITHUB_WORKSPACE}/${DISTRIBUTION}"
+            if [ "${NAME}" = OpenSearch ]; then PATHS=("opensearch=${LOCAL_PATH}"); else PATHS=("opensearch=${LOCAL_PATH}" "opensearch-dashboards=${LOCAL_PATH}"); fi
+          elif [ "${NAME}" = OpenSearch ]; then
+            PATHS=("opensearch=${ARTIFACT_ROOT_URL}")
+          else
+            PATHS=("opensearch=${PUBLIC_ARTIFACT_URL}/distribution-build-opensearch/${VERSION}/latest/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}" "opensearch-dashboards=${ARTIFACT_ROOT_URL}")
+          fi
+          BASE_PATH="${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${VERSION}/${BUILD_ID}/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}"
+          TEST=(./test.sh integ-test "${TEST_MANIFEST}" --component "${COMPONENT}" --test-run-id "${TEST_RUN_ID}" --paths "${PATHS[@]}" --base-path "${BASE_PATH}")
+          echo "Run command: ${TEST[*]}"
+          if [ "${PLATFORM}" = windows ]; then
+            if [ "${FILENAME}" = opensearch ]; then
+              JAVA_VERSION_NUMBER="${JAVA_VERSION//[^0-9]/}"
+              echo "Switching to Java ${JAVA_VERSION_NUMBER} on Windows"
+              scoop reset "$(scoop list jdk | cut -d ' ' -f1 | grep "${JAVA_VERSION_NUMBER}" | head -1)"
+            fi
+            bash "${TEST[@]}"
+            exit 0
+          fi
+          ENV=(env "PATH=\$PATH")
+          [ "${FILENAME}" = opensearch ] && ENV+=("JAVA_HOME=/opt/java/${JAVA_VERSION}")
+          printf -v COMMAND '%q ' "${ENV[@]}" "${TEST[@]}"
+          COMMAND="${COMMAND//\\\$PATH/\$PATH}"
+          case "${DISTRIBUTION}" in
+            # switch_user_non_root: rpm/deb hosts run the tests as uid 1000 through su
+            rpm|deb) docker exec integ-test bash -c "su \"\$(id -un 1000)\" -c $(printf '%q' "${COMMAND}")" ;;
+            *) docker exec integ-test bash -c "${COMMAND}" ;;
+          esac
+
+      - name: Stop the test container
+        if: ${{ always() && needs.setup.outputs.platform == 'linux' }}
+        run: |
+          docker rm -f integ-test > /dev/null 2>&1 || true
+          sudo chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" || true
+
+      - name: Upload the test results
+        # uploadTestResults(jobName: JOB_NAME) in `finally`: <job>/<version>/<build id>/<platform>/<arch>/<dist>/test-results
+        if: ${{ always() && inputs.upload-results }}
+        uses: ./.github/actions/s3-sync
+        with:
+          direction: upload
+          role-to-assume: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+          bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          remote-path: ${{ inputs.job-name }}/${{ needs.setup.outputs.version }}/${{ needs.setup.outputs.build-id }}/${{ needs.setup.outputs.platform }}/${{ needs.setup.outputs.architecture }}/${{ needs.setup.outputs.distribution }}/test-results
+          local-path: test-results
+          tolerate-missing: 'true'
+
+      - name: Keep the test results in the run
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: test-results-${{ matrix.component }}
+          path: test-results
+          if-no-files-found: ignore
+
+  test-report:
+    name: test-report
+    needs: [setup, integ-test]
+    if: ${{ always() && needs.setup.result == 'success' && needs.setup.outputs.has-components == 'true' }}
+    runs-on: ${{ fromJSON(needs.setup.outputs.runs-on) }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      test-report-url: ${{ steps.report.outputs.test-report-url }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download the build manifest
+        uses: ./.github/actions/download-build-manifest
+        with:
+          url: ${{ inputs.build-manifest-url }}
+          path: ${{ env.BUILD_MANIFEST }}
+          job-name: ${{ inputs.build-job-name }}
+          public-artifact-url: ${{ inputs.public-artifact-url }}
+
+      - name: Create the test report
+        id: report
+        env:
+          TEST_MANIFEST: manifests/${{ inputs.test-manifest }}
+          VERSION: ${{ needs.setup.outputs.version }}
+          BUILD_ID: ${{ needs.setup.outputs.build-id }}
+          PLATFORM: ${{ needs.setup.outputs.platform }}
+          ARCHITECTURE: ${{ needs.setup.outputs.architecture }}
+          DISTRIBUTION: ${{ needs.setup.outputs.distribution }}
+          RC_NUMBER: ${{ inputs.rc-number }}
+          COMPONENT_NAME: ${{ inputs.component-name }}
+          JOB_NAME: ${{ inputs.job-name }}
+          BUILD_JOB_NAME: ${{ inputs.build-job-name }}
+          PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+          TEST_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # createUploadTestReportManifest.groovy (jenkins@12.0.1)
+          ROOT="${VERSION}/${BUILD_ID}/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}"
+          REPORT=(./report.sh "${TEST_MANIFEST}" --artifact-paths "opensearch=${PUBLIC_ARTIFACT_URL}/${BUILD_JOB_NAME}/${ROOT}"
+            --test-run-id "${TEST_RUN_ID}" --test-type integ-test --base-path "${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${ROOT}")
+          [ -n "${RC_NUMBER}" ] && REPORT+=(--release-candidate "${RC_NUMBER}")
+          if [ -n "${COMPONENT_NAME}" ]; then
+            read -r -a COMPONENTS <<< "${COMPONENT_NAME}"
+            REPORT+=(--component "${COMPONENTS[@]}")
+          fi
+          echo "Run command: ${REPORT[*]}"
+          bash "${REPORT[@]}"
+          UPLOAD_PATH="${JOB_NAME}/${ROOT}/test-results/${TEST_RUN_ID}/integ-test/test-report.yml"
+          {
+            echo "upload-path=${UPLOAD_PATH}"
+            echo "test-report-url=${PUBLIC_ARTIFACT_URL}/${UPLOAD_PATH}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload the test report
+        if: ${{ inputs.upload-results }}
+        uses: ./.github/actions/s3-sync
+        with:
+          direction: upload
+          role-to-assume: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+          bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          remote-path: ${{ steps.report.outputs.upload-path }}
+          local-path: test-report.yml
+
+      - name: Keep the test report in the run
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: integ-test-report
+          path: test-report.yml
+          if-no-files-found: warn

@@ -8,7 +8,7 @@
 import json
 import os
 import unittest
-from typing import Any
+from typing import Any, Dict
 from unittest.mock import patch
 
 import pytest
@@ -20,6 +20,7 @@ manifest_paths = load_script("manifest_paths")
 INPUT_MANIFEST = os.path.join(DATA_DIR, "input-manifest.yml")
 BUILD_MANIFEST = os.path.join(DATA_DIR, "build-manifest.yml")
 REPO_MANIFEST = os.path.realpath(os.path.join(DATA_DIR, "..", "..", "..", "manifests", "3.9.0", "opensearch-3.9.0.yml"))
+REPO_TEST_MANIFEST = REPO_MANIFEST.replace("opensearch-3.9.0.yml", "opensearch-3.9.0-test.yml")
 
 
 class TestManifestPaths(unittest.TestCase):
@@ -113,3 +114,45 @@ class TestManifestPaths(unittest.TestCase):
         out, _ = self.capfd.readouterr()
         self.assertIn("image=opensearchstaging/ci-runner:ci-runner-ubuntu2404-opensearch-build-v1\n", out)
         self.assertIn("java-version=openjdk-25\n", out)
+
+    @patch("argparse._sys.argv", ["manifest_paths.py", "runs-on", "--platform", "windows", "--architecture", "x64"])
+    def test_main_runs_on(self) -> None:
+        self.assertEqual(manifest_paths.main(), 0)
+        out, _ = self.capfd.readouterr()
+        self.assertEqual(out, 'runs-on=["self-hosted","windows","x64","windows2019-x64-m5-4xlarge-docker-host"]\n')
+
+    def test_integ_test_components_defaults_to_test_manifest(self) -> None:
+        test_manifest = {"components": [{"name": "OpenSearch"}, {"name": "sql"}, {"name": "common-utils"}]}
+        build_manifest = {"build": {"distribution": "tar"}, "components": [{"name": "OpenSearch"}, {"name": "common-utils"}]}
+        self.assertEqual(manifest_paths.integ_test_components(test_manifest, build_manifest, ""), ["OpenSearch", "common-utils"])
+
+    def test_integ_test_components_requested_and_package_exclusions(self) -> None:
+        test_manifest = {"components": [{"name": "OpenSearch"}, {"name": "cross-cluster-replication"}, {"name": "query-insights"}]}
+        build_manifest: Dict[str, Any] = {
+            "build": {"distribution": "rpm"},
+            "components": [{"name": "OpenSearch"}, {"name": "cross-cluster-replication"}, {"name": "query-insights"}],
+        }
+        self.assertEqual(manifest_paths.integ_test_components(test_manifest, build_manifest, " OpenSearch cross-cluster-replication "), ["OpenSearch"])
+        build_manifest["build"]["distribution"] = "tar"
+        self.assertEqual(
+            manifest_paths.integ_test_components(test_manifest, build_manifest, "query-insights"),
+            ["query-insights"],
+        )
+
+    def test_integ_test_components_rejects_unknown(self) -> None:
+        with self.assertRaisesRegex(ValueError, "k-NN is not present in the test manifest"):
+            manifest_paths.integ_test_components({"components": [{"name": "OpenSearch"}]}, {"build": {}, "components": []}, "k-NN")
+
+    @patch("argparse._sys.argv", ["manifest_paths.py", "integ-test-components", REPO_TEST_MANIFEST, "--build-manifest", BUILD_MANIFEST])
+    def test_main_integ_test_components(self) -> None:
+        self.assertEqual(manifest_paths.main(), 0)
+        out, _ = self.capfd.readouterr()
+        self.assertIn('components=["OpenSearch"]\n', out)
+        self.assertIn("has-components=true\n", out)
+
+    @patch("argparse._sys.argv", ["manifest_paths.py", "ci-image", REPO_TEST_MANIFEST, "--kind", "test", "--distribution", "rpm", "--docker-run"])
+    def test_main_ci_image_docker_run_keeps_entrypoint(self) -> None:
+        self.assertEqual(manifest_paths.main(), 0)
+        out, _ = self.capfd.readouterr()
+        self.assertIn("--entrypoint=/usr/lib/systemd/systemd", out)
+        self.assertIn("image=opensearchstaging/ci-runner:ci-runner-almalinux8-systemd-base-integtest-v1\n", out)

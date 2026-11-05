@@ -1,0 +1,518 @@
+---
+# Reusable per-platform build: one build stage of jenkins/opensearch/distribution-build.jenkinsfile.
+# tar / zip: build-and-test-linux-x64-tar (:239-321) and friends run buildAssembleUpload() on one agent, i.e.
+#   ./build.sh then ./assemble.sh then uploadArtifacts(), and uploadIndexFile() in post { success, unstable }.
+# rpm / deb: build-and-test-linux-x64-rpm (:322-) runs buildArchive() on the *tar* image with the package args,
+#   stashes <distribution>/builds, then archiveAssembleUpload() on the package image (stash -> actions artifact).
+# Runner labels come from the ADR 0001 label map (manifest_paths.py runs-on), the CI-runner image from the input
+# manifest (resolve-input-manifest / detectDockerAgent), uploads go through the s3-sync action with AWS_ROLE_ARTIFACTS.
+name: _build-distribution
+
+on:
+  workflow_call:
+    inputs:
+      input-manifest:
+        description: 'Input manifest under manifests/, e.g. 3.9.0/opensearch-3.9.0.yml (Jenkins INPUT_MANIFEST)'
+        required: true
+        type: string
+      distribution:
+        description: 'tar, rpm, deb or zip ("windows" is accepted as an alias of zip)'
+        required: false
+        default: 'tar'
+        type: string
+      platform:
+        description: 'linux or windows'
+        required: false
+        default: 'linux'
+        type: string
+      architecture:
+        description: 'x64 or arm64'
+        required: false
+        default: 'x64'
+        type: string
+      snapshot:
+        description: 'Pass --snapshot to build.sh (buildManifest snapshot: true)'
+        required: false
+        default: false
+        type: boolean
+      rc-number:
+        description: 'RC number (Jenkins RC_NUMBER); 0 is not a release candidate. Passed through to the outputs.'
+        required: false
+        default: '0'
+        type: string
+      component-name:
+        description: 'Space-separated components for build.sh --component (Jenkins COMPONENT_NAME); empty builds all'
+        required: false
+        default: ''
+        type: string
+      job-name:
+        description: 'Jenkins JOB_NAME equivalent: first segment of the artifact path'
+        required: false
+        default: 'distribution-build-opensearch'
+        type: string
+      continue-on-error:
+        description: 'build.sh --continue-on-error (Jenkins CONTINUE_ON_ERROR)'
+        required: false
+        default: true
+        type: boolean
+      skip-artifact-check:
+        description: 'build.sh --skip-artifact-check (Jenkins SKIP_ARTIFACT_CHECK)'
+        required: false
+        default: false
+        type: boolean
+      parallel:
+        description: 'build.sh --parallel N (Jenkins PARALLEL); 0 or empty disables it'
+        required: false
+        default: '4'
+        type: string
+      upload:
+        description: 'Upload builds/ and dist/ to the artifact bucket. false keeps everything inside the run (dry runs).'
+        required: false
+        default: true
+        type: boolean
+      update-latest-url:
+        description: 'Write index.json {"latest": <build number>} after a successful upload (Jenkins UPDATE_LATEST_URL)'
+        required: false
+        default: true
+        type: boolean
+      release-candidate-upload:
+        description: >-
+          Copy the core min artifact and the bundle to release-candidates/ in the production bucket, as
+          uploadArtifacts() did on every build. Runs in the `release` environment (AWS_ROLE_PROMOTION, reviewer gate).
+        required: false
+        default: false
+        type: boolean
+      sign-rpm:
+        description: 'Sign rpm packages during assemble (assembleManifest). Runs the assemble job in the `release` environment.'
+        required: false
+        default: false
+        type: boolean
+      runs-on:
+        description: 'JSON label array overriding the ADR 0001 label map, e.g. ["ubuntu-24.04"]. Empty uses the map.'
+        required: false
+        default: ''
+        type: string
+      public-artifact-url:
+        description: 'Public base URL of the artifact bucket (Jenkins PUBLIC_ARTIFACT_URL)'
+        required: false
+        default: 'https://ci.opensearch.org/ci/dbc'
+        type: string
+    secrets:
+      AWS_ROLE_ARTIFACTS:
+        required: false
+      ARTIFACT_BUCKET_NAME:
+        required: false
+      # `release` environment secrets (ADR 0001), read only by the sign-rpm assemble and release-candidate jobs
+      AWS_ROLE_PROMOTION:
+        required: false
+      ARTIFACT_PRODUCTION_BUCKET_NAME:
+        required: false
+      AWS_ROLE_RPM_SIGNING:
+        required: false
+      RPM_SIGNING_KEY_ID:
+        required: false
+      RPM_SIGNING_PASSPHRASE_SECRETS_ARN:
+        required: false
+      RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN:
+        required: false
+      RPM_RELEASE_SIGNING_KEY_ID:
+        required: false
+      RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN:
+        required: false
+      RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN:
+        required: false
+    outputs:
+      build-manifest:
+        description: 'Path of the build manifest in the build job workspace, <distribution>/builds/<filename>/manifest.yml'
+        value: ${{ jobs.setup.outputs.build-manifest }}
+      build-manifest-url:
+        description: 'BuildManifest.getUrl(JOB_NAME, BUILD_NUMBER), what Jenkins passed to the test jobs'
+        value: ${{ jobs.assemble.outputs.build-manifest-url || jobs.build.outputs.build-manifest-url }}
+      bundle-manifest-url:
+        description: 'BuildManifest.getBundleManifestUrl(JOB_NAME, BUILD_NUMBER)'
+        value: ${{ jobs.assemble.outputs.bundle-manifest-url || jobs.build.outputs.bundle-manifest-url }}
+      artifact-url:
+        description: 'BuildManifest.getArtifactUrl(JOB_NAME, BUILD_NUMBER), the Jenkins ARTIFACT_URL_<PLATFORM>_<ARCH>_<DIST>'
+        value: ${{ jobs.assemble.outputs.artifact-url || jobs.build.outputs.artifact-url }}
+      artifact-root:
+        description: 'Artifact root inside the bucket, <job>/<version>/<build>/<platform>/<arch>/<distribution>'
+        value: ${{ jobs.assemble.outputs.artifact-root || jobs.build.outputs.artifact-root }}
+      build-id:
+        description: 'build.id of the build manifest (github.run_id, the Jenkins BUILD_NUMBER equivalent)'
+        value: ${{ jobs.assemble.outputs.build-id || jobs.build.outputs.build-id }}
+      rc-number:
+        description: 'The rc-number input, for the test workflows'
+        value: ${{ inputs.rc-number }}
+
+permissions: {}
+
+jobs:
+  setup:
+    name: verify-parameters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      distribution: ${{ steps.params.outputs.distribution }}
+      package: ${{ steps.params.outputs.package }}
+      runs-on: ${{ steps.runner.outputs.runs-on }}
+      build-image: ${{ steps.images.outputs.build-image }}
+      build-args: ${{ steps.images.outputs.build-args }}
+      assemble-image: ${{ steps.images.outputs.assemble-image }}
+      assemble-args: ${{ steps.images.outputs.assemble-args }}
+      java-version: ${{ steps.manifest.outputs.java-version }}
+      filename: ${{ steps.manifest.outputs.filename }}
+      manifest-path: ${{ steps.manifest.outputs.manifest-path }}
+      build-manifest: ${{ steps.params.outputs.distribution }}/builds/${{ steps.manifest.outputs.filename }}/manifest.yml
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify the parameters
+        id: params
+        env:
+          DISTRIBUTION: ${{ inputs.distribution }}
+          PLATFORM: ${{ inputs.platform }}
+          ARCHITECTURE: ${{ inputs.architecture }}
+          RC_NUMBER: ${{ inputs.rc-number }}
+          PARALLEL: ${{ inputs.parallel }}
+          COMPONENT_NAME: ${{ inputs.component-name }}
+          JOB_NAME: ${{ inputs.job-name }}
+          RUNS_ON: ${{ inputs.runs-on }}
+          PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+        run: |
+          set -euo pipefail
+          [ "${DISTRIBUTION}" = windows ] && DISTRIBUTION=zip
+          check() {
+            if ! [[ "$2" =~ $3 ]]; then
+              echo "::error::$1 is not valid: '$2'"
+              exit 1
+            fi
+          }
+          # verify-parameters / verifyParameterPlatformDistribution in distribution-build.jenkinsfile
+          check distribution "${DISTRIBUTION}" '^(tar|rpm|deb|zip)$'
+          check platform "${PLATFORM}" '^(linux|windows)$'
+          check architecture "${ARCHITECTURE}" '^(x64|arm64)$'
+          check rc-number "${RC_NUMBER}" '^[0-9]+$'
+          check parallel "${PARALLEL}" '^[0-9]*$'
+          check component-name "${COMPONENT_NAME}" '^[A-Za-z0-9 ._-]*$'
+          check job-name "${JOB_NAME}" '^[A-Za-z0-9._-]+$'
+          check public-artifact-url "${PUBLIC_ARTIFACT_URL}" '^https://[A-Za-z0-9._~/-]+$'
+          case "${PLATFORM}-${DISTRIBUTION}" in
+            linux-tar|linux-rpm|linux-deb|windows-zip) ;;
+            *) echo "::error::${DISTRIBUTION} is not built on ${PLATFORM} (Jenkins: linux tar/rpm/deb, windows zip)."; exit 1 ;;
+          esac
+          if [ -n "${RUNS_ON}" ]; then
+            python3 -c 'import json, re, sys
+          labels = json.loads(sys.argv[1])
+          assert isinstance(labels, list) and labels and all(isinstance(l, str) and re.fullmatch(r"[A-Za-z0-9._-]+", l) for l in labels)' "${RUNS_ON}" \
+              || { echo "::error::runs-on must be a JSON array of runner labels, got '${RUNS_ON}'."; exit 1; }
+          fi
+          PACKAGE=false
+          case "${DISTRIBUTION}" in rpm|deb) PACKAGE=true ;; esac
+          {
+            echo "distribution=${DISTRIBUTION}"
+            echo "package=${PACKAGE}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the input manifest
+        id: manifest
+        uses: ./.github/actions/resolve-input-manifest
+        with:
+          input-manifest: ${{ inputs.input-manifest }}
+          checkout: 'false'
+          platform: ${{ inputs.platform }}
+          distribution: ${{ steps.params.outputs.distribution }}
+
+      - name: Resolve the CI-runner images
+        id: images
+        env:
+          MANIFEST_FILE: ${{ steps.manifest.outputs.manifest-file }}
+          PLATFORM: ${{ inputs.platform }}
+          PACKAGE: ${{ steps.params.outputs.package }}
+          IMAGE: ${{ steps.manifest.outputs.ci-image }}
+          ARGS: ${{ steps.manifest.outputs.ci-args }}
+        run: |
+          set -euo pipefail
+          # ADR 0001: pull through the mirror Jenkins used (registryUrl https://public.ecr.aws/), not Docker Hub.
+          mirror() {
+            case "${1%%/*}" in
+              *.*|*:*|localhost) echo "$1" ;;
+              *) echo "public.ecr.aws/opensearchorg/$1" ;;
+            esac
+          }
+          BUILD_IMAGE="${IMAGE}"
+          if [ "${PACKAGE}" = true ]; then
+            # build-archive-linux-<arch>-<rpm|deb>: image dockerAgentLinuxTar.image, args of the package agent
+            BUILD_IMAGE=$(python3 .github/scripts/manifest_paths.py ci-image "${MANIFEST_FILE}" --platform "${PLATFORM}" --distribution tar | sed -n 's/^image=//p')
+          fi
+          {
+            echo "build-image=$(mirror "${BUILD_IMAGE}")"
+            echo "build-args=${ARGS}"
+            echo "assemble-image=$(mirror "${IMAGE}")"
+            echo "assemble-args=${ARGS}"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Pick the runner
+        id: runner
+        env:
+          RUNS_ON: ${{ inputs.runs-on }}
+          PLATFORM: ${{ inputs.platform }}
+          ARCHITECTURE: ${{ inputs.architecture }}
+        run: |
+          set -euo pipefail
+          if [ -n "${RUNS_ON}" ]; then
+            echo "runs-on=${RUNS_ON}" | tee -a "$GITHUB_OUTPUT"
+          else
+            python3 .github/scripts/manifest_paths.py runs-on --platform "${PLATFORM}" --architecture "${ARCHITECTURE}" | tee -a "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: ${{ needs.setup.outputs.package == 'true' && 'build-archive' || 'build-and-assemble' }}-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
+    needs: setup
+    runs-on: ${{ fromJSON(needs.setup.outputs.runs-on) }}
+    # distribution-build.jenkinsfile: timeout(time: 4, unit: 'HOURS')
+    timeout-minutes: 240
+    # Linux stages ran in a docker agent; GitHub Actions has no job containers on Windows runners.
+    container: ${{ inputs.platform == 'linux' && fromJSON(format('{{"image":"{0}","options":"{1}"}}', needs.setup.outputs.build-image, needs.setup.outputs.build-args)) || null }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GRADLE_OPTS: '-Drepos.mavenLocal=true'
+      # build.sh writes BUILD_NUMBER into build.id; the run id keeps GHA builds apart from Jenkins build numbers.
+      BUILD_NUMBER: ${{ github.run_id }}
+      PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+    outputs:
+      build-manifest-url: ${{ steps.assemble.outputs.build-manifest-url }}
+      bundle-manifest-url: ${{ steps.assemble.outputs.bundle-manifest-url }}
+      artifact-url: ${{ steps.assemble.outputs.artifact-url }}
+      artifact-root: ${{ steps.assemble.outputs.artifact-root }}
+      artifact-root-url: ${{ steps.assemble.outputs.artifact-root-url }}
+      build-id: ${{ steps.assemble.outputs.build-id }}
+      version: ${{ steps.assemble.outputs.version }}
+      package-name: ${{ steps.assemble.outputs.package-name }}
+      min-artifact: ${{ steps.assemble.outputs.min-artifact }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Switch the Windows JDK
+        # distribution-build.jenkinsfile windows stages: scoop reset to the JDK the manifest image args select
+        if: ${{ inputs.platform == 'windows' }}
+        env:
+          JAVA_VERSION: ${{ needs.setup.outputs.java-version }}
+        run: |
+          set -euo pipefail
+          JAVA_VERSION_NUMBER="${JAVA_VERSION//[^0-9]/}"
+          echo "Switching to Java ${JAVA_VERSION_NUMBER} on Windows"
+          scoop reset "$(scoop list jdk | cut -d ' ' -f1 | grep "${JAVA_VERSION_NUMBER}" | head -1)"
+
+      - name: Build
+        env:
+          MANIFEST_PATH: ${{ needs.setup.outputs.manifest-path }}
+          DISTRIBUTION: ${{ needs.setup.outputs.distribution }}
+          PLATFORM: ${{ inputs.platform }}
+          ARCHITECTURE: ${{ inputs.architecture }}
+          COMPONENT_NAME: ${{ inputs.component-name }}
+          SNAPSHOT: ${{ inputs.snapshot }}
+          CONTINUE_ON_ERROR: ${{ inputs.continue-on-error }}
+          SKIP_ARTIFACT_CHECK: ${{ inputs.skip-artifact-check }}
+          PARALLEL: ${{ inputs.parallel }}
+        run: |
+          set -euo pipefail
+          # buildManifest.groovy (jenkins@12.0.0) argument order
+          ARGS=("${MANIFEST_PATH}" -d "${DISTRIBUTION}")
+          if [ -n "${COMPONENT_NAME}" ]; then
+            # Jenkins interpolated "--component ${COMPONENT_NAME}" unquoted, so several names became several args.
+            read -r -a COMPONENTS <<< "${COMPONENT_NAME}"
+            ARGS+=(--component "${COMPONENTS[@]}")
+          fi
+          ARGS+=(-p "${PLATFORM}" -a "${ARCHITECTURE}")
+          [ "${SNAPSHOT}" = true ] && ARGS+=(--snapshot)
+          [ "${CONTINUE_ON_ERROR}" = true ] && ARGS+=(--continue-on-error)
+          [ "${SKIP_ARTIFACT_CHECK}" = true ] && ARGS+=(--skip-artifact-check)
+          if [ -n "${PARALLEL}" ] && [ "${PARALLEL}" != 0 ]; then
+            ARGS+=(--parallel "${PARALLEL}")
+          fi
+          echo "./build.sh ${ARGS[*]}"
+          bash ./build.sh "${ARGS[@]}"
+
+      - name: Stash the builds for assemble
+        # buildArchive.groovy: stash includes: "<distribution>/builds/**"
+        if: ${{ needs.setup.outputs.package == 'true' }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: builds-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
+          path: ${{ needs.setup.outputs.distribution }}/builds
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Assemble and upload
+        id: assemble
+        if: ${{ needs.setup.outputs.package != 'true' }}
+        uses: ./.github/actions/assemble-upload
+        with:
+          distribution: ${{ needs.setup.outputs.distribution }}
+          filename: ${{ needs.setup.outputs.filename }}
+          job-name: ${{ inputs.job-name }}
+          build-number: ${{ github.run_id }}
+          public-artifact-url: ${{ inputs.public-artifact-url }}
+          upload: ${{ inputs.upload }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+          bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          update-latest-url: ${{ inputs.update-latest-url }}
+
+      - name: Record the build manifests and file list
+        # Jenkins kept these on S3 only; the run keeps a copy so a dry run (upload: false) can be diffed.
+        if: ${{ always() && needs.setup.outputs.package != 'true' }}
+        env:
+          DISTRIBUTION: ${{ needs.setup.outputs.distribution }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-record
+          if [ -d "${DISTRIBUTION}" ]; then
+            (cd "${DISTRIBUTION}" && find builds dist -type f 2>/dev/null | LC_ALL=C sort) > build-record/file-list.txt
+            (cd "${DISTRIBUTION}" && find builds dist -name manifest.yml -exec cp --parents {} ../build-record/ \; 2>/dev/null) || true
+          fi
+
+      - name: Keep the build record in the run
+        if: ${{ always() && needs.setup.outputs.package != 'true' }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: build-record-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
+          path: build-record
+          if-no-files-found: warn
+
+  assemble:
+    name: assemble-archive-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
+    needs: [setup, build]
+    if: ${{ needs.setup.outputs.package == 'true' }}
+    runs-on: ${{ fromJSON(needs.setup.outputs.runs-on) }}
+    timeout-minutes: 240
+    environment: ${{ inputs.sign-rpm && 'release' || '' }}
+    container:
+      image: ${{ needs.setup.outputs.assemble-image }}
+      options: ${{ needs.setup.outputs.assemble-args }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      BUILD_NUMBER: ${{ github.run_id }}
+      PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+      RPM_SIGNING_KEY_ID: ${{ secrets.RPM_SIGNING_KEY_ID }}
+      RPM_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_SIGNING_PASSPHRASE_SECRETS_ARN }}
+      RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+      RPM_RELEASE_SIGNING_KEY_ID: ${{ secrets.RPM_RELEASE_SIGNING_KEY_ID }}
+      RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN }}
+      RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+    outputs:
+      build-manifest-url: ${{ steps.assemble.outputs.build-manifest-url }}
+      bundle-manifest-url: ${{ steps.assemble.outputs.bundle-manifest-url }}
+      artifact-url: ${{ steps.assemble.outputs.artifact-url }}
+      artifact-root: ${{ steps.assemble.outputs.artifact-root }}
+      artifact-root-url: ${{ steps.assemble.outputs.artifact-root-url }}
+      build-id: ${{ steps.assemble.outputs.build-id }}
+      version: ${{ steps.assemble.outputs.version }}
+      package-name: ${{ steps.assemble.outputs.package-name }}
+      min-artifact: ${{ steps.assemble.outputs.min-artifact }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Unstash the builds
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: builds-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
+          path: ${{ needs.setup.outputs.distribution }}/builds
+
+      - name: Assemble and upload
+        id: assemble
+        uses: ./.github/actions/assemble-upload
+        with:
+          distribution: ${{ needs.setup.outputs.distribution }}
+          filename: ${{ needs.setup.outputs.filename }}
+          job-name: ${{ inputs.job-name }}
+          build-number: ${{ github.run_id }}
+          public-artifact-url: ${{ inputs.public-artifact-url }}
+          upload: ${{ inputs.upload }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+          bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          update-latest-url: ${{ inputs.update-latest-url }}
+          sign-rpm: ${{ inputs.sign-rpm }}
+          rpm-signing-role: ${{ secrets.AWS_ROLE_RPM_SIGNING }}
+
+      - name: Record the build manifests and file list
+        # Jenkins kept these on S3 only; the run keeps a copy so a dry run (upload: false) can be diffed.
+        if: ${{ always() }}
+        env:
+          DISTRIBUTION: ${{ needs.setup.outputs.distribution }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-record
+          if [ -d "${DISTRIBUTION}" ]; then
+            (cd "${DISTRIBUTION}" && find builds dist -type f 2>/dev/null | LC_ALL=C sort) > build-record/file-list.txt
+            (cd "${DISTRIBUTION}" && find builds dist -name manifest.yml -exec cp --parents {} ../build-record/ \; 2>/dev/null) || true
+          fi
+
+      - name: Keep the build record in the run
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: build-record-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
+          path: build-record
+          if-no-files-found: warn
+
+  release-candidate:
+    # uploadArtifacts.groovy: when buildFeature == build.version (always for distribution builds) the core min artifact
+    # and the bundle are copied to release-candidates/{core,bundle}/<filename>/<version>/ with the promotion role.
+    name: release-candidate-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
+    needs: [setup, build, assemble]
+    if: ${{ always() && inputs.release-candidate-upload && inputs.upload && (needs.assemble.result == 'success' || (needs.assemble.result == 'skipped' && needs.build.result == 'success')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ARTIFACT_ROOT_URL: ${{ needs.assemble.outputs.artifact-root-url || needs.build.outputs.artifact-root-url }}
+      FILENAME: ${{ needs.setup.outputs.filename }}
+      MIN_ARTIFACT: ${{ needs.assemble.outputs.min-artifact || needs.build.outputs.min-artifact }}
+      PACKAGE_NAME: ${{ needs.assemble.outputs.package-name || needs.build.outputs.package-name }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download the min artifact and the bundle
+        run: |
+          set -euo pipefail
+          mkdir -p rc/core rc/bundle
+          curl -sSfL --retry 5 --proto '=https' "${ARTIFACT_ROOT_URL}/builds/${FILENAME}/${MIN_ARTIFACT}" -o "rc/core/$(basename "${MIN_ARTIFACT}")"
+          curl -sSfL --retry 5 --proto '=https' "${ARTIFACT_ROOT_URL}/dist/${FILENAME}/${PACKAGE_NAME}" -o "rc/bundle/${PACKAGE_NAME}"
+
+      - name: Upload the core min artifact
+        uses: ./.github/actions/s3-sync
+        with:
+          direction: upload
+          role-to-assume: ${{ secrets.AWS_ROLE_PROMOTION }}
+          bucket: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+          remote-path: release-candidates/core/${{ needs.setup.outputs.filename }}/${{ needs.assemble.outputs.version || needs.build.outputs.version }}/
+          local-path: rc/core
+
+      - name: Upload the bundle
+        uses: ./.github/actions/s3-sync
+        with:
+          direction: upload
+          role-to-assume: ${{ secrets.AWS_ROLE_PROMOTION }}
+          bucket: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+          remote-path: release-candidates/bundle/${{ needs.setup.outputs.filename }}/${{ needs.assemble.outputs.version || needs.build.outputs.version }}/
+          local-path: rc/bundle
