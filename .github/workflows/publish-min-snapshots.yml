@@ -61,6 +61,11 @@ on:
         required: false
         default: 'linux-x64-tar linux-arm64-tar darwin-x64-tar darwin-arm64-tar windows-x64-zip'
         type: string
+      PUBLISH:
+        description: '<Optional> Upload to snapshots/ in the production bucket; off only lists the keys.'
+        required: false
+        default: true
+        type: boolean
 
 permissions: {}
 
@@ -139,7 +144,7 @@ jobs:
     timeout-minutes: 30
     # The production bucket and signing roles are `release` environment secrets; pull requests and publish: false
     # only list the keys, so they stay out of the environment (and its reviewer gate).
-    environment: ${{ (github.event_name != 'pull_request' && inputs.publish != false) && 'release' || '' }}
+    environment: ${{ (github.event_name != 'pull_request' && (inputs.publish || inputs.PUBLISH)) && 'release' || '' }}
     permissions:
       contents: read
       id-token: write
@@ -168,7 +173,7 @@ jobs:
         id: creds
         if: ${{ steps.download.outcome == 'success' }}
         env:
-          PUBLISH: ${{ inputs.publish == false && 'false' || 'true' }}
+          PUBLISH: ${{ (inputs.publish || inputs.PUBLISH) && 'true' || 'false' }}
           ROLE: ${{ secrets.AWS_ROLE_PROMOTION }}
           BUCKET: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
           SIGNING: ${{ secrets.AWS_ROLE_SIGNING_BASE != '' && secrets.SIGNER_CLIENT_ROLE != '' && secrets.SIGNER_CLIENT_EXTERNAL_ID != '' && secrets.SIGNER_CLIENT_UNSIGNED_BUCKET != '' && secrets.SIGNER_CLIENT_SIGNED_BUCKET != '' }}
