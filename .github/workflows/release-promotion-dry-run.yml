@@ -1,5 +1,5 @@
 ---
-# Dry runs of the s5.3 promotion building blocks for the latest release (3.9.0: OpenSearch RC build 12228, Dashboards RC
+# Dry runs of the s5.4 release-promotion orchestrator and the s5.3 promotion building blocks for the latest release (3.9.0: OpenSearch RC build 12228, Dashboards RC
 # build 9054), with the inputs central-release-promotion passes them. Only the GitHub-hosted plan jobs run (dry-run is the
 # default); each lists what would be promoted and compares it with what is published today.
 name: release-promotion-dry-run
@@ -7,7 +7,10 @@ name: release-promotion-dry-run
 on:
   pull_request:
     paths:
+      - .github/scripts/release_promotion.py
       - .github/scripts/release_promotion_plan.py
+      - .github/workflows/release-promotion.yml
+      - .github/workflows/validate-artifacts.yml
       - .github/workflows/distribution-promote-artifacts.yml
       - .github/workflows/distribution-promote-repos.yml
       - .github/workflows/docker-promotion.yml
@@ -19,6 +22,27 @@ permissions:
   contents: read
 
 jobs:
+  release-promotion:
+    name: Release promotion
+    permissions:
+      contents: read
+      # the called workflows' release jobs declare id-token: write; they are skipped in a dry run
+      id-token: write
+      # list the run's jobs for the summary
+      actions: read
+    uses: ./.github/workflows/release-promotion.yml
+    with:
+      RELEASE_VERSION: 3.9.0
+      OPENSEARCH_RC_BUILD_NUMBER: '12228'
+      OPENSEARCH_DASHBOARDS_RC_BUILD_NUMBER: '9054'
+      TAG_DOCKER_LATEST: true
+      PROJECTS: both
+      dry-run: true
+      # opensearchproject/opensearch:3.9.0 was re-released on 2026-10-26 (docker-re-release builds 160/161), so its digest no
+      # longer matches opensearchstaging/opensearch:3.9.0.12228 and the exact Jenkins gate fails, as Jenkins would today
+      # (run 42110979828). Every release still in manifests/ was re-released, so check against `latest`, which follows them.
+      production-docker-build-number-override: latest
+
   promote-artifacts:
     name: artifacts ${{ matrix.job }} ${{ matrix.platform }} ${{ matrix.architecture }} ${{ matrix.distribution }}
     strategy:
