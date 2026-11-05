@@ -1,0 +1,218 @@
+---
+# GitHub Actions port of jenkins/packer/packer-build-lf.jenkinsfile: builds the agent/runner AMIs from the
+# opensearch-ci packer templates. deployment/packer/render_template.py does the Jenkins readJSON/writeJSON
+# variable substitution and bakes in the GitHub Actions runner agent (ADR 0001).
+# Runs on GitHub-hosted runners: the self-hosted pools launch from the AMIs this workflow builds, so it
+# cannot depend on them, and packer only needs the EC2 API (Jenkins used the Docker builder only for tooling).
+name: packer-build
+run-name: packer-build ${{ inputs.PACKER_TEMPLATE_NAME || github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      PACKER_TEMPLATE_NAME:
+        description: '<Required> The packer template file name of the agent, e.g. jenkins-agent-al2023-x64.json. Files exist in https://github.com/opensearch-project/opensearch-ci/tree/main/packer'
+        required: true
+        type: string
+      PACKER_BUILD_GIT_REPOSITORY_REFERENCE:
+        description: '<Optional> opensearch-ci git ref to take the templates from.'
+        required: false
+        default: main
+        type: string
+      INSTALL_GHA_RUNNER:
+        description: '<Optional> Bake the GitHub Actions runner agent into the AMI (ADR 0001 self-hosted-ephemeral runners).'
+        required: false
+        default: true
+        type: boolean
+      DRY_RUN:
+        description: '<Optional> Only run packer validate + packer inspect; no AWS credentials, no build.'
+        required: false
+        default: false
+        type: boolean
+  pull_request:
+    paths:
+      - '.github/workflows/packer-build.yml'
+      - 'deployment/packer/**'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/packer-build.yml'
+      - 'deployment/packer/**'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.PACKER_TEMPLATE_NAME || github.event.pull_request.number || github.ref }}
+  # never cancel a running AMI build: packer would leave its instance, key pair and security group behind
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PACKER_VERSION: 1.14.2
+  PACKER_AMAZON_PLUGIN_VERSION: v1.3.9
+  OPENSEARCH_CI_REPOSITORY: opensearch-project/opensearch-ci
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # placeholders: packer validate/inspect make no AWS calls; real values only reach the build job
+      PACKER_BUILD_VPC_ID: vpc-0123456789abcdef0
+      PACKER_BUILD_SUBNET_ID: subnet-0123456789abcdef0
+      PACKER_BUILD_SG_ID: sg-0123456789abcdef0
+      PACKER_BUILD_REGION: us-east-1
+    steps:
+      - name: Parameters check
+        env:
+          PACKER_TEMPLATE_NAME: ${{ inputs.PACKER_TEMPLATE_NAME }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -z "${PACKER_TEMPLATE_NAME}" ]; then
+            echo "::error::PACKER_TEMPLATE_NAME parameter cannot be empty."
+            exit 1
+          fi
+          echo "Passing parameter checks."
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Checkout opensearch-ci
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ env.OPENSEARCH_CI_REPOSITORY }}
+          ref: ${{ inputs.PACKER_BUILD_GIT_REPOSITORY_REFERENCE || 'main' }}
+          path: opensearch-ci
+          persist-credentials: false
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
+        with:
+          version: ${{ env.PACKER_VERSION }}
+      - name: Install the amazon plugin
+        run: packer plugins install github.com/hashicorp/amazon "${PACKER_AMAZON_PLUGIN_VERSION}"
+      - name: packer validate + inspect
+        env:
+          PACKER_TEMPLATE_NAME: ${{ inputs.PACKER_TEMPLATE_NAME }}
+          INSTALL_GHA_RUNNER: ${{ github.event_name != 'workflow_dispatch' || inputs.INSTALL_GHA_RUNNER }}
+        run: |
+          set -euo pipefail
+          packer_dir="${GITHUB_WORKSPACE}/opensearch-ci/packer"
+          output="${RUNNER_TEMP}/packer-validate.txt"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            templates=("${PACKER_TEMPLATE_NAME}")
+          else
+            # every current (non-legacy) template, so a PR shows what each build would run
+            mapfile -t templates < <(cd "${packer_dir}" && ls -1 ./*.json | sed 's|^\./||')
+          fi
+          runner_flag=()
+          if [ "${INSTALL_GHA_RUNNER}" = "true" ]; then runner_flag=(--install-runner); fi
+          echo "packer $(packer version | head -1), opensearch-ci $(git -C opensearch-ci rev-parse HEAD)" | tee "${output}"
+          for template in "${templates[@]}"; do
+            substitute=$(python3 deployment/packer/render_template.py "${template}" --packer-dir "${packer_dir}" \
+              --manifest "${RUNNER_TEMP}/packer-manifest.json" "${runner_flag[@]}")
+            {
+              echo "::group::${template}"
+              echo "\$ packer validate ${substitute}"
+              (cd "${packer_dir}" && packer validate "${substitute}")
+              echo "\$ packer inspect ${substitute}"
+              (cd "${packer_dir}" && packer inspect "${substitute}")
+              echo "::endgroup::"
+            } 2>&1 | tee -a "${output}"
+          done
+          {
+            echo '### packer validate + inspect'
+            echo '```'
+            grep -v '^::' "${output}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: packer-validate
+          path: |
+            ${{ runner.temp }}/packer-validate.txt
+            opensearch-ci/packer/**/substitute_*.json
+          retention-days: 30
+
+  packer-build:
+    name: packer-build
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && !inputs.DRY_RUN
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    environment: ci
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Checkout opensearch-ci
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ env.OPENSEARCH_CI_REPOSITORY }}
+          ref: ${{ inputs.PACKER_BUILD_GIT_REPOSITORY_REFERENCE }}
+          path: opensearch-ci
+          persist-credentials: false
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
+        with:
+          version: ${{ env.PACKER_VERSION }}
+      - name: Install the amazon plugin
+        run: packer plugins install github.com/hashicorp/amazon "${PACKER_AMAZON_PLUGIN_VERSION}"
+      - name: Render template
+        id: render
+        env:
+          PACKER_TEMPLATE_NAME: ${{ inputs.PACKER_TEMPLATE_NAME }}
+          INSTALL_GHA_RUNNER: ${{ inputs.INSTALL_GHA_RUNNER }}
+          PACKER_BUILD_VPC_ID: ${{ secrets.PACKER_BUILD_VPC_ID }}
+          PACKER_BUILD_SUBNET_ID: ${{ secrets.PACKER_BUILD_SUBNET_ID }}
+          PACKER_BUILD_SG_ID: ${{ secrets.PACKER_BUILD_SG_ID }}
+          PACKER_BUILD_REGION: ${{ secrets.PACKER_BUILD_REGION }}
+        run: |
+          set -euo pipefail
+          runner_flag=()
+          if [ "${INSTALL_GHA_RUNNER}" = "true" ]; then runner_flag=(--install-runner); fi
+          substitute=$(python3 deployment/packer/render_template.py "${PACKER_TEMPLATE_NAME}" \
+            --packer-dir "${GITHUB_WORKSPACE}/opensearch-ci/packer" --manifest "${RUNNER_TEMP}/packer-manifest.json" "${runner_flag[@]}")
+          echo "substitute=${substitute}" >> "${GITHUB_OUTPUT}"
+      - uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_PACKER }}
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 3600
+          audience: sts.amazonaws.com
+          aws-region: ${{ secrets.PACKER_BUILD_REGION }}
+      - name: packer build
+        working-directory: opensearch-ci/packer
+        env:
+          SUBSTITUTE: ${{ steps.render.outputs.substitute }}
+        run: packer build -color=false "${SUBSTITUTE}"
+      - name: Report AMI
+        if: always()
+        env:
+          PACKER_TEMPLATE_NAME: ${{ inputs.PACKER_TEMPLATE_NAME }}
+        run: |
+          set -euo pipefail
+          manifest="${RUNNER_TEMP}/packer-manifest.json"
+          if [ ! -f "${manifest}" ]; then
+            echo "No packer manifest: the build did not produce an AMI."
+            exit 0
+          fi
+          {
+            echo "### ${PACKER_TEMPLATE_NAME}"
+            echo '| Region | AMI |'
+            echo '| --- | --- |'
+            jq -r '.builds[-1].artifact_id | split(",")[] | split(":") | "| \(.[0]) | `\(.[1])` |"' "${manifest}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: packer-manifest
+          path: ${{ runner.temp }}/packer-manifest.json
+          if-no-files-found: ignore
+          retention-days: 90
