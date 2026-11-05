@@ -167,7 +167,7 @@ See [src/manifests_workflow](./src/manifests_workflow) for more information.
 
 ### Deploying Infrastructure
 
-This project uses jenkins as the build infrastructure for building, testing and releasing the artifacts. The infrastructure is deployed using CDK and code can be found in [opensearch-ci](https://github.com/opensearch-project/opensearch-ci/tree/main) repository.
+This project uses jenkins as the build infrastructure for building, testing and releasing the artifacts. The infrastructure is deployed using CDK and code can be found in [opensearch-ci](https://github.com/opensearch-project/opensearch-ci/tree/main) repository. The GitHub Actions self-hosted runners and AWS OIDC roles that replace it are defined in [deployment/gha-runners](deployment/gha-runners/README.md).
 
 ## Contributing
 

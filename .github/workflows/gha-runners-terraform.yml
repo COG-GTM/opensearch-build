@@ -1,0 +1,43 @@
+---
+name: gha-runners-terraform
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'deployment/gha-runners/**'
+      - '.github/workflows/gha-runners-terraform.yml'
+  pull_request:
+    paths:
+      - 'deployment/gha-runners/**'
+      - '.github/workflows/gha-runners-terraform.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: deployment/gha-runners
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+      - name: terraform init (no backend)
+        run: terraform init -backend=false -input=false
+      - name: terraform validate
+        run: terraform validate

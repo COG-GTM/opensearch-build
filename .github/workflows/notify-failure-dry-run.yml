@@ -1,0 +1,45 @@
+---
+name: notify-failure-dry-run
+
+on:
+  pull_request:
+    paths:
+      - .github/actions/notify-failure/**
+      - .github/scripts/notify_failure.py
+      - .github/workflows/notify-failure-dry-run.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Distribution build failure issues
+        uses: ./.github/actions/notify-failure
+        with:
+          kind: distribution-build
+          input-manifest: manifests/3.9.0/opensearch-3.9.0.yml
+          failures: |
+            sql
+            k-NN
+          passed: job-scheduler
+          dry-run: 'true'
+      - name: Integration test failure issue and webhook post
+        uses: ./.github/actions/notify-failure
+        with:
+          kind: integ-test
+          input-manifest: manifests/3.9.0/opensearch-3.9.0.yml
+          component: security
+          failures: >-
+            [{"platform": "linux", "distribution": "tar", "architecture": "x64", "distribution_build_number": "11111",
+            "rc_number": "0", "test_report_manifest_yml": "https://ci.opensearch.org/ci/dbc/integ-test/3.9.0/11111/linux/x64/tar/test-results/1234/integ-test/test-report.yml"}]
+          passed: job-scheduler
+          release-owners: '{"security": ["octocat"]}'
+          webhook-message: Integration tests failed for OpenSearch 3.9.0
+          webhook-manifest: manifests/3.9.0/opensearch-3.9.0.yml
+          dry-run: 'true'

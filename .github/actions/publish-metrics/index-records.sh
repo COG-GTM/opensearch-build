@@ -19,6 +19,11 @@ INDEX="$2"
 ALIAS="$3"
 MAPPING_FILE="$4"
 
+if [ ! -f "${MAPPING_FILE}" ]; then
+  echo "::error::Mapping file ${MAPPING_FILE} not found."
+  exit 1
+fi
+
 # SigV4 credentials go into a 0600 curl config file instead of the command line, so they never show up in the
 # process table of a runner that also runs build and test code.
 CURL_CONFIG=$(mktemp)
@@ -32,26 +37,34 @@ trap 'rm -f "${CURL_CONFIG}" "${BULK_RESPONSE}"' EXIT
 } > "${CURL_CONFIG}"
 SIGV4=(--config "${CURL_CONFIG}" --proto '=https')
 
+# Metrics never fail the build or test run (Jenkins only warned on a failed bulk call): every cluster-side failure below
+# is a warning that the records were not published.
 INDEX_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -I "${METRICS_HOST_URL}/${INDEX}" "${SIGV4[@]}")
 if [ "${INDEX_STATUS}" = '200' ]; then
   echo "Index ${INDEX} already exists."
 else
-  echo "Index ${INDEX} does not exist. Creating..."
+  echo "Index ${INDEX} does not exist (HTTP ${INDEX_STATUS}). Creating..."
   CREATE_RESPONSE=$(curl -s -XPUT "${METRICS_HOST_URL}/${INDEX}" "${SIGV4[@]}" \
     -H 'Content-Type: application/json' --data-binary "@${MAPPING_FILE}")
   case "${CREATE_RESPONSE}" in
-    *'"acknowledged":true'*)
-      ALIAS_RESPONSE=$(curl -s -XPOST "${METRICS_HOST_URL}/_aliases" "${SIGV4[@]}" -H 'Content-Type: application/json' \
-        -d "{\"actions\":[{\"add\":{\"index\":\"${INDEX}\",\"alias\":\"${ALIAS}\"}}]}")
-      case "${ALIAS_RESPONSE}" in
-        *'"acknowledged":true'*) echo "Index created and added to alias ${ALIAS}." ;;
-        *) echo "::warning::Failed to add ${INDEX} to alias ${ALIAS}: ${ALIAS_RESPONSE}" ;;
-      esac
-      ;;
+    *'"acknowledged":true'*) echo "Index ${INDEX} created." ;;
     *)
-      echo "::error::Failed to create index ${INDEX}: ${CREATE_RESPONSE}"
-      exit 1
+      echo "::warning::Failed to create index ${INDEX}, records not published: ${CREATE_RESPONSE}"
+      exit 0
       ;;
+  esac
+fi
+
+# Checked on every run, not only after creating the index, so an alias call that failed earlier is repaired.
+ALIAS_STATUS=$(curl -s -o /dev/null -w '%{http_code}' "${METRICS_HOST_URL}/${INDEX}/_alias/${ALIAS}" "${SIGV4[@]}")
+if [ "${ALIAS_STATUS}" = '200' ]; then
+  echo "Index ${INDEX} is in alias ${ALIAS}."
+else
+  ALIAS_RESPONSE=$(curl -s -XPOST "${METRICS_HOST_URL}/_aliases" "${SIGV4[@]}" -H 'Content-Type: application/json' \
+    -d "{\"actions\":[{\"add\":{\"index\":\"${INDEX}\",\"alias\":\"${ALIAS}\"}}]}")
+  case "${ALIAS_RESPONSE}" in
+    *'"acknowledged":true'*) echo "Added ${INDEX} to alias ${ALIAS}." ;;
+    *) echo "::warning::Failed to add ${INDEX} to alias ${ALIAS} (retried on the next run): ${ALIAS_RESPONSE}" ;;
   esac
 fi
 
@@ -62,7 +75,6 @@ fi
 BULK_HTTP_CODE=$(curl -s -o "${BULK_RESPONSE}" -w '%{http_code}' -XPOST "${METRICS_HOST_URL}/${INDEX}/_bulk" \
   "${SIGV4[@]}" -H 'Content-Type: application/x-ndjson' --data-binary "@${RECORDS_FILE}")
 echo "Bulk indexing into ${INDEX}: HTTP ${BULK_HTTP_CODE}"
-# Jenkins only warned on a failed bulk call, so a metrics outage does not fail the build or test run.
 if [ "${BULK_HTTP_CODE}" -lt 200 ] || [ "${BULK_HTTP_CODE}" -gt 299 ]; then
   echo "::warning::Bulk indexing into ${INDEX} failed with HTTP ${BULK_HTTP_CODE}"
 elif grep -q '"errors":[[:space:]]*true' "${BULK_RESPONSE}"; then

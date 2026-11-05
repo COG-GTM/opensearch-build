@@ -194,11 +194,18 @@ runs:
           rpm -qip "$1" | grep Signature
         }
         if [ -d "${ARTIFACT_PATH}" ]; then
+          signed=0
           for rpm_file in "${ARTIFACT_PATH}"/*; do
             if file "${rpm_file}" | grep -q RPM; then
               sign_rpm "${rpm_file}"
+              signed=$((signed + 1))
             fi
           done
+          # Nothing signed must not pass as a signed release.
+          if [ "${signed}" -eq 0 ]; then
+            echo "::error::No RPM packages found in ${ARTIFACT_PATH}."
+            exit 1
+          fi
         elif file "${ARTIFACT_PATH}" | grep -q RPM; then
           sign_rpm "${ARTIFACT_PATH}"
         else
