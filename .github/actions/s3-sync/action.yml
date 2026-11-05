@@ -1,0 +1,143 @@
+---
+name: 'S3 sync'
+description: >-
+  Upload to or download from S3 through a GitHub OIDC role, replacing the shared-library steps uploadToS3(),
+  downloadFromS3(), uploadTestResults(), uploadIndexFile() and the S3 parts of createUploadTestReportManifest(),
+  runIntegTestScriptForOSD() and runBenchmarkTestScript(). Jenkins wrapped s3Upload/s3Download in
+  withAWS(role:, roleAccount:); here `role-to-assume` is the role ARN secret from ADR 0001 (AWS_ROLE_ARTIFACTS,
+  AWS_ROLE_TEST_RESULTS, AWS_ROLE_PROMOTION, ...). No static keys. The calling job needs `permissions: id-token: write`.
+
+inputs:
+  direction:
+    description: 'upload or download'
+    required: true
+  role-to-assume:
+    description: 'ARN of the IAM role to assume, passed from a secret, e.g. secrets.AWS_ROLE_ARTIFACTS'
+    required: true
+  bucket:
+    description: 'Bucket name, passed from a secret or variable, e.g. secrets.ARTIFACT_BUCKET_NAME'
+    required: true
+  remote-path:
+    description: >-
+      Key or prefix inside the bucket. Leading slashes are dropped. A trailing slash (or a local directory on upload)
+      means a prefix, copied recursively.
+    required: true
+  local-path:
+    description: 'Local file or directory: the source on upload, the destination on download'
+    required: true
+  tolerate-missing:
+    description: >-
+      On upload, skip with a warning instead of failing when local-path does not exist (uploadTestResults ran from a
+      `finally` block, so its directory may be missing). Artifact uploads keep the default and fail.
+    required: false
+    default: 'false'
+  aws-region:
+    description: 'AWS region'
+    required: false
+    default: 'us-east-1'
+  role-duration-seconds:
+    description: 'Role session duration (ADR 0001 role table: 900 for artifact and test-result roles)'
+    required: false
+    default: '900'
+
+outputs:
+  s3-uri:
+    description: 'S3 URI that was copied to or from'
+    value: ${{ steps.plan.outputs.s3-uri }}
+  skipped:
+    description: '''true'' when an upload was skipped because local-path did not exist and tolerate-missing was set'
+    value: ${{ steps.plan.outputs.skipped }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      id: plan
+      shell: bash
+      env:
+        DIRECTION: ${{ inputs.direction }}
+        ROLE_TO_ASSUME: ${{ inputs.role-to-assume }}
+        BUCKET: ${{ inputs.bucket }}
+        REMOTE_PATH: ${{ inputs.remote-path }}
+        LOCAL_PATH: ${{ inputs.local-path }}
+        TOLERATE_MISSING: ${{ inputs.tolerate-missing }}
+      run: |
+        set -euo pipefail
+        case "${DIRECTION}" in
+          upload|download) ;;
+          *) echo "::error::direction must be upload or download, got '${DIRECTION}'."; exit 1 ;;
+        esac
+        if [ -z "${ROLE_TO_ASSUME}" ]; then
+          echo "::error::role-to-assume is empty. Pass the role ARN secret from ADR 0001 (e.g. secrets.AWS_ROLE_ARTIFACTS)."
+          exit 1
+        fi
+        if [ -z "${BUCKET}" ]; then
+          echo "::error::bucket is empty."
+          exit 1
+        fi
+        KEY="${REMOTE_PATH#"${REMOTE_PATH%%[!/]*}"}"
+        if [ -z "${KEY}" ]; then
+          echo "::error::remote-path is empty."
+          exit 1
+        fi
+        case "/${KEY}/" in
+          */../*|*/./*) echo "::error::remote-path must not contain '.' or '..' segments."; exit 1 ;;
+        esac
+        SKIPPED=false
+        if [ "${DIRECTION}" = upload ] && [ ! -e "${LOCAL_PATH}" ]; then
+          if [ "${TOLERATE_MISSING}" != 'true' ]; then
+            echo "::error::${LOCAL_PATH} does not exist, nothing to upload."
+            exit 1
+          fi
+          echo "::warning::${LOCAL_PATH} does not exist, nothing to upload."
+          SKIPPED=true
+        fi
+        {
+          echo "s3-uri=s3://${BUCKET}/${KEY}"
+          echo "skipped=${SKIPPED}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Assume ${{ inputs.direction }} role
+      if: ${{ steps.plan.outputs.skipped != 'true' }}
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+      with:
+        role-to-assume: ${{ inputs.role-to-assume }}
+        role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+        role-duration-seconds: ${{ inputs.role-duration-seconds }}
+        audience: sts.amazonaws.com
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Copy ${{ inputs.direction == 'upload' && 'to' || 'from' }} S3
+      if: ${{ steps.plan.outputs.skipped != 'true' }}
+      shell: bash
+      env:
+        DIRECTION: ${{ inputs.direction }}
+        S3_URI: ${{ steps.plan.outputs.s3-uri }}
+        LOCAL_PATH: ${{ inputs.local-path }}
+      run: |
+        set -euo pipefail
+        if [ "${DIRECTION}" = upload ]; then
+          if [ -d "${LOCAL_PATH}" ]; then
+            echo "Uploading directory ${LOCAL_PATH} to ${S3_URI%/}/"
+            aws s3 cp --recursive --no-progress "${LOCAL_PATH}" "${S3_URI%/}/"
+          else
+            DESTINATION="${S3_URI}"
+            case "${DESTINATION}" in */) DESTINATION="${DESTINATION}$(basename "${LOCAL_PATH}")" ;; esac
+            echo "Uploading ${LOCAL_PATH} to ${DESTINATION}"
+            aws s3 cp --no-progress "${LOCAL_PATH}" "${DESTINATION}"
+          fi
+        else
+          # s3Download(force: true) overwrote the workspace copy; `aws s3 cp` does the same.
+          case "${S3_URI}" in
+            */)
+              mkdir -p "${LOCAL_PATH}"
+              echo "Downloading prefix ${S3_URI} to ${LOCAL_PATH}/"
+              aws s3 cp --recursive --no-progress "${S3_URI}" "${LOCAL_PATH}/"
+              ;;
+            *)
+              mkdir -p "$(dirname "${LOCAL_PATH}")"
+              echo "Downloading ${S3_URI} to ${LOCAL_PATH}"
+              aws s3 cp --no-progress "${S3_URI}" "${LOCAL_PATH}"
+              ;;
+          esac
+        fi

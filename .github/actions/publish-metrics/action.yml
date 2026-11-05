@@ -1,0 +1,210 @@
+---
+name: 'Publish metrics'
+description: >-
+  Generates the build or test result records the shared-library steps publishDistributionBuildResults()
+  (`kind: build`) and publishIntegTestResults() (`kind: integ`) bulk-indexed into the metrics cluster, and indexes them
+  with SigV4 through the AWS_ROLE_METRICS OIDC role (ADR 0001). Record generation is
+  .github/scripts/metrics_records.py; the index/alias creation and `_bulk` call are index-records.sh. With
+  `dry-run: true` the records are generated and summarised but nothing is sent. Indexing needs
+  `permissions: id-token: write` on the calling job.
+
+inputs:
+  kind:
+    description: 'build (distribution build results) or integ (integration test results and failures)'
+    required: true
+  input-manifest:
+    description: 'kind=build: input manifest of the build'
+    required: false
+    default: ''
+  build-logs-directory:
+    description: >-
+      kind=build: directory of the ./build.sh logs (tee-ed by the build jobs); components are classified from their
+      "Successfully built" / "Error building" lines, as buildMessage() did with the Jenkins console log.
+    required: false
+    default: 'build-logs'
+  rc-number:
+    description: 'kind=build: RC number, 0 when the build is not a release candidate'
+    required: false
+    default: '0'
+  component-category:
+    description: 'kind=build: OpenSearch or OpenSearch Dashboards'
+    required: false
+    default: 'OpenSearch'
+  overall-build-result:
+    description: 'kind=build: SUCCESS, FAILURE, ... (Jenkins currentBuild.result)'
+    required: false
+    default: 'SUCCESS'
+  test-report:
+    description: 'kind=integ: test-report.yml written by ./report.sh'
+    required: false
+    default: ''
+  job-name:
+    description: 'kind=integ: test job name in the test-report URL (Jenkins JOB_NAME)'
+    required: false
+    default: 'integ-test'
+  distribution-build-url:
+    description: 'kind=integ: URL of the distribution build run under test'
+    required: false
+    default: ''
+  build-number:
+    description: 'Build or test run number (Jenkins BUILD_NUMBER). Defaults to the workflow run number.'
+    required: false
+    default: ${{ github.run_number }}
+  build-url:
+    description: 'URL of this run (Jenkins RUN_DISPLAY_URL). Defaults to the workflow run URL.'
+    required: false
+    default: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  build-start-time:
+    description: 'Run start time in epoch milliseconds. Empty uses the time this step starts.'
+    required: false
+    default: ''
+  metrics-host-url:
+    description: 'Metrics cluster endpoint, passed from secrets.METRICS_CLUSTER_ENDPOINT'
+    required: false
+    default: ''
+  role-to-assume:
+    description: 'Metrics role ARN, passed from secrets.AWS_ROLE_METRICS'
+    required: false
+    default: ''
+  aws-region:
+    description: 'Region used for the role session and SigV4 signing'
+    required: false
+    default: 'us-east-1'
+  dry-run:
+    description: 'Generate and summarise the records without indexing them'
+    required: false
+    default: 'false'
+
+outputs:
+  index:
+    description: 'Monthly index the (results) records target'
+    value: ${{ steps.records.outputs.index }}
+  records-file:
+    description: 'ndjson _bulk body of the (results) records'
+    value: ${{ steps.records.outputs.records-file }}
+  record-count:
+    description: 'Number of (results) records'
+    value: ${{ steps.records.outputs.record-count }}
+  failures-file:
+    description: 'kind=integ: ndjson _bulk body of the failure records'
+    value: ${{ steps.records.outputs.failures-file }}
+  failure-count:
+    description: 'kind=integ: number of failure records'
+    value: ${{ steps.records.outputs.failure-count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Generate the ${{ inputs.kind }} records
+      id: records
+      shell: bash
+      env:
+        KIND: ${{ inputs.kind }}
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
+        BUILD_LOGS_DIRECTORY: ${{ inputs.build-logs-directory }}
+        RC_NUMBER: ${{ inputs.rc-number }}
+        COMPONENT_CATEGORY: ${{ inputs.component-category }}
+        OVERALL_BUILD_RESULT: ${{ inputs.overall-build-result }}
+        TEST_REPORT: ${{ inputs.test-report }}
+        JOB_NAME: ${{ inputs.job-name }}
+        DISTRIBUTION_BUILD_URL: ${{ inputs.distribution-build-url }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+        BUILD_URL: ${{ inputs.build-url }}
+        BUILD_START_TIME: ${{ inputs.build-start-time }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        METRICS_HOST_URL: ${{ inputs.metrics-host-url }}
+        ROLE_TO_ASSUME: ${{ inputs.role-to-assume }}
+      run: |
+        set -euo pipefail
+        bash "${GITHUB_ACTION_PATH}/../../scripts/ensure-pyyaml.sh"
+        SCRIPT="${GITHUB_ACTION_PATH}/../../scripts/metrics_records.py"
+        OUT_DIR="${RUNNER_TEMP}/publish-metrics-${KIND}"
+        mkdir -p "${OUT_DIR}"
+        START_TIME="${BUILD_START_TIME:-$(($(date +%s) * 1000))}"
+        if [ "${DRY_RUN}" != 'true' ] && { [ -z "${METRICS_HOST_URL}" ] || [ -z "${ROLE_TO_ASSUME}" ]; }; then
+          echo "::error::metrics-host-url and role-to-assume are required unless dry-run is true (secrets.METRICS_CLUSTER_ENDPOINT, secrets.AWS_ROLE_METRICS)."
+          exit 1
+        fi
+        case "${KIND}" in
+          build)
+            [ -f "${INPUT_MANIFEST}" ] || { echo "::error::input-manifest '${INPUT_MANIFEST}' not found."; exit 1; }
+            LOG_ARGS=()
+            while IFS= read -r -d '' log; do
+              LOG_ARGS+=(--build-log "${log}")
+            done < <(find "${BUILD_LOGS_DIRECTORY}" -type f -name '*.log' -print0 2>/dev/null || true)
+            if [ "${#LOG_ARGS[@]}" -eq 0 ]; then
+              echo "::warning::No *.log files under ${BUILD_LOGS_DIRECTORY}; no component results can be derived."
+            fi
+            python3 "${SCRIPT}" distribution-build-results \
+              --input-manifest "${INPUT_MANIFEST}" \
+              ${LOG_ARGS[@]+"${LOG_ARGS[@]}"} \
+              --build-number "${BUILD_NUMBER}" \
+              --build-url "${BUILD_URL}" \
+              --build-start-time "${START_TIME}" \
+              --rc-number "${RC_NUMBER}" \
+              --component-category "${COMPONENT_CATEGORY}" \
+              --overall-build-result "${OVERALL_BUILD_RESULT}" \
+              --output "${OUT_DIR}/records.ndjson" | tee -a "$GITHUB_OUTPUT"
+            ;;
+          integ)
+            [ -f "${TEST_REPORT}" ] || { echo "::error::test-report '${TEST_REPORT}' not found."; exit 1; }
+            python3 "${SCRIPT}" integ-test-results \
+              --test-report "${TEST_REPORT}" \
+              --job-name "${JOB_NAME}" \
+              --integ-test-build-number "${BUILD_NUMBER}" \
+              --integ-test-build-url "${BUILD_URL}" \
+              --distribution-build-url "${DISTRIBUTION_BUILD_URL}" \
+              --build-start-time "${START_TIME}" \
+              --output "${OUT_DIR}/records.ndjson" \
+              --failures-output "${OUT_DIR}/failures.ndjson" | tee -a "$GITHUB_OUTPUT"
+            echo "failures-file=${OUT_DIR}/failures.ndjson" >> "$GITHUB_OUTPUT"
+            echo "failure-count=$(( $(wc -l < "${OUT_DIR}/failures.ndjson") / 2 ))" >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "::error::kind must be build or integ, got '${KIND}'."
+            exit 1
+            ;;
+        esac
+        RECORD_COUNT=$(( $(wc -l < "${OUT_DIR}/records.ndjson") / 2 ))
+        {
+          echo "records-file=${OUT_DIR}/records.ndjson"
+          echo "record-count=${RECORD_COUNT}"
+        } >> "$GITHUB_OUTPUT"
+        echo "Generated ${RECORD_COUNT} ${KIND} record(s)."
+        if [ "${DRY_RUN}" = 'true' ]; then
+          echo "::notice::publish-metrics dry run: ${RECORD_COUNT} ${KIND} record(s) generated, nothing indexed."
+        fi
+
+    - name: Assume the metrics role
+      if: ${{ inputs.dry-run != 'true' }}
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+      with:
+        role-to-assume: ${{ inputs.role-to-assume }}
+        role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+        role-duration-seconds: 900
+        audience: sts.amazonaws.com
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Index the ${{ inputs.kind }} records
+      if: ${{ inputs.dry-run != 'true' }}
+      shell: bash
+      env:
+        KIND: ${{ inputs.kind }}
+        METRICS_HOST_URL: ${{ inputs.metrics-host-url }}
+        REGION: ${{ inputs.aws-region }}
+        MAPPINGS: ${{ github.action_path }}/../../mappings
+        RECORDS_FILE: ${{ steps.records.outputs.records-file }}
+        INDEX: ${{ steps.records.outputs.index }}
+        ALIAS: ${{ steps.records.outputs.alias }}
+        FAILURES_FILE: ${{ steps.records.outputs.failures-file }}
+        FAILURES_INDEX: ${{ steps.records.outputs.failures-index }}
+        FAILURES_ALIAS: ${{ steps.records.outputs.failures-alias }}
+      run: |
+        set -euo pipefail
+        INDEX_RECORDS="${GITHUB_ACTION_PATH}/index-records.sh"
+        if [ "${KIND}" = build ]; then
+          bash "${INDEX_RECORDS}" "${RECORDS_FILE}" "${INDEX}" "${ALIAS}" "${MAPPINGS}/opensearch-distribution-build-results.json"
+        else
+          bash "${INDEX_RECORDS}" "${RECORDS_FILE}" "${INDEX}" "${ALIAS}" "${MAPPINGS}/opensearch-integration-test-results.json"
+          bash "${INDEX_RECORDS}" "${FAILURES_FILE}" "${FAILURES_INDEX}" "${FAILURES_ALIAS}" "${MAPPINGS}/opensearch-integration-test-failures.json"
+        fi

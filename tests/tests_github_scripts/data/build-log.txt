@@ -1,0 +1,5 @@
+2026-11-05 10:00:00 INFO     Building OpenSearch Dashboards (3.9.0)
+2026-11-05 10:10:00 INFO     Successfully built OpenSearch-Dashboards
+2026-11-05 10:20:00 ERROR    Error building alertingDashboards, retry with: ./build.sh manifests/3.9.0/opensearch-dashboards-3.9.0.yml --component alertingDashboards
+2026-11-05 10:30:00 INFO     Successfully built securityDashboards
+2026-11-05 10:31:00 INFO     Successfully built securityDashboards

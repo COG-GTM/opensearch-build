@@ -1,0 +1,364 @@
+---
+name: actions-smoke
+
+# Exercises the composite actions under .github/actions/ on a GitHub-hosted runner with checked-in fixtures
+# (tests/tests_github_scripts/data). Nothing here reaches AWS except the s3-sync round trip, which only runs where
+# the OIDC trust of AWS_ROLE_ARTIFACTS allows it (ADR 0001: main branch) and skips with a notice everywhere else.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/actions/**'
+      - '.github/scripts/**'
+      - '.github/mappings/**'
+      - '.github/workflows/actions-smoke.yml'
+      - 'tests/tests_github_scripts/**'
+  pull_request:
+    paths:
+      - '.github/actions/**'
+      - '.github/scripts/**'
+      - '.github/mappings/**'
+      - '.github/workflows/actions-smoke.yml'
+      - 'tests/tests_github_scripts/**'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FIXTURES: tests/tests_github_scripts/data
+
+jobs:
+  resolve-input-manifest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Resolve with a fresh checkout
+        id: fresh
+        uses: ./.github/actions/resolve-input-manifest
+        with:
+          input-manifest: 3.9.0/opensearch-3.9.0.yml
+          path: checkout-under-test
+          distribution: deb
+      - name: Resolve in the existing checkout
+        id: existing
+        uses: ./.github/actions/resolve-input-manifest
+        with:
+          input-manifest: manifests/3.9.0/opensearch-dashboards-3.9.0.yml
+          checkout: 'false'
+      - name: Reject a manifest outside manifests/
+        id: traversal
+        continue-on-error: true
+        uses: ./.github/actions/resolve-input-manifest
+        with:
+          input-manifest: ../.github/workflows/actions-smoke.yml
+          checkout: 'false'
+      - name: Check outputs
+        env:
+          FRESH_PATH: ${{ steps.fresh.outputs.manifest-path }}
+          FRESH_VERSION: ${{ steps.fresh.outputs.version }}
+          FRESH_FILENAME: ${{ steps.fresh.outputs.filename }}
+          FRESH_IMAGE: ${{ steps.fresh.outputs.ci-image }}
+          FRESH_JAVA: ${{ steps.fresh.outputs.java-version }}
+          FRESH_SHA: ${{ steps.fresh.outputs.sha }}
+          FRESH_COMPONENTS: ${{ steps.fresh.outputs.components }}
+          EXISTING_NAME: ${{ steps.existing.outputs.name }}
+          EXISTING_FILENAME: ${{ steps.existing.outputs.filename }}
+          TRAVERSAL_OUTCOME: ${{ steps.traversal.outcome }}
+        run: |
+          set -euo pipefail
+          test "${FRESH_PATH}" = manifests/3.9.0/opensearch-3.9.0.yml
+          test "${FRESH_VERSION}" = 3.9.0
+          test "${FRESH_FILENAME}" = opensearch
+          test "${FRESH_IMAGE}" = opensearchstaging/ci-runner:ci-runner-ubuntu2404-opensearch-build-v1
+          test "${FRESH_JAVA}" = openjdk-25
+          test -n "${FRESH_SHA}"
+          echo "${FRESH_COMPONENTS}" | jq -e 'index("OpenSearch") != null' > /dev/null
+          test "${EXISTING_NAME}" = 'OpenSearch Dashboards'
+          test "${EXISTING_FILENAME}" = opensearch-dashboards
+          test "${TRAVERSAL_OUTCOME}" = failure
+          echo 'resolve-input-manifest: OK'
+
+  download-build-manifest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Download the fixture build manifest
+        id: manifest
+        uses: ./.github/actions/download-build-manifest
+        with:
+          url: file://${{ github.workspace }}/tests/tests_github_scripts/data/build-manifest.yml
+          path: downloaded/build-manifest.yml
+      - name: Reject a non-https URL
+        id: http
+        continue-on-error: true
+        uses: ./.github/actions/download-build-manifest
+        with:
+          url: http://ci.opensearch.org/ci/dbc/manifest.yml
+          path: rejected/build-manifest.yml
+      - name: Check outputs
+        env:
+          MANIFEST_FILE: ${{ steps.manifest.outputs.manifest-file }}
+          BUILD_ID: ${{ steps.manifest.outputs.build-id }}
+          PACKAGE_NAME: ${{ steps.manifest.outputs.package-name }}
+          ARTIFACT_ROOT: ${{ steps.manifest.outputs.artifact-root }}
+          RUNS_ON: ${{ steps.manifest.outputs.runs-on }}
+          HTTP_OUTCOME: ${{ steps.http.outcome }}
+        run: |
+          set -euo pipefail
+          cmp "${MANIFEST_FILE}" "${FIXTURES}/build-manifest.yml"
+          test "${BUILD_ID}" = 11089
+          test "${PACKAGE_NAME}" = opensearch-3.9.0-linux-arm64.tar.gz
+          test "${ARTIFACT_ROOT}" = distribution-build-opensearch/3.9.0/11089/linux/arm64/tar
+          test "$(echo "${RUNS_ON}" | jq -r 'join(",")')" = self-hosted,linux,arm64,al2023-arm64-m6g-4xlarge-docker-host
+          test "${HTTP_OUTCOME}" = failure
+          test ! -e rejected/build-manifest.yml
+          echo 'download-build-manifest: OK'
+
+  checksums:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Create sample artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/nested
+          head -c 4096 /dev/urandom > artifacts/opensearch-3.9.0-linux-x64.tar.gz
+          head -c 2048 /dev/urandom > artifacts/nested/opensearch-3.9.0-windows-x64.zip
+          head -c 1024 /dev/urandom > artifacts/nested/opensearch-3.9.0-linux-x64.rpm
+          echo 'not an artifact' > artifacts/README.txt
+      - name: Create checksums
+        id: checksums
+        uses: ./.github/actions/checksums
+        with:
+          artifact-path: artifacts
+      - name: Verify checksums
+        env:
+          COUNT: ${{ steps.checksums.outputs.count }}
+        run: |
+          set -euo pipefail
+          test "${COUNT}" = 3
+          test ! -e artifacts/README.txt.sha512
+          find artifacts -name '*.sha512' -execdir sha512sum --check {} +
+          echo 'checksums: OK'
+
+  sign-artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Create sample artifacts
+        run: |
+          mkdir -p artifacts
+          echo sample > artifacts/opensearch-3.9.0-linux-x64.tar.gz
+      - name: Plan PGP signing (dry run)
+        id: pgp
+        uses: ./.github/actions/sign-artifacts
+        with:
+          artifact-path: artifacts
+          sigtype: .asc
+          overwrite: 'true'
+          dry-run: 'true'
+      - name: Plan RPM signing (dry run)
+        id: rpm
+        uses: ./.github/actions/sign-artifacts
+        with:
+          artifact-path: artifacts
+          sigtype: .rpm
+          email: opensearch@amazon.com
+          dry-run: 'true'
+      - name: Reject an unknown platform
+        id: platform
+        continue-on-error: true
+        uses: ./.github/actions/sign-artifacts
+        with:
+          artifact-path: artifacts
+          platform: solaris
+          dry-run: 'true'
+      - name: Refuse to sign without a role
+        id: no-role
+        continue-on-error: true
+        uses: ./.github/actions/sign-artifacts
+        with:
+          artifact-path: artifacts
+      - name: Check outputs
+        env:
+          PGP_COMMAND: ${{ steps.pgp.outputs.command }}
+          RPM_COMMAND: ${{ steps.rpm.outputs.command }}
+          PLATFORM_OUTCOME: ${{ steps.platform.outcome }}
+          NO_ROLE_OUTCOME: ${{ steps.no-role.outcome }}
+        run: |
+          set -euo pipefail
+          test "${PGP_COMMAND}" = './sign.sh artifacts --sigtype .asc --platform linux --email release@opensearch.org --overwrite'
+          test "${RPM_COMMAND}" = 'rpm --addsign (opensearch@amazon.com key) artifacts'
+          test "${PLATFORM_OUTCOME}" = failure
+          test "${NO_ROLE_OUTCOME}" = failure
+          test ! -e artifacts/opensearch-3.9.0-linux-x64.tar.gz.asc
+          echo 'sign-artifacts: OK'
+
+  publish-metrics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Stage the build log
+        run: |
+          mkdir -p build-logs/linux-x64-tar
+          cp "${FIXTURES}/build-log.txt" build-logs/linux-x64-tar/build.log
+      - name: Build results (dry run)
+        id: build
+        uses: ./.github/actions/publish-metrics
+        with:
+          kind: build
+          input-manifest: tests/tests_github_scripts/data/input-manifest.yml
+          build-logs-directory: build-logs
+          rc-number: '2'
+          component-category: OpenSearch Dashboards
+          dry-run: 'true'
+      - name: Integ test results (dry run)
+        id: integ
+        uses: ./.github/actions/publish-metrics
+        with:
+          kind: integ
+          test-report: tests/tests_github_scripts/data/integ-test-report.yml
+          distribution-build-url: https://example.org/build/11089
+          dry-run: 'true'
+      - name: Refuse to index without the metrics role
+        id: no-role
+        continue-on-error: true
+        uses: ./.github/actions/publish-metrics
+        with:
+          kind: integ
+          test-report: tests/tests_github_scripts/data/integ-test-report.yml
+      - name: Check outputs
+        env:
+          BUILD_COUNT: ${{ steps.build.outputs.record-count }}
+          BUILD_FILE: ${{ steps.build.outputs.records-file }}
+          BUILD_INDEX: ${{ steps.build.outputs.index }}
+          INTEG_COUNT: ${{ steps.integ.outputs.record-count }}
+          INTEG_FAILURES: ${{ steps.integ.outputs.failure-count }}
+          INTEG_FILE: ${{ steps.integ.outputs.records-file }}
+          NO_ROLE_OUTCOME: ${{ steps.no-role.outcome }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          test "${BUILD_COUNT}" = 3
+          [[ "${BUILD_INDEX}" =~ ^opensearch-distribution-build-results-[0-9]{2}-[0-9]{4}$ ]]
+          jq -s -e '[.[] | select(.component == "alertingDashboards")][0].component_build_result == "failed"' "${BUILD_FILE}" > /dev/null
+          jq -s -e "[.[] | select(.component)][0].distribution_build_number == ${RUN_NUMBER}" "${BUILD_FILE}" > /dev/null
+          test "${INTEG_COUNT}" = 2
+          test "${INTEG_FAILURES}" = 3
+          jq -s -e '[.[] | select(.component == "alerting")][0].with_security == "fail"' "${INTEG_FILE}" > /dev/null
+          test "${NO_ROLE_OUTCOME}" = failure
+          echo 'publish-metrics: OK'
+
+  s3-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Reject an invalid direction without touching AWS
+        id: direction
+        continue-on-error: true
+        uses: ./.github/actions/s3-sync
+        with:
+          direction: sideways
+          role-to-assume: arn:aws:iam::000000000000:role/unused
+          bucket: unused
+          remote-path: unused
+          local-path: .
+      - name: Skip a missing upload source when tolerated
+        id: tolerate
+        uses: ./.github/actions/s3-sync
+        with:
+          direction: upload
+          role-to-assume: arn:aws:iam::000000000000:role/unused
+          bucket: unused
+          remote-path: test-results/
+          local-path: does-not-exist
+          tolerate-missing: 'true'
+      - name: Check validation
+        env:
+          DIRECTION_OUTCOME: ${{ steps.direction.outcome }}
+          TOLERATE_SKIPPED: ${{ steps.tolerate.outputs.skipped }}
+        run: |
+          set -euo pipefail
+          test "${DIRECTION_OUTCOME}" = failure
+          test "${TOLERATE_SKIPPED}" = true
+      - name: Check whether the artifact role is usable here
+        id: gate
+        env:
+          ROLE: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+          BUCKET: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          if [ -z "${ROLE}" ] || [ -z "${BUCKET}" ]; then
+            echo "::notice title=s3-sync round trip skipped::AWS_ROLE_ARTIFACTS / ARTIFACT_BUCKET_NAME are not configured on this repository yet (provisioned by s2.4, ADR 0001)."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          elif [ "${EVENT}" = pull_request ] || [ "${REF}" != refs/heads/main ]; then
+            echo "::notice title=s3-sync round trip skipped::The AWS_ROLE_ARTIFACTS trust policy only admits refs/heads/main (ADR 0001); this run is ${EVENT} on ${REF}."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create a payload
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          mkdir -p payload/nested
+          date -u > payload/stamp.txt
+          head -c 1024 /dev/urandom > payload/nested/blob.bin
+      - name: Upload
+        if: steps.gate.outputs.run == 'true'
+        uses: ./.github/actions/s3-sync
+        with:
+          direction: upload
+          role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+          bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          remote-path: actions-smoke/${{ github.run_id }}-${{ github.run_attempt }}/
+          local-path: payload
+      - name: Download
+        if: steps.gate.outputs.run == 'true'
+        uses: ./.github/actions/s3-sync
+        with:
+          direction: download
+          role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+          bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          remote-path: actions-smoke/${{ github.run_id }}-${{ github.run_attempt }}/
+          local-path: roundtrip
+      - name: Compare
+        if: steps.gate.outputs.run == 'true'
+        run: diff -r payload roundtrip
