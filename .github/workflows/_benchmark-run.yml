@@ -108,6 +108,9 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         run: python -m pip install --upgrade pipenv==2023.6.12 wheel
 
+      - name: Ensure PyYAML for the helper script
+        run: bash .github/scripts/ensure-pyyaml.sh
+
       - name: Read parameters
         id: params
         run: |

@@ -243,6 +243,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Ensure PyYAML for the helper script
+        run: bash .github/scripts/ensure-pyyaml.sh
+
       - name: Find the baseline and contender test executions
         id: ids
         env:
