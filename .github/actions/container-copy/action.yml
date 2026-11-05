@@ -1,9 +1,8 @@
 ---
 # Port of opensearch-build-libraries vars/copyContainer.groovy (lf-jenkins): one `docker login` chosen by the
-# destination registry, the two ECR Public logins, then `crane cp` (optionally `--all-tags`).
-# The registry comparisons are copied verbatim from the library, including the ECR ones
-# ('public.ecr.aws/opensearchstaging', 'public.ecr.aws/opensearchproject'), which do not match the
-# 'public.ecr.aws/opensearchorg/...' registries docker-copy offers. Fixing that is a behaviour change, not part of the port.
+# destination registry, the ECR Public login, then `crane cp` (optionally `--all-tags`).
+# The ECR login follows the current lf-jenkins library: LF registries (public.ecr.aws/opensearchorg/...) log in to the
+# registry root; production ECR assumes AWS_ROLE_PROMOTION first (ADR 0001).
 name: Container copy
 description: Copy a container image between Docker Hub and ECR Public registries with crane (vars/copyContainer.groovy).
 inputs:
@@ -30,7 +29,7 @@ inputs:
     description: Docker Hub password matching dockerhub-username.
     required: true
   promotion-role-to-assume:
-    description: AWS_ROLE_PROMOTION role ARN, needed only when a registry is 'public.ecr.aws/opensearchproject'.
+    description: AWS_ROLE_PROMOTION role ARN, needed only when the destination is production ECR (public.ecr.aws/opensearchorg/opensearchproject).
     required: false
     default: ''
 runs:
@@ -46,18 +45,39 @@ runs:
         set +x
         printf '%s' "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin
 
-    - name: ECR Public login (staging)
-      if: inputs.source-registry == 'public.ecr.aws/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchstaging'
+    # lf-jenkins copyContainer.groovy: "Login ECR LF" when the source or destination is an LF ECR registry, against the
+    # registry root (public.ecr.aws/opensearchorg). The old-alias comparisons ('public.ecr.aws/opensearchstaging',
+    # 'public.ecr.aws/opensearchproject') are kept for callers that still pass them.
+    - name: Resolve ECR Public login
+      id: ecr
       shell: bash
       env:
+        SOURCE_REGISTRY: ${{ inputs.source-registry }}
         DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
       run: |
         set -euo pipefail
-        set +x
-        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${DESTINATION_REGISTRY}"
+        login=false
+        production=false
+        case "${DESTINATION_REGISTRY}" in
+          public.ecr.aws/opensearchorg/opensearchproject|public.ecr.aws/opensearchproject) login=true; production=true ;;
+          public.ecr.aws/opensearchorg/opensearchstaging|public.ecr.aws/opensearchstaging) login=true ;;
+        esac
+        case "${SOURCE_REGISTRY}" in
+          public.ecr.aws/opensearchorg/opensearchstaging|public.ecr.aws/opensearchstaging) login=true ;;
+          public.ecr.aws/opensearchproject) login=true; production=true ;;
+        esac
+        # log in to the ECR side of the copy: the destination when it is ECR, otherwise the source
+        ecr_registry="${DESTINATION_REGISTRY}"
+        [[ "${ecr_registry}" == public.ecr.aws/* ]] || ecr_registry="${SOURCE_REGISTRY}"
+        root="$(echo "${ecr_registry}" | cut -d/ -f1-2)"
+        {
+          echo "login=${login}"
+          echo "production=${production}"
+          echo "registry-root=${root}"
+        } >> "${GITHUB_OUTPUT}"
 
     - name: Assume promotion role (production ECR)
-      if: inputs.source-registry == 'public.ecr.aws/opensearchproject' || inputs.destination-registry == 'public.ecr.aws/opensearchproject'
+      if: steps.ecr.outputs.production == 'true'
       uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
       with:
         role-to-assume: ${{ inputs.promotion-role-to-assume }}
@@ -66,15 +86,15 @@ runs:
         audience: sts.amazonaws.com
         aws-region: us-east-1
 
-    - name: ECR Public login (production)
-      if: inputs.source-registry == 'public.ecr.aws/opensearchproject' || inputs.destination-registry == 'public.ecr.aws/opensearchproject'
+    - name: ECR Public login
+      if: steps.ecr.outputs.login == 'true'
       shell: bash
       env:
-        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+        REGISTRY_ROOT: ${{ steps.ecr.outputs.registry-root }}
       run: |
         set -euo pipefail
         set +x
-        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${DESTINATION_REGISTRY}"
+        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${REGISTRY_ROOT}"
 
     - name: crane cp
       shell: bash

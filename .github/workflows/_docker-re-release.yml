@@ -2,6 +2,9 @@
 # Reusable port of opensearch-build-libraries vars/patchDockerImage.groovy (+ the buildDockerImage calls it makes with
 # buildOption re_release_docker_image): read the released image's labels, then docker-build -> docker-copy (build-number
 # tag) -> docker-scan -> docker-promotion, each `build job:` (wait/propagate true) becoming a needs-chained job.
+# dry-run (the default) writes nothing: the released image is read on a GitHub-hosted runner, the staging build, copy
+# and scan are skipped, and docker-promotion.yml only lists the copies it would make. dry-run=false builds on the
+# self-hosted docker builder and promotes through the `release` environment (required reviewers).
 name: _docker-re-release
 
 on:
@@ -15,6 +18,11 @@ on:
         description: Major tag of the released image to re-release (2 or 3)
         required: true
         type: string
+      dry-run:
+        description: Read the released image and list the promotion only; build, push and promote nothing
+        required: false
+        default: true
+        type: boolean
 
 permissions: {}
 
@@ -25,7 +33,8 @@ defaults:
 jobs:
   patch-docker-image:
     name: Patch Docker Image
-    runs-on: [self-hosted, linux, x64, ubuntu2404-x64-m5-2xlarge-docker-builder]
+    # reads public images only, so a dry run does not need the self-hosted builder
+    runs-on: ${{ inputs.dry-run && fromJSON('["ubuntu-24.04"]') || fromJSON('["self-hosted", "linux", "x64", "ubuntu2404-x64-m5-2xlarge-docker-builder"]') }}
     timeout-minutes: 120
     permissions:
       contents: read
@@ -63,16 +72,18 @@ jobs:
           latest_version=$(docker inspect --format '{{ index .Config.Labels "org.label-schema.version"}}' "${latest_docker_image}")
           manifest="manifests/${version}/${PRODUCT}-${version}.yml"
           # InputManifest: build.version, build.qualifier, build.getFilename() = name lower-cased, spaces -> '-'
-          read -r build_version build_qualifier filename < <(python3 - "${manifest}" <<'PY'
-          import sys
-          import yaml
-          with open(sys.argv[1], encoding="utf-8") as f:
-              build = yaml.safe_load(f)["build"]
-          qualifier = build.get("qualifier")
-          qualifier = "" if qualifier in (None, "null") else f"-{qualifier}"
-          print(build["version"], qualifier or "-", build["name"].lower().replace(" ", "-"))
-          PY
-          )
+          # the ci-runner image has no PyYAML, so read the flat build: block with awk
+          read -r build_version build_qualifier filename < <(awk '
+            /^build:/ { in_build = 1; next }
+            /^[^ #]/ { in_build = 0 }
+            in_build && /^  [a-z]+:/ {
+              key = $1; sub(":", "", key); value = $0; sub(/^  [a-z]+:[ ]*/, "", value); gsub(/["\047]/, "", value); build[key] = value
+            }
+            END {
+              qualifier = (build["qualifier"] == "" || build["qualifier"] == "null") ? "-" : "-" build["qualifier"]
+              name = tolower(build["name"]); gsub(/ /, "-", name)
+              print build["version"], qualifier, name
+            }' "${manifest}")
           [ "${build_qualifier}" = "-" ] && build_qualifier=""
           # buildDockerImage: keep al2 for the 1.x versions
           image_base_os=al2023
@@ -99,6 +110,7 @@ jobs:
   docker-build:
     name: docker-build
     needs: patch-docker-image
+    if: ${{ !inputs.dry-run }}
     permissions:
       contents: read
     uses: ./.github/workflows/docker-build.yml
@@ -111,6 +123,7 @@ jobs:
   docker-copy:
     name: docker-copy (build-number tag)
     needs: [patch-docker-image, docker-build]
+    if: ${{ !inputs.dry-run }}
     permissions:
       contents: read
       id-token: write
@@ -124,34 +137,25 @@ jobs:
   docker-scan:
     name: docker-scan
     needs: [patch-docker-image, docker-copy]
+    if: ${{ !inputs.dry-run }}
     permissions:
       contents: read
     uses: ./.github/workflows/docker-scan.yml
     with:
       IMAGE_FULL_NAME: opensearchstaging/${{ needs.patch-docker-image.outputs.filename }}:${{ needs.patch-docker-image.outputs.image-version }}
 
-  # `build job: 'docker-promotion'` (SOURCE_IMAGES, RELEASE_VERSION, TAG_LATEST). promote-docker-ecr.yml is ported in s5.3
-  # (UNT161-22 wires it in here); until then the promotion is skipped with a notice so scheduled runs stay green and the
-  # rebuilt staging images (build + build-number tag + scan) are still produced.
+  # `build job: 'docker-promotion'` (SOURCE_IMAGES, RELEASE_VERSION, TAG_LATEST; DOCKER_HUB_PROMOTE, ECR_PROMOTE and
+  # TAG_MAJOR_VERSION keep their defaults, true), the promote-docker-ecr-lf port.
   docker-promotion:
     name: docker-promotion
     needs: [patch-docker-image, docker-scan]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Promote (skipped until s5.3)
-        env:
-          SOURCE_IMAGES: ${{ needs.patch-docker-image.outputs.source-images }}
-          RELEASE_VERSION: ${{ needs.patch-docker-image.outputs.version }}
-          TAG_LATEST: ${{ needs.patch-docker-image.outputs.tag-latest }}
-        run: |
-          set -euo pipefail
-          message="promotion not ported yet, see UNT161-22 / s5.3"
-          echo "::notice title=docker-promotion skipped::${message}. Would promote SOURCE_IMAGES=${SOURCE_IMAGES} RELEASE_VERSION=${RELEASE_VERSION} TAG_LATEST=${TAG_LATEST}"
-          {
-            echo "### docker-promotion skipped: ${message}"
-            echo "- SOURCE_IMAGES: \`${SOURCE_IMAGES}\`"
-            echo "- RELEASE_VERSION: \`${RELEASE_VERSION}\`"
-            echo "- TAG_LATEST: \`${TAG_LATEST}\`"
-          } >> "${GITHUB_STEP_SUMMARY}"
+    if: ${{ !cancelled() && needs.patch-docker-image.result == 'success' && (inputs.dry-run || needs.docker-scan.result == 'success') }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/docker-promotion.yml
+    with:
+      SOURCE_IMAGES: ${{ needs.patch-docker-image.outputs.source-images }}
+      RELEASE_VERSION: ${{ needs.patch-docker-image.outputs.version }}
+      TAG_LATEST: ${{ needs.patch-docker-image.outputs.tag-latest == 'true' }}
+      dry-run: ${{ inputs.dry-run }}

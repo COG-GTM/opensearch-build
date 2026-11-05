@@ -1,0 +1,135 @@
+---
+# GitHub Actions port of jenkins/release-workflows/promote-docker-ecr-lf.jenkinsfile: vars/promoteContainer.groovy
+# (lf-jenkins). `plan` (GitHub-hosted, no secrets) expands SOURCE_IMAGES into the docker-copy calls promoteContainer
+# makes (Docker Hub opensearchproject and ECR public.ecr.aws/opensearchorg/opensearchproject; release version, major and
+# latest tags) and shows each source and destination digest as published today. With `dry-run` (the default) that is all
+# that runs. Otherwise each copy is a `build job: 'docker-copy'` -> docker-copy.yml call, which runs in the `release`
+# environment (required reviewers, production Docker Hub + AWS_ROLE_PROMOTION) for these production registries.
+name: docker-promotion
+run-name: docker-promotion ${{ inputs.dry-run && '(dry run) ' || '' }}${{ inputs.SOURCE_IMAGES }} to ${{ inputs.RELEASE_VERSION }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      SOURCE_IMAGES:
+        description: '<Required> Comma separated list of product with its image tag that we want to promote from staging to production. E.g.: opensearch:2.0.1.3910, opensearch-dashboards:2.0.1, data-prepper:1.5.0-19.'
+        required: true
+        type: string
+      RELEASE_VERSION:
+        description: '<Required> Official release version on production repository. This is uniform for all source images. E.g.: 2.0.1, 1.5.0.'
+        required: true
+        type: string
+      DOCKER_HUB_PROMOTE:
+        description: '<Optional> Promote SOURCE_IMAGES to `opensearchproject` production Docker Hub.'
+        required: false
+        default: true
+        type: boolean
+      ECR_PROMOTE:
+        description: '<Optional> Promote SOURCE_IMAGES to `gallery.ecr.aws/opensearchorg/opensearchproject` production ECR repository.'
+        required: false
+        default: true
+        type: boolean
+      TAG_LATEST:
+        description: '<Optional> Tag the copied image as latest'
+        required: false
+        default: true
+        type: boolean
+      TAG_MAJOR_VERSION:
+        description: '<Optional> Tag the copied image with its major version. E.g.: 1.3.2 image will be tagged with 1 in the hub.'
+        required: false
+        default: true
+        type: boolean
+      dry-run:
+        description: 'List the copies and compare them with the registries; copy nothing.'
+        required: false
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      SOURCE_IMAGES:
+        required: true
+        type: string
+      RELEASE_VERSION:
+        required: true
+        type: string
+      DOCKER_HUB_PROMOTE:
+        required: false
+        default: true
+        type: boolean
+      ECR_PROMOTE:
+        required: false
+        default: true
+        type: boolean
+      TAG_LATEST:
+        required: false
+        default: true
+        type: boolean
+      TAG_MAJOR_VERSION:
+        required: false
+        default: true
+        type: boolean
+      dry-run:
+        required: false
+        default: true
+        type: boolean
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    name: Parameters Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      copies: ${{ steps.plan.outputs.copies }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: List image copies
+        id: plan
+        env:
+          SOURCE_IMAGES: ${{ inputs.SOURCE_IMAGES }}
+          RELEASE_VERSION: ${{ inputs.RELEASE_VERSION }}
+          DOCKER_HUB_PROMOTE: ${{ inputs.DOCKER_HUB_PROMOTE }}
+          ECR_PROMOTE: ${{ inputs.ECR_PROMOTE }}
+          TAG_LATEST: ${{ inputs.TAG_LATEST }}
+          TAG_MAJOR_VERSION: ${{ inputs.TAG_MAJOR_VERSION }}
+          DATA_PREPPER_STAGING_CONTAINER_REPOSITORY: ${{ vars.DATA_PREPPER_STAGING_CONTAINER_REPOSITORY }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          echo "Promoting ${SOURCE_IMAGES} to production hub (dry-run: ${DRY_RUN})." >> "${GITHUB_STEP_SUMMARY}"
+          python3 .github/scripts/release_promotion_plan.py docker \
+            --source-images "${SOURCE_IMAGES}" --release-version "${RELEASE_VERSION}" \
+            --docker-hub-promote "${DOCKER_HUB_PROMOTE}" --ecr-promote "${ECR_PROMOTE}" \
+            --tag-latest "${TAG_LATEST}" --tag-major-version "${TAG_MAJOR_VERSION}" \
+            --data-prepper-registry "${DATA_PREPPER_STAGING_CONTAINER_REPOSITORY}" \
+            --verify --summary "${GITHUB_STEP_SUMMARY}" --github-output "${GITHUB_OUTPUT}"
+
+  image-promote-to-prod:
+    name: docker-copy ${{ matrix.copy.DESTINATION_IMAGE_REGISTRY }}/${{ matrix.copy.DESTINATION_IMAGE }}
+    needs: plan
+    if: ${{ !inputs.dry-run && needs.plan.outputs.copies != '[]' }}
+    strategy:
+      # promoteContainer runs the copies one after another and stops at the first failure
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        copy: ${{ fromJSON(needs.plan.outputs.copies) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/docker-copy.yml
+    with:
+      SOURCE_IMAGE_REGISTRY: ${{ matrix.copy.SOURCE_IMAGE_REGISTRY }}
+      SOURCE_IMAGE: ${{ matrix.copy.SOURCE_IMAGE }}
+      DESTINATION_IMAGE_REGISTRY: ${{ matrix.copy.DESTINATION_IMAGE_REGISTRY }}
+      DESTINATION_IMAGE: ${{ matrix.copy.DESTINATION_IMAGE }}
