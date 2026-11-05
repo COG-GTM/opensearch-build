@@ -2,6 +2,9 @@
 # GitHub Actions port of jenkins/docker/docker-re-release-lf.jenkinsfile. The four parameterizedCron entries
 # (all `H 19 15 * *`, PRODUCT x TAG) become one monthly schedule fanned out as a matrix; workflow_dispatch keeps the
 # manual single run. Each matrix cell calls _docker-re-release.yml, the patchDockerImage chain.
+# Dry run by default: a manual run is a dry run unless dry-run is unticked, and scheduled runs stay dry runs until the
+# repository variable DOCKER_RE_RELEASE_LIVE is 'true' (set at cutover, while Jenkins docker-re-release-lf still
+# re-releases monthly). A live run builds, scans and then promotes through the `release` environment (reviewers).
 name: docker-re-release
 run-name: docker-re-release ${{ github.event_name == 'schedule' && 'scheduled' || format('{0} {1}', inputs.PRODUCT, inputs.TAG) }}
 
@@ -27,6 +30,11 @@ on:
         options:
           - '2'
           - '3'
+      dry-run:
+        description: 'Read the released image and list the promotion only; build, push and promote nothing.'
+        required: false
+        default: true
+        type: boolean
 
 permissions: {}
 
@@ -38,11 +46,14 @@ jobs:
     permissions: {}
     outputs:
       include: ${{ steps.matrix.outputs.include }}
+      dry-run: ${{ steps.matrix.outputs.dry-run }}
     steps:
       - id: matrix
         env:
           PRODUCT: ${{ inputs.PRODUCT }}
           TAG: ${{ inputs.TAG }}
+          DRY_RUN_INPUT: ${{ inputs.dry-run }}
+          LIVE: ${{ vars.DOCKER_RE_RELEASE_LIVE }}
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
@@ -51,6 +62,13 @@ jobs:
             include=$(jq -cn --arg p "${PRODUCT}" --arg t "${TAG}" '[{PRODUCT: $p, TAG: $t}]')
           fi
           echo "include=${include}" | tee -a "${GITHUB_OUTPUT}"
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            dry_run=true
+            [ "${LIVE}" = "true" ] && dry_run=false
+          else
+            dry_run="${DRY_RUN_INPUT:-true}"
+          fi
+          echo "dry-run=${dry_run}" | tee -a "${GITHUB_OUTPUT}"
 
   re-release:
     name: Docker re-release ${{ matrix.PRODUCT }}:${{ matrix.TAG }}
@@ -66,3 +84,4 @@ jobs:
     with:
       PRODUCT: ${{ matrix.PRODUCT }}
       TAG: ${{ matrix.TAG }}
+      dry-run: ${{ needs.matrix.outputs.dry-run != 'false' }}

@@ -1,0 +1,160 @@
+---
+# GitHub Actions port of jenkins/release-workflows/publish-to-maven-lf.jenkinsfile: downloadFromS3 + vars/publishToMaven.groovy
+# (lf-jenkins; single-part upload, autoPublish true). `plan` (GitHub-hosted, no secrets) lists every Maven coordinate the
+# build manifest stages and whether Maven Central already serves it. With `dry-run` (the default) that is all that runs.
+# `publish` runs only for dry-run=false, in the `release` environment (required reviewers), which holds the signer client
+# secrets and MAVEN_CENTRAL_PORTAL_USERNAME / MAVEN_CENTRAL_PORTAL_PASSWORD (ADR 0001).
+name: publish-to-maven
+run-name: publish-to-maven ${{ inputs.dry-run && '(dry run) ' || '' }}${{ inputs.VERSION }} build ${{ inputs.BUILD_ID }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      BUILD_ID:
+        description: '<Required> Build ID of the OpenSearch distribution artifacts to be staged and released'
+        required: true
+        type: string
+      VERSION:
+        description: '<Required> Version of the OpenSearch distribution artifacts to be staged and released'
+        required: true
+        type: string
+      dry-run:
+        description: 'List the coordinates and compare them with Maven Central; sign and publish nothing.'
+        required: false
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      BUILD_ID:
+        required: true
+        type: string
+      VERSION:
+        required: true
+        type: string
+      dry-run:
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      # repository secrets (AWS_ROLE_ARTIFACTS, ARTIFACT_BUCKET_NAME*) come from the caller; the others are `release`-environment
+      # secrets (ADR 0001), which the environment job reads even when the caller passes nothing
+      AWS_ROLE_ARTIFACTS:
+        required: false
+      ARTIFACT_BUCKET_NAME_LF:
+        required: false
+      AWS_ROLE_SIGNING_BASE:
+        required: false
+      SIGNER_CLIENT_ROLE:
+        required: false
+      SIGNER_CLIENT_EXTERNAL_ID:
+        required: false
+      SIGNER_CLIENT_UNSIGNED_BUCKET:
+        required: false
+      SIGNER_CLIENT_SIGNED_BUCKET:
+        required: false
+      MAVEN_CENTRAL_PORTAL_USERNAME:
+        required: false
+      MAVEN_CENTRAL_PORTAL_PASSWORD:
+        required: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PUBLIC_ARTIFACT_URL: ${{ vars.PUBLIC_ARTIFACT_URL || 'https://ci.opensearch.org/ci/dbc' }}
+  ARTIFACT_PATH: distribution-build-opensearch/${{ inputs.VERSION }}/${{ inputs.BUILD_ID }}/linux/x64/tar/builds
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      signing-email: ${{ steps.email.outputs.email }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Signing email
+        id: email
+        env:
+          VERSION: ${{ inputs.VERSION }}
+          BUILD_ID: ${{ inputs.BUILD_ID }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${BUILD_ID}" =~ ^[0-9]+$ ]] || ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::BUILD_ID must be a build number and VERSION a release version."
+            exit 1
+          fi
+          major_version="${VERSION%%.*}"
+          echo "Major version is ${major_version}"
+          email=opensearch@amazon.com
+          [ "${major_version}" -gt 2 ] && email=release@opensearch.org
+          echo "Signing email is ${email}"
+          echo "email=${email}" >> "${GITHUB_OUTPUT}"
+      - name: List Maven coordinates
+        env:
+          VERSION: ${{ inputs.VERSION }}
+          BUILD_ID: ${{ inputs.BUILD_ID }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          echo "publish-to-maven ${VERSION} build ${BUILD_ID} (dry-run: ${DRY_RUN})" >> "${GITHUB_STEP_SUMMARY}"
+          python3 .github/scripts/release_promotion_plan.py maven --build-id "${BUILD_ID}" --version "${VERSION}" \
+            --verify --summary "${GITHUB_STEP_SUMMARY}"
+
+  publish:
+    name: sign-stage-and-release
+    needs: plan
+    if: ${{ !inputs.dry-run }}
+    runs-on: [self-hosted, linux, x64, al2023-x64-m5-4xlarge-docker-host]
+    timeout-minutes: 180
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    container:
+      # ci-runner:ci-runner-centos7-opensearch-build-v3 (the Jenkins agent image), via the ECR mirror
+      image: public.ecr.aws/opensearchorg/opensearchstaging/ci-runner@sha256:0c7f0b329cc2aaccd953c2051d6563a3594fcea88d5f6da85f550f743cde01a8
+      options: --user root -e JAVA_HOME=/opt/java/openjdk-11
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      # downloadFromS3(bucketName: ARTIFACT_BUCKET_NAME (lf), downloadPath: "${ARTIFACT_PATH}/") as opensearch-bundle
+      - name: Downloading from S3
+        uses: ./.github/actions/s3-sync
+        with:
+          direction: download
+          role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+          bucket: ${{ secrets.ARTIFACT_BUCKET_NAME_LF }}
+          remote-path: ${{ env.ARTIFACT_PATH }}/
+          local-path: artifacts/${{ env.ARTIFACT_PATH }}
+      - name: Signing Maven artifacts
+        uses: ./.github/actions/sign-artifacts
+        env:
+          SIGNER_CLIENT_ROLE: ${{ secrets.SIGNER_CLIENT_ROLE }}
+          SIGNER_CLIENT_EXTERNAL_ID: ${{ secrets.SIGNER_CLIENT_EXTERNAL_ID }}
+          SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_UNSIGNED_BUCKET }}
+          SIGNER_CLIENT_SIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_SIGNED_BUCKET }}
+        with:
+          artifact-path: artifacts/${{ env.ARTIFACT_PATH }}/opensearch/manifest.yml
+          type: maven
+          platform: linux
+          sigtype: .asc
+          email: ${{ needs.plan.outputs.signing-email }}
+          role-to-assume: ${{ secrets.AWS_ROLE_SIGNING_BASE }}
+      - name: Stage and Release Maven artifacts
+        env:
+          SONATYPE_USERNAME: ${{ secrets.MAVEN_CENTRAL_PORTAL_USERNAME }}
+          SONATYPE_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PORTAL_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "Uploading Maven artifacts in a single part."
+          .github/scripts/stage-maven-release.sh -d "artifacts/${ARTIFACT_PATH}/opensearch/maven" -a true

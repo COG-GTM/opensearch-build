@@ -1,0 +1,287 @@
+---
+# GitHub Actions port of jenkins/release-workflows/promote-artifacts.jenkinsfile: vars/promoteArtifacts.groovy
+# (jenkins@12.0.0) with fileActions [createSha512Checksums(), createSignatureFiles()].
+# `plan` (GitHub-hosted, no secrets) lists every object the promotion writes, built from the public build manifests with
+# .github/scripts/release_promotion_plan.py, and compares it with artifacts.opensearch.org. With `dry-run` (the default)
+# that is all that runs. `promote` runs only for dry-run=false, in the `release` environment (required reviewers), which
+# holds ARTIFACT_PRODUCTION_BUCKET_NAME, AWS_ROLE_PROMOTION, AWS_ROLE_SIGNING_BASE and the SIGNER_CLIENT_* secrets (ADR 0001).
+name: distribution-promote-artifacts
+run-name: distribution-promote-artifacts ${{ inputs.dry-run && '(dry run) ' || '' }}${{ inputs.DISTRIBUTION_BUILD_NUMBER }} ${{ inputs.DISTRIBUTION_PLATFORM }} ${{ inputs.DISTRIBUTION_ARCHITECTURE }} ${{ inputs.DISTRIBUTION_NAME }} ${{ inputs.INPUT_MANIFEST }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      DISTRIBUTION_JOB_NAME:
+        description: '<Optional> The jenkins job name that is used for building the artifact. Defaults to distribution-build-opensearch.'
+        required: true
+        default: distribution-build-opensearch
+        type: choice
+        options:
+          - distribution-build-opensearch
+          - distribution-build-opensearch-dashboards
+      DISTRIBUTION_BUILD_NUMBER:
+        description: '<Required> What is the build id of the above DISTRIBUTION_JOB_NAME that you want to promote? (e.g. 123, 136)'
+        required: true
+        type: string
+      INPUT_MANIFEST:
+        description: '<Required> What is the input manifest of the above DISTRIBUTION_JOB_NAME that you want to promote? (e.g. 1.2.2/opensearch-1.2.2.yml)'
+        required: true
+        type: string
+      DISTRIBUTION_PLATFORM:
+        description: '<Optional> What is the platform of the distribution? Defaults to linux.'
+        required: true
+        default: linux
+        type: choice
+        options:
+          - linux
+          - windows
+          - darwin
+      DISTRIBUTION_NAME:
+        description: '<Optional> What is the name of the distribution?? Defaults to tar.'
+        required: true
+        default: tar
+        type: choice
+        options:
+          - tar
+          - rpm
+          - deb
+          - zip
+      DISTRIBUTION_ARCHITECTURE:
+        description: '<Optional> What is the architecture of the distribution? Defaults to arm64.'
+        required: true
+        default: arm64
+        type: choice
+        options:
+          - arm64
+          - x64
+      dry-run:
+        description: 'List what would be promoted and compare it with artifacts.opensearch.org; sign and upload nothing.'
+        required: false
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      DISTRIBUTION_JOB_NAME:
+        required: false
+        default: distribution-build-opensearch
+        type: string
+      DISTRIBUTION_BUILD_NUMBER:
+        required: true
+        type: string
+      INPUT_MANIFEST:
+        required: true
+        type: string
+      DISTRIBUTION_PLATFORM:
+        required: false
+        default: linux
+        type: string
+      DISTRIBUTION_NAME:
+        required: false
+        default: tar
+        type: string
+      DISTRIBUTION_ARCHITECTURE:
+        required: false
+        default: arm64
+        type: string
+      dry-run:
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      # repository secrets (AWS_ROLE_ARTIFACTS, ARTIFACT_BUCKET_NAME*) come from the caller; the others are `release`-environment
+      # secrets (ADR 0001), which the environment job reads even when the caller passes nothing
+      AWS_ROLE_ARTIFACTS:
+        required: false
+      ARTIFACT_BUCKET_NAME:
+        required: false
+      AWS_ROLE_PROMOTION:
+        required: false
+      ARTIFACT_PRODUCTION_BUCKET_NAME:
+        required: false
+      AWS_ROLE_SIGNING_BASE:
+        required: false
+      SIGNER_CLIENT_ROLE:
+        required: false
+      SIGNER_CLIENT_EXTERNAL_ID:
+        required: false
+      SIGNER_CLIENT_UNSIGNED_BUCKET:
+        required: false
+      SIGNER_CLIENT_SIGNED_BUCKET:
+        required: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PUBLIC_ARTIFACT_URL: ${{ vars.PUBLIC_ARTIFACT_URL || 'https://ci.opensearch.org/ci/dbc' }}
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      artifact-path: ${{ steps.plan.outputs.artifact-path }}
+      filename: ${{ steps.plan.outputs.filename }}
+      signing-email: ${{ steps.plan.outputs.signing-email }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: List objects to promote
+        id: plan
+        env:
+          DISTRIBUTION_JOB_NAME: ${{ inputs.DISTRIBUTION_JOB_NAME }}
+          DISTRIBUTION_BUILD_NUMBER: ${{ inputs.DISTRIBUTION_BUILD_NUMBER }}
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
+          DISTRIBUTION_PLATFORM: ${{ inputs.DISTRIBUTION_PLATFORM }}
+          DISTRIBUTION_NAME: ${{ inputs.DISTRIBUTION_NAME }}
+          DISTRIBUTION_ARCHITECTURE: ${{ inputs.DISTRIBUTION_ARCHITECTURE }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISTRIBUTION_BUILD_NUMBER}" ] || [ -z "${INPUT_MANIFEST}" ]; then
+            echo "::error::DISTRIBUTION_BUILD_NUMBER and INPUT_MANIFEST are required."
+            exit 1
+          fi
+          echo "${DISTRIBUTION_BUILD_NUMBER} ${DISTRIBUTION_PLATFORM} ${DISTRIBUTION_ARCHITECTURE} ${DISTRIBUTION_NAME} ${INPUT_MANIFEST} (dry-run: ${DRY_RUN})" >> "${GITHUB_STEP_SUMMARY}"
+          python3 .github/scripts/release_promotion_plan.py artifacts \
+            --job "${DISTRIBUTION_JOB_NAME}" --build-number "${DISTRIBUTION_BUILD_NUMBER}" \
+            --input-manifest "manifests/${INPUT_MANIFEST}" --platform "${DISTRIBUTION_PLATFORM}" \
+            --architecture "${DISTRIBUTION_ARCHITECTURE}" --distribution "${DISTRIBUTION_NAME}" \
+            --verify --summary "${GITHUB_STEP_SUMMARY}" --github-output "${GITHUB_OUTPUT}"
+
+  promote:
+    name: promote artifacts
+    needs: plan
+    if: ${{ !inputs.dry-run }}
+    runs-on: [self-hosted, linux, x64, al2023-x64-m5-4xlarge-docker-host]
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    container:
+      # ci-runner:ci-runner-centos7-opensearch-build-v3 (the Jenkins agent image), via the ECR mirror
+      image: public.ecr.aws/opensearchorg/opensearchstaging/ci-runner@sha256:0c7f0b329cc2aaccd953c2051d6563a3594fcea88d5f6da85f550f743cde01a8
+      options: --user root
+    env:
+      FILENAME: ${{ needs.plan.outputs.filename }}
+      DISTRIBUTION_NAME: ${{ inputs.DISTRIBUTION_NAME }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      # s3Download(bucket: ARTIFACT_BUCKET_NAME, path: "${artifactPath}/") as opensearch-bundle
+      - name: Download staging artifacts
+        uses: ./.github/actions/s3-sync
+        with:
+          direction: download
+          role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+          bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          remote-path: ${{ needs.plan.outputs.artifact-path }}/
+          local-path: artifacts
+      - name: Find files to sign
+        id: targets
+        run: |
+          set -euo pipefail
+          # Core plugins are signed as a directory (tar only); the min and bundle artifacts sit alone in their
+          # directories with the files the Groovy glob **/<f>-min-<rev>*.<dist>*,**/<f>-<rev>*.<dist>* matches.
+          core_plugins=false
+          if [ "${DISTRIBUTION_NAME}" = tar ] && [ -d "artifacts/builds/${FILENAME}/core-plugins" ]; then
+            core_plugins=true
+          fi
+          echo "core-plugins=${core_plugins}" >> "${GITHUB_OUTPUT}"
+      - name: Checksums (core plugins)
+        if: steps.targets.outputs.core-plugins == 'true'
+        uses: ./.github/actions/checksums
+        with:
+          artifact-path: artifacts/builds/${{ needs.plan.outputs.filename }}/core-plugins
+      - name: Checksums (min)
+        if: inputs.DISTRIBUTION_NAME == 'tar'
+        uses: ./.github/actions/checksums
+        with:
+          artifact-path: artifacts/builds/${{ needs.plan.outputs.filename }}/dist
+      - name: Checksums (bundle)
+        uses: ./.github/actions/checksums
+        with:
+          artifact-path: artifacts/dist/${{ needs.plan.outputs.filename }}
+      - name: Sign (core plugins)
+        if: steps.targets.outputs.core-plugins == 'true'
+        uses: ./.github/actions/sign-artifacts
+        env:
+          SIGNER_CLIENT_ROLE: ${{ secrets.SIGNER_CLIENT_ROLE }}
+          SIGNER_CLIENT_EXTERNAL_ID: ${{ secrets.SIGNER_CLIENT_EXTERNAL_ID }}
+          SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_UNSIGNED_BUCKET }}
+          SIGNER_CLIENT_SIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_SIGNED_BUCKET }}
+        with:
+          artifact-path: artifacts/builds/${{ needs.plan.outputs.filename }}/core-plugins
+          sigtype: .sig
+          email: ${{ needs.plan.outputs.signing-email }}
+          role-to-assume: ${{ secrets.AWS_ROLE_SIGNING_BASE }}
+      - name: Sign (min)
+        if: inputs.DISTRIBUTION_NAME == 'tar'
+        uses: ./.github/actions/sign-artifacts
+        env:
+          SIGNER_CLIENT_ROLE: ${{ secrets.SIGNER_CLIENT_ROLE }}
+          SIGNER_CLIENT_EXTERNAL_ID: ${{ secrets.SIGNER_CLIENT_EXTERNAL_ID }}
+          SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_UNSIGNED_BUCKET }}
+          SIGNER_CLIENT_SIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_SIGNED_BUCKET }}
+        with:
+          artifact-path: artifacts/builds/${{ needs.plan.outputs.filename }}/dist
+          sigtype: .sig
+          email: ${{ needs.plan.outputs.signing-email }}
+          role-to-assume: ${{ secrets.AWS_ROLE_SIGNING_BASE }}
+      - name: Sign (bundle)
+        uses: ./.github/actions/sign-artifacts
+        env:
+          SIGNER_CLIENT_ROLE: ${{ secrets.SIGNER_CLIENT_ROLE }}
+          SIGNER_CLIENT_EXTERNAL_ID: ${{ secrets.SIGNER_CLIENT_EXTERNAL_ID }}
+          SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_UNSIGNED_BUCKET }}
+          SIGNER_CLIENT_SIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_SIGNED_BUCKET }}
+        with:
+          artifact-path: artifacts/dist/${{ needs.plan.outputs.filename }}
+          sigtype: .sig
+          email: ${{ needs.plan.outputs.signing-email }}
+          role-to-assume: ${{ secrets.AWS_ROLE_SIGNING_BASE }}
+      - name: Upload list from the signed files
+        env:
+          DISTRIBUTION_JOB_NAME: ${{ inputs.DISTRIBUTION_JOB_NAME }}
+          DISTRIBUTION_BUILD_NUMBER: ${{ inputs.DISTRIBUTION_BUILD_NUMBER }}
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
+          DISTRIBUTION_PLATFORM: ${{ inputs.DISTRIBUTION_PLATFORM }}
+          DISTRIBUTION_ARCHITECTURE: ${{ inputs.DISTRIBUTION_ARCHITECTURE }}
+        run: |
+          set -euo pipefail
+          .github/scripts/ensure-pyyaml.sh
+          python3 .github/scripts/release_promotion_plan.py artifacts \
+            --job "${DISTRIBUTION_JOB_NAME}" --build-number "${DISTRIBUTION_BUILD_NUMBER}" \
+            --input-manifest "manifests/${INPUT_MANIFEST}" --platform "${DISTRIBUTION_PLATFORM}" \
+            --architecture "${DISTRIBUTION_ARCHITECTURE}" --distribution "${DISTRIBUTION_NAME}" \
+            --local-root artifacts --summary "${GITHUB_STEP_SUMMARY}" --json upload-plan.json
+      - name: Assume promotion role
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_PROMOTION }}
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 900
+          audience: sts.amazonaws.com
+          aws-region: us-east-1
+      # the three s3Upload calls (core plugins, min, bundle) to ARTIFACT_PRODUCTION_BUCKET_NAME/releases/
+      - name: Upload to the production bucket
+        env:
+          ARTIFACT_PRODUCTION_BUCKET_NAME: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+        run: |
+          set -euo pipefail
+          [ -n "${ARTIFACT_PRODUCTION_BUCKET_NAME}" ] || { echo "::error::ARTIFACT_PRODUCTION_BUCKET_NAME is empty."; exit 1; }
+          count=0
+          while IFS=$'\t' read -r source destination; do
+            aws s3 cp --no-progress "artifacts/${source}" "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/${destination}"
+            count=$((count + 1))
+          done < <(python3 -c 'import json,sys; [print(o["source"] + "\t" + o["destination"]) for o in json.load(open(sys.argv[1]))["objects"]]' upload-plan.json)
+          echo "Uploaded ${count} objects." | tee -a "${GITHUB_STEP_SUMMARY}"

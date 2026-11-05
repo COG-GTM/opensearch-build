@@ -1,0 +1,301 @@
+---
+# GitHub Actions port of jenkins/release-workflows/promote-repos.jenkinsfile: vars/promoteRepos.groovy (jenkins@12.0.0).
+# `plan` (GitHub-hosted, no secrets) lists the staging packages, the repository objects they become and whether the
+# published yum/apt metadata already lists them. With `dry-run` (the default) that is all that runs. `promote` runs only
+# for dry-run=false, in the `release` environment (required reviewers): sync the production repo down, add the x64 and
+# arm64 packages, rebuild + sign the metadata (yum: createrepo + repomd.xml.asc through the signer client; apt: aptly
+# with the RPM release key from Secrets Manager), sync it back.
+name: distribution-promote-repos
+run-name: distribution-promote-repos ${{ inputs.dry-run && '(dry run) ' || '' }}${{ inputs.DISTRIBUTION_REPO_TYPE }} ${{ inputs.DISTRIBUTION_JOB_NAME }} ${{ inputs.DISTRIBUTION_BUILD_NUMBER }} ${{ inputs.INPUT_MANIFEST }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      DISTRIBUTION_JOB_NAME:
+        description: '<Optional> What distribution job name is this distribution build with? Defaults to distribution-build-opensearch.'
+        required: true
+        default: distribution-build-opensearch
+        type: choice
+        options:
+          - distribution-build-opensearch
+          - distribution-build-opensearch-dashboards
+      DISTRIBUTION_REPO_TYPE:
+        description: '<Optional> What distribution repo type is this distribution promote to? Defaults to yum.'
+        required: true
+        default: yum
+        type: choice
+        options:
+          - yum
+          - apt
+      DISTRIBUTION_BUILD_NUMBER:
+        description: '<Required> What is the build id of the above DISTRIBUTION_JOB_NAME that you want to promote? (e.g. 123, 136)'
+        required: true
+        type: string
+      INPUT_MANIFEST:
+        description: '<Required> What is the input manifest of the above DISTRIBUTION_JOB_NAME that you want to promote? (e.g. 1.2.2/opensearch-1.2.2.yml)'
+        required: true
+        type: string
+      dry-run:
+        description: 'List what would be promoted and compare it with the published repository; sign and upload nothing.'
+        required: false
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      DISTRIBUTION_JOB_NAME:
+        required: false
+        default: distribution-build-opensearch
+        type: string
+      DISTRIBUTION_REPO_TYPE:
+        required: false
+        default: yum
+        type: string
+      DISTRIBUTION_BUILD_NUMBER:
+        required: true
+        type: string
+      INPUT_MANIFEST:
+        required: true
+        type: string
+      dry-run:
+        required: false
+        default: true
+        type: boolean
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PUBLIC_ARTIFACT_URL: ${{ vars.PUBLIC_ARTIFACT_URL || 'https://ci.opensearch.org/ci/dbc' }}
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      filename: ${{ steps.plan.outputs.filename }}
+      revision: ${{ steps.plan.outputs.revision }}
+      repo-version: ${{ steps.plan.outputs.repo-version }}
+      signing-email: ${{ steps.plan.outputs.signing-email }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: List packages to promote
+        id: plan
+        env:
+          DISTRIBUTION_JOB_NAME: ${{ inputs.DISTRIBUTION_JOB_NAME }}
+          DISTRIBUTION_REPO_TYPE: ${{ inputs.DISTRIBUTION_REPO_TYPE }}
+          DISTRIBUTION_BUILD_NUMBER: ${{ inputs.DISTRIBUTION_BUILD_NUMBER }}
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISTRIBUTION_BUILD_NUMBER}" ]; then
+            # promoteRepos: 'User did not enter build number in jenkins parameter, exit 1'
+            echo "::error::User did not enter build number, exit 1"
+            exit 1
+          fi
+          echo "${DISTRIBUTION_REPO_TYPE} ${DISTRIBUTION_JOB_NAME} ${DISTRIBUTION_BUILD_NUMBER} ${INPUT_MANIFEST} (dry-run: ${DRY_RUN})" >> "${GITHUB_STEP_SUMMARY}"
+          python3 .github/scripts/release_promotion_plan.py repos \
+            --job "${DISTRIBUTION_JOB_NAME}" --build-number "${DISTRIBUTION_BUILD_NUMBER}" \
+            --input-manifest "manifests/${INPUT_MANIFEST}" --repo-type "${DISTRIBUTION_REPO_TYPE}" \
+            --verify --summary "${GITHUB_STEP_SUMMARY}" --github-output "${GITHUB_OUTPUT}"
+
+  promote:
+    name: promote repo
+    needs: plan
+    if: ${{ !inputs.dry-run }}
+    runs-on: [self-hosted, linux, x64, al2023-x64-m5-4xlarge-docker-host]
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    container:
+      # docker_images[DISTRIBUTION_REPO_TYPE]: ci-runner-almalinux8-opensearch-build-v1 (yum, createrepo) or
+      # ci-runner-ubuntu2404-opensearch-build-v1 (apt, aptly), via the ECR mirror
+      image: ${{ inputs.DISTRIBUTION_REPO_TYPE == 'apt' && 'public.ecr.aws/opensearchorg/opensearchstaging/ci-runner@sha256:dc738763fbb46296ef793eec91efcc8466aa4fbdc1ee934038d1436f83ad1e78' || 'public.ecr.aws/opensearchorg/opensearchstaging/ci-runner@sha256:5e5a12c8bfd3ad38907cfce8cb343d5f18deb10a1815a050bedc9687f2570cf6' }}
+      options: --user root
+    env:
+      JOB_NAME: ${{ inputs.DISTRIBUTION_JOB_NAME }}
+      REPO_TYPE: ${{ inputs.DISTRIBUTION_REPO_TYPE }}
+      BUILD_NUMBER: ${{ inputs.DISTRIBUTION_BUILD_NUMBER }}
+      FILENAME: ${{ needs.plan.outputs.filename }}
+      REVISION: ${{ needs.plan.outputs.revision }}
+      REPO_VERSION: ${{ needs.plan.outputs.repo-version }}
+      SIGNING_EMAIL: ${{ needs.plan.outputs.signing-email }}
+      ARTIFACT_PRODUCTION_BUCKET_NAME: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Paths
+        id: paths
+        run: |
+          set -euo pipefail
+          [ -n "${ARTIFACT_PRODUCTION_BUCKET_NAME}" ] || { echo "::error::ARTIFACT_PRODUCTION_BUCKET_NAME is empty."; exit 1; }
+          case "${REPO_TYPE}" in yum) dist_type=rpm ;; apt) dist_type=deb ;; *) echo "::error::repo type must be yum or apt"; exit 1 ;; esac
+          repo_prod_path="releases/bundle/${FILENAME}/${REPO_VERSION}/${REPO_TYPE}"
+          {
+            echo "dist-type=${dist_type}"
+            echo "repo-prod-path=${repo_prod_path}"
+            echo "artifact-path=${GITHUB_WORKSPACE}/artifacts/${repo_prod_path}"
+          } | tee -a "${GITHUB_OUTPUT}"
+      - name: Assume promotion role (pull)
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_PROMOTION }}
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 900
+          audience: sts.amazonaws.com
+          aws-region: us-east-1
+      - name: Pull production repo and staging packages
+        env:
+          REPO_PROD_PATH: ${{ steps.paths.outputs.repo-prod-path }}
+          ARTIFACT_PATH: ${{ steps.paths.outputs.artifact-path }}
+          DIST_TYPE: ${{ steps.paths.outputs.dist-type }}
+        run: |
+          set -euo pipefail
+          echo "Pulling Prod ${REPO_TYPE}"
+          aws s3 sync "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/${REPO_PROD_PATH}/" "${ARTIFACT_PATH}/" --no-progress
+          echo "Pulling ${REVISION} ${DIST_TYPE}"
+          cd "${ARTIFACT_PATH}"
+          for arch in x64 arm64; do
+            curl -SLO --fail "${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${REVISION}/${BUILD_NUMBER}/linux/${arch}/${DIST_TYPE}/dist/${FILENAME}/${FILENAME}-${REVISION}-linux-${arch}.${DIST_TYPE}"
+          done
+          ls -l
+
+      # yum: createrepo --update, then sign repomd.xml renamed to .pom (the signer filter has no .xml)
+      - name: Update yum metadata
+        if: inputs.DISTRIBUTION_REPO_TYPE == 'yum'
+        env:
+          ARTIFACT_PATH: ${{ steps.paths.outputs.artifact-path }}
+        run: |
+          set -euo pipefail
+          cd "${ARTIFACT_PATH}"
+          rm -vf repodata/repomd.xml.asc
+          echo "Update repo metadata"
+          createrepo --update .
+          mv -v repodata/repomd.xml repodata/repomd.pom
+          echo "Complete metadata update, awaiting signing repomd.xml"
+      - name: Sign repomd.xml
+        if: inputs.DISTRIBUTION_REPO_TYPE == 'yum'
+        uses: ./.github/actions/sign-artifacts
+        env:
+          SIGNER_CLIENT_ROLE: ${{ secrets.SIGNER_CLIENT_ROLE }}
+          SIGNER_CLIENT_EXTERNAL_ID: ${{ secrets.SIGNER_CLIENT_EXTERNAL_ID }}
+          SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_UNSIGNED_BUCKET }}
+          SIGNER_CLIENT_SIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_SIGNED_BUCKET }}
+        with:
+          artifact-path: ${{ steps.paths.outputs.artifact-path }}/repodata/repomd.pom
+          sigtype: .asc
+          platform: linux
+          email: ${{ needs.plan.outputs.signing-email }}
+          role-to-assume: ${{ secrets.AWS_ROLE_SIGNING_BASE }}
+      - name: Restore repomd.xml
+        if: inputs.DISTRIBUTION_REPO_TYPE == 'yum'
+        env:
+          ARTIFACT_PATH: ${{ steps.paths.outputs.artifact-path }}
+        run: |
+          set -euo pipefail
+          cd "${ARTIFACT_PATH}/repodata"
+          mv -v repomd.pom repomd.xml
+          mv -v repomd.pom.asc repomd.xml.asc
+          ls -l
+
+      # apt: aptly repo -> snapshot -> publish, signed with the RPM release key (promoteRepos reuses it for apt)
+      - name: Check apt utility versions
+        if: inputs.DISTRIBUTION_REPO_TYPE == 'apt'
+        run: |
+          set -euo pipefail
+          gpg_version_requirement="2.2.0"
+          aptly_version_requirement="1.5.0"
+          gpg_version=$(gpg --version | head -n 1 | grep -oE '[0-9.]+' | head -n 1)
+          aptly_version=$(aptly version | cut -d: -f2 | grep -oE '[0-9.]+' | head -n 1)
+          echo "gpg ${gpg_version} (needs ${gpg_version_requirement}), aptly ${aptly_version} (needs ${aptly_version_requirement})"
+          if [ "$(printf '%s\n%s\n' "${gpg_version}" "${gpg_version_requirement}" | sort -V | head -n 1)" != "${gpg_version_requirement}" ] \
+            || [ "$(printf '%s\n%s\n' "${aptly_version}" "${aptly_version_requirement}" | sort -V | head -n 1)" != "${aptly_version_requirement}" ]; then
+            echo "::error::Utility version is lower than set limit, exit 1"
+            exit 1
+          fi
+      - name: Assume RPM signing role
+        if: inputs.DISTRIBUTION_REPO_TYPE == 'apt'
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_RPM_SIGNING }}
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 900
+          audience: sts.amazonaws.com
+          aws-region: us-west-2
+      - name: Publish apt repo
+        if: inputs.DISTRIBUTION_REPO_TYPE == 'apt'
+        env:
+          ARTIFACT_PATH: ${{ steps.paths.outputs.artifact-path }}
+          RPM_SIGNING_KEY_ID: ${{ secrets.RPM_SIGNING_KEY_ID }}
+          RPM_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_SIGNING_PASSPHRASE_SECRETS_ARN }}
+          RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+          RPM_RELEASE_SIGNING_KEY_ID: ${{ secrets.RPM_RELEASE_SIGNING_KEY_ID }}
+          RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN }}
+          RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+        run: |
+          set -euo pipefail
+          set +x
+          GPG_TTY=$(tty || true)
+          export GPG_TTY
+          PASSPHRASE_SECRETS_ARN="${RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN}"
+          SECRET_KEY_ID_SECRETS_ARN="${RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN}"
+          KEY_ID="${RPM_RELEASE_SIGNING_KEY_ID}"
+          if [ "${SIGNING_EMAIL}" = "opensearch@amazon.com" ]; then
+            PASSPHRASE_SECRETS_ARN="${RPM_SIGNING_PASSPHRASE_SECRETS_ARN}"
+            SECRET_KEY_ID_SECRETS_ARN="${RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN}"
+            KEY_ID="${RPM_SIGNING_KEY_ID}"
+          fi
+          PASSPHRASE_FILE=$(mktemp)
+          # The imported private key and the passphrase must not outlive the step, even when publishing fails.
+          cleanup() {
+            gpg --batch --yes --delete-secret-keys "${KEY_ID}" > /dev/null 2>&1 || true
+            gpg --batch --yes --delete-keys "${KEY_ID}" > /dev/null 2>&1 || true
+            rm -f "${PASSPHRASE_FILE}"
+          }
+          trap cleanup EXIT
+
+          echo "Import OpenSearch keys"
+          aws secretsmanager get-secret-value --region us-west-2 --secret-id "${PASSPHRASE_SECRETS_ARN}" | jq -r .SecretBinary | base64 --decode > "${PASSPHRASE_FILE}"
+          aws secretsmanager get-secret-value --region us-west-2 --secret-id "${SECRET_KEY_ID_SECRETS_ARN}" | jq -r .SecretBinary | base64 --decode \
+            | gpg --quiet --import --pinentry-mode loopback --passphrase-file "${PASSPHRASE_FILE}" -
+
+          echo "Start Signing Apt"
+          rm -rf ~/.aptly
+          mkdir "${ARTIFACT_PATH}/base"
+          find "${ARTIFACT_PATH}" -type f -name "*.deb" -print0 | xargs -0 -I {} mv -v {} "${ARTIFACT_PATH}/base"
+          aptly repo create -comment="${FILENAME} repository" -distribution=stable -component=main "${JOB_NAME}"
+          aptly repo add "${JOB_NAME}" "${ARTIFACT_PATH}/base"
+          aptly repo show -with-packages "${JOB_NAME}"
+          aptly snapshot create "${JOB_NAME}-${REPO_VERSION}" from repo "${JOB_NAME}"
+          aptly publish snapshot -label="${FILENAME}" -origin="artifacts.opensearch.org" -batch=true -passphrase-file="${PASSPHRASE_FILE}" "${JOB_NAME}-${REPO_VERSION}"
+          rm -rf "${ARTIFACT_PATH:?}"/*
+          cp -rvp ~/.aptly/public/* "${ARTIFACT_PATH}/"
+          ls "${ARTIFACT_PATH}"
+
+      - name: Assume promotion role (push)
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_PROMOTION }}
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 900
+          audience: sts.amazonaws.com
+          aws-region: us-east-1
+      - name: Push production repo
+        env:
+          REPO_PROD_PATH: ${{ steps.paths.outputs.repo-prod-path }}
+          ARTIFACT_PATH: ${{ steps.paths.outputs.artifact-path }}
+        run: |
+          set -euo pipefail
+          echo "Pushing Prod ${REPO_TYPE}"
+          aws s3 sync "${ARTIFACT_PATH}/" "s3://${ARTIFACT_PRODUCTION_BUCKET_NAME}/${REPO_PROD_PATH}/" --no-progress

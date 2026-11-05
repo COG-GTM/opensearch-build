@@ -1,0 +1,81 @@
+---
+# Dry runs of the s5.3 promotion building blocks for the latest release (3.9.0: OpenSearch RC build 12228, Dashboards RC
+# build 9054), with the inputs central-release-promotion passes them. Only the GitHub-hosted plan jobs run (dry-run is the
+# default); each lists what would be promoted and compares it with what is published today.
+name: release-promotion-dry-run
+
+on:
+  pull_request:
+    paths:
+      - .github/scripts/release_promotion_plan.py
+      - .github/workflows/distribution-promote-artifacts.yml
+      - .github/workflows/distribution-promote-repos.yml
+      - .github/workflows/docker-promotion.yml
+      - .github/workflows/publish-to-maven.yml
+      - .github/workflows/release-promotion-dry-run.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  promote-artifacts:
+    name: artifacts ${{ matrix.job }} ${{ matrix.platform }} ${{ matrix.architecture }} ${{ matrix.distribution }}
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [distribution-build-opensearch, distribution-build-opensearch-dashboards]
+        architecture: [x64, arm64]
+        distribution: [tar, rpm, deb]
+        platform: [linux]
+        include:
+          - {job: distribution-build-opensearch, platform: windows, architecture: x64, distribution: zip}
+          - {job: distribution-build-opensearch-dashboards, platform: windows, architecture: x64, distribution: zip}
+    uses: ./.github/workflows/distribution-promote-artifacts.yml
+    with:
+      DISTRIBUTION_JOB_NAME: ${{ matrix.job }}
+      DISTRIBUTION_BUILD_NUMBER: ${{ matrix.job == 'distribution-build-opensearch' && '12228' || '9054' }}
+      INPUT_MANIFEST: ${{ matrix.job == 'distribution-build-opensearch' && '3.9.0/opensearch-3.9.0.yml' || '3.9.0/opensearch-dashboards-3.9.0.yml' }}
+      DISTRIBUTION_PLATFORM: ${{ matrix.platform }}
+      DISTRIBUTION_ARCHITECTURE: ${{ matrix.architecture }}
+      DISTRIBUTION_NAME: ${{ matrix.distribution }}
+      dry-run: true
+
+  promote-repos:
+    name: repos ${{ matrix.job }} ${{ matrix.repo-type }}
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [distribution-build-opensearch, distribution-build-opensearch-dashboards]
+        repo-type: [yum, apt]
+    uses: ./.github/workflows/distribution-promote-repos.yml
+    with:
+      DISTRIBUTION_JOB_NAME: ${{ matrix.job }}
+      DISTRIBUTION_REPO_TYPE: ${{ matrix.repo-type }}
+      DISTRIBUTION_BUILD_NUMBER: ${{ matrix.job == 'distribution-build-opensearch' && '12228' || '9054' }}
+      INPUT_MANIFEST: ${{ matrix.job == 'distribution-build-opensearch' && '3.9.0/opensearch-3.9.0.yml' || '3.9.0/opensearch-dashboards-3.9.0.yml' }}
+      dry-run: true
+
+  docker-promotion:
+    name: docker ${{ matrix.source }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # central-release-promotion's SOURCE_IMAGES, and the 2026-10-26 docker-re-release images that 3.9.0 points to now
+        source:
+          - opensearch:3.9.0.12228, opensearch-dashboards:3.9.0.9054
+          - opensearch:3.9.0.12228.20261026, opensearch-dashboards:3.9.0.9054.20261026
+    uses: ./.github/workflows/docker-promotion.yml
+    with:
+      SOURCE_IMAGES: ${{ matrix.source }}
+      RELEASE_VERSION: 3.9.0
+      TAG_LATEST: true
+      dry-run: true
+
+  publish-to-maven:
+    name: maven
+    uses: ./.github/workflows/publish-to-maven.yml
+    with:
+      BUILD_ID: '12228'
+      VERSION: 3.9.0
+      dry-run: true
