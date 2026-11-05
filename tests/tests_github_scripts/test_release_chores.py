@@ -303,8 +303,15 @@ def test_release_owners_metrics_failure_does_not_assign() -> None:
 
     gh = FakeGh()
     chore, _ = chores(["release-owners", "--action", "assign", "--manifest", OS_MANIFEST], gh, FakeMetrics({release_chores.RELEASE_METRICS_INDEX: broken}))
-    with pytest.raises(release_chores.ChoreError, match="Unable to read the release owners"):
+    with pytest.raises(RuntimeError, match="timeout"):
         chore.run("release-owners")
+    assert gh.calls == []
+
+
+def test_release_owners_without_metrics_document_is_skipped() -> None:
+    gh = FakeGh()
+    chore, _ = chores(["release-owners", "--action", "assign", "--manifest", OS_MANIFEST], gh, FakeMetrics({release_chores.RELEASE_METRICS_INDEX: {"hits": {"hits": []}}}))
+    chore.run("release-owners")
     assert gh.calls == []
 
 
@@ -317,13 +324,12 @@ def test_release_issues_metrics_failure_does_not_dispatch() -> None:
 
 
 def test_pr_base_for_tag_refs() -> None:
-    gh = FakeGh({"api repos/o/r/branches/3.8": "3.8"})
-    assert release_chores.pr_base(release_chores.GitHub(False, gh), "o/r", "tags/3.8.0.0", "3.8.0") == "3.8"
-    assert release_chores.pr_base(release_chores.GitHub(False, FakeGh()), "o/r", "main", "3.8.0") == "main"
+    gh = FakeGh({"api repos/o/r --jq .default_branch": "main"})
+    assert release_chores.pr_base(release_chores.GitHub(False, gh), "o/r", "tags/3.8.0.0") == "main"
+    assert release_chores.pr_base(release_chores.GitHub(False, FakeGh()), "o/r", "3.9") == "3.9"
 
-    def no_branch(args: List[str]) -> str:
-        if "branches" in args[1]:
-            raise release_chores.subprocess.CalledProcessError(1, "gh")
-        return "main"
+    def failing(args: List[str]) -> str:
+        raise release_chores.subprocess.CalledProcessError(1, "gh")
 
-    assert release_chores.pr_base(release_chores.GitHub(False, no_branch), "o/r", "tags/3.8.0.0", "3.8.0") == "main"
+    with pytest.raises(release_chores.subprocess.CalledProcessError):
+        release_chores.pr_base(release_chores.GitHub(False, failing), "o/r", "tags/3.8.0.0")

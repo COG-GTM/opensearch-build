@@ -201,16 +201,15 @@ class ReleaseMetrics:
         }
 
     def release_owners(self, component: str) -> Optional[List[str]]:
-        try:
-            hits = self.client.search(RELEASE_METRICS_INDEX, self._owner_issue_query(component))["hits"]["hits"]
-            owners: List[str] = []
-            for hit in hits:
-                value = hit.get("_source", {}).get("release_owners") or []
-                owners.extend(value if isinstance(value, list) else [value])
-            return owners
-        except Exception as ex:
-            echo(f"Error fetching release owners: {ex}")
+        """Owners of the latest metrics document; None when the component has no document (read errors propagate)."""
+        hits = self.client.search(RELEASE_METRICS_INDEX, self._owner_issue_query(component))["hits"]["hits"]
+        if not hits:
             return None
+        owners: List[str] = []
+        for hit in hits:
+            value = hit.get("_source", {}).get("release_owners") or []
+            owners.extend(value if isinstance(value, list) else [value])
+        return owners
 
     def release_issue_exists(self, component: str) -> Optional[bool]:
         try:
@@ -346,7 +345,8 @@ class Chores:
             for component in manifest.get("components", []):
                 owners = metrics.release_owners(component["name"])
                 if owners is None:
-                    raise ChoreError(f"Unable to read the release owners of {component['name']} from metrics; not guessing")
+                    echo(f"No release metrics document for {component['name']}; skipping.")
+                    continue
                 if not owners:
                     missing.append(component["name"])
                     if self.args.action != "check":
@@ -654,15 +654,11 @@ def push_url(repository: str) -> str:
     return f"https://x-access-token:{os.environ.get('GH_TOKEN', '')}@github.com/{repository}.git"
 
 
-def pr_base(github: GitHub, upstream: str, ref: str, version: str) -> str:
-    """PR base branch: the ref itself, or for a tag the <major>.<minor> release branch, else the default branch."""
+def pr_base(github: GitHub, upstream: str, ref: str) -> str:
+    """PR base branch: the ref itself, or for a tag (released version) the repository default branch."""
     if not ref.startswith("tags/"):
         return ref.replace("refs/heads/", "")
-    release_branch = ".".join(version.split(".")[:2])
-    try:
-        return github.read("api", f"repos/{upstream}/branches/{release_branch}", "--jq", ".name") or release_branch
-    except subprocess.CalledProcessError:
-        return github.read("api", f"repos/{upstream}", "--jq", ".default_branch")
+    return github.read("api", f"repos/{upstream}", "--jq", ".default_branch")
 
 
 def notes_pr(args: argparse.Namespace, github: GitHub) -> None:
@@ -710,7 +706,7 @@ def notes_pr(args: argparse.Namespace, github: GitHub) -> None:
         git(checkout, "-c", f"user.email={args.git_email}", "-c", f"user.name={args.git_name}", "commit", "-sm", f"Add release notes for {version}", dry_run=args.dry_run, description="commit")
         git(checkout, "push", push_url(upstream), f"HEAD:refs/heads/{branch}", "--force", dry_run=args.dry_run, description=f"push {branch} to {upstream}")
         existing = github.read("api", f"repos/{upstream}/pulls?head={UPSTREAM_OWNER}:{branch}&state=open", "--jq", ".[0].number")
-        base = pr_base(github, upstream, ref, version)
+        base = pr_base(github, upstream, ref)
         if existing and existing != "null":
             github.write(f"update PR #{existing} in {upstream} with new release notes", "pr", "edit", existing, "--repo", upstream, "--body", body)
         else:
