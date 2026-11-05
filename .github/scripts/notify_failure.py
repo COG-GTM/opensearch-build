@@ -10,7 +10,8 @@
 
 Port of opensearch-build-libraries (jenkins@12.0.0): vars/updateBuildFailureIssues.groovy,
 vars/updateIntegTestFailureIssues.groovy, vars/createGithubIssue.groovy, vars/closeGithubIssue.groovy,
-src/jenkins/CreateIntegTestMarkDownTable.groovy and vars/publishNotification.groovy. Titles, labels, bodies and
+src/jenkins/CreateIntegTestMarkDownTable.groovy, vars/publishNotification.groovy and, for kind flaky-test,
+vars/gradleCheckFlakyTestGitHubIssue.groovy with src/gradlecheck/ParseMarkDownTable.groovy and MarkdownComparator.groovy. Titles, labels, bodies and
 the dedupe-by-title lookups are kept byte-for-byte; only the build link points at the GitHub Actions run.
 """
 
@@ -28,7 +29,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 import yaml
 
-KINDS = ("distribution-build", "integ-test")
+KINDS = ("distribution-build", "integ-test", "flaky-test")
+FLAKY_TEST_LABELS = "autocut,>test-failure,flaky-test"
+FLAKY_TEST_REPOSITORY = "opensearch-project/OpenSearch"
 DAYS_TO_REOPEN = 3
 SLEEP_SECONDS = 3
 # The Groovy bodies are triple-quoted strings whose continuation lines are indented by 20 spaces; stripIndent()
@@ -67,6 +70,9 @@ class IssueAction:
     title: str
     body: str
     labels: List[str] = field(default_factory=list)
+    # "recent": reopen an issue closed in the last DAYS_TO_REOPEN days; "table-changed": reopen the closed issue only
+    # when its table rows differ (gradleCheckFlakyTestGitHubIssue)
+    reopen: str = "recent"
 
 
 def groovy_str(value: Any) -> str:
@@ -193,6 +199,34 @@ def plan_issues(
     return actions
 
 
+def plan_flaky_issues(issues: List[Dict[str, Any]], repository: str, labels: str) -> List[IssueAction]:
+    """gradleCheckFlakyTestGitHubIssue(label: "<labels>") plus the 'untriaged' label it always adds."""
+    label_list = [lbl.strip() for lbl in (labels or FLAKY_TEST_LABELS).split(",") if lbl.strip()] + ["untriaged"]
+    repo = repo_path(repository or FLAKY_TEST_REPOSITORY)
+    return [
+        IssueAction("open", str(issue.get("test_class") or issue["title"]), repo, issue["title"], issue["body"], label_list, "table-changed")
+        for issue in issues
+    ]
+
+
+def parse_table_rows(markdown: str) -> List[Dict[str, str]]:
+    """ParseMarkDownTable.parseMarkdownTableRows(): skip the header and separator rows and the trailing text."""
+    rows = re.split(r"\|\s*\n", markdown or "")[2:-1]
+    parsed = []
+    for row in rows:
+        cells = re.split(r"\|\s*", row)
+        if len(cells) < 5:
+            continue
+        parsed.append({key: cells[index].strip() for index, key in enumerate(("Git Reference", "Merged Pull Request", "Build Details", "Test Name"), start=1)})
+    return parsed
+
+
+def table_differences(new_body: str, existing_body: str) -> List[Dict[str, str]]:
+    """MarkdownComparator.markdownComparison(): rows of the new report missing from the closed issue."""
+    existing = parse_table_rows(existing_body)
+    return [row for row in parse_table_rows(new_body) if row not in existing]
+
+
 Runner = Callable[[List[str]], str]
 
 
@@ -220,8 +254,24 @@ def apply_issue(action: IssueAction, gh: Runner, today: date) -> str:
     if open_issue:
         gh(["issue", "edit", open_issue, "--repo", action.repo, "--body", action.body])
         return f"edited #{open_issue}"
-    since = (today - timedelta(days=DAYS_TO_REOPEN)).strftime("%Y-%m-%d")
-    closed_issue = find_issue(gh, action.repo, action.title, "closed", f" closed:>={since}")
+    if action.reopen == "table-changed":
+        closed_issue = find_issue(gh, action.repo, action.title, "closed")
+        if closed_issue:
+            existing_body = gh(["issue", "view", closed_issue, "--repo", action.repo, "--json", "body", "--jq", ".body"])
+            differences = table_differences(action.body, existing_body)
+            if not differences:
+                print("Not Re-opening the issue as the no change in the Flaky report after the issue is closed")
+                return f"skipped closed #{closed_issue} (report unchanged)"
+            for row in differences:
+                print(f"Git Reference: {row['Git Reference']}, Merged Pull Request: {row['Merged Pull Request']}, "
+                      f"Build Details: {row['Build Details']}, Test Name: {row['Test Name']}")
+            gh(["issue", "reopen", "--repo", action.repo, closed_issue])
+            gh(["issue", "edit", closed_issue, "--repo", action.repo, "--body", action.body])
+            return f"reopened #{closed_issue}"
+        closed_issue = ""
+    else:
+        since = (today - timedelta(days=DAYS_TO_REOPEN)).strftime("%Y-%m-%d")
+        closed_issue = find_issue(gh, action.repo, action.title, "closed", f" closed:>={since}")
     if closed_issue:
         gh(["issue", "reopen", "--repo", action.repo, closed_issue])
         gh(["issue", "edit", closed_issue, "--repo", action.repo, "--body", action.body])
@@ -233,19 +283,60 @@ def apply_issue(action: IssueAction, gh: Runner, today: date) -> str:
     return "created " + gh(["issue", "create", "--title", action.title, "--body", action.body, *label_args, "--repo", action.repo])
 
 
-def print_dry_run(action: IssueAction) -> None:
+def open_autocut_issues(gh: Runner, repo: str) -> Dict[str, str]:
+    """Open [AUTOCUT] issues of a repository, title -> number (read-only, for dry runs)."""
+    out = gh(["issue", "list", "--repo", repo, "--state", "open", "-S", "[AUTOCUT] in:title", "--limit", "1000", "--json", "number,title"])
+    return {issue["title"]: str(issue["number"]) for issue in json.loads(out or "[]")}
+
+
+def dry_run_outcome(action: IssueAction, open_issues: Optional[Dict[str, str]]) -> str:
+    if open_issues is None:
+        return ""
+    number = open_issues.get(action.title)
+    if action.action == "close":
+        return f"close open #{number}" if number else "nothing to close (no open issue)"
+    if number:
+        return f"edit open #{number}"
+    return "reopen the closed issue if its report changed, else create" if action.reopen == "table-changed" else "reopen a recently closed issue, else create"
+
+
+def print_dry_run(action: IssueAction, outcome: str = "") -> None:
     print(f"::group::[dry-run] {action.action} {action.repo}: {action.title}")
     print(f"repository: {action.repo}")
     print(f"title: {action.title}")
+    if outcome:
+        print(f"against open issues: {outcome}")
     if action.action == "open":
         print(f"labels: {', '.join(action.labels)}")
-        print("dedupe: edit the open issue with this title, else reopen one closed in the last "
-              f"{DAYS_TO_REOPEN} days, else create")
+        if action.reopen == "table-changed":
+            print("dedupe: edit the open issue with this title, else reopen the closed one when its table rows changed, else create")
+        else:
+            print("dedupe: edit the open issue with this title, else reopen one closed in the last "
+                  f"{DAYS_TO_REOPEN} days, else create")
         print("body:")
     else:
         print("close comment:")
     print(action.body)
     print("::endgroup::")
+
+
+def print_dry_run_plan(actions: List[IssueAction], gh: Optional[Runner]) -> None:
+    open_issues: Dict[str, Optional[Dict[str, str]]] = {}
+    for repo in dict.fromkeys(a.repo for a in actions):
+        try:
+            open_issues[repo] = open_autocut_issues(gh, repo) if gh else None
+        except subprocess.CalledProcessError as ex:
+            print(f"::warning::Unable to list the open AUTOCUT issues of {repo}: {ex.stderr or ex}", file=sys.stderr)
+            open_issues[repo] = None
+    outcomes = [dry_run_outcome(action, open_issues[action.repo]) for action in actions]
+    for action, outcome in zip(actions, outcomes):
+        print_dry_run(action, outcome)
+    print(f"[dry-run] {sum(a.action == 'open' for a in actions)} issue(s) to open or update, {sum(a.action == 'close' for a in actions)} to close")
+    if gh:
+        print("| Repository | Title | Against open issues |")
+        print("|------------|-------|---------------------|")
+        for action, outcome in zip(actions, outcomes):
+            print(f"| {action.repo} | {action.title} | {outcome or 'lookup failed'} |")
 
 
 def webhook_text(icon: str, job_name: str, run_number: str, message: str, run_url: str, manifest: str, extra: str) -> str:
@@ -304,6 +395,10 @@ def main(argv: Optional[List[str]] = None, gh: Runner = run_gh, today: Optional[
     parser.add_argument("--passed", default="", help="Components whose AUTOCUT issue is closed")
     parser.add_argument("--release-owners", default="", help='JSON object {"<component>": ["<login>", ...]}')
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--lookup-existing", action="store_true", help="Dry run: read the open AUTOCUT issues and say what each update would do")
+    parser.add_argument("--issues-file", default="", help='flaky-test: JSON list [{"test_class", "title", "body"}, ...]')
+    parser.add_argument("--repository", default="", help=f"flaky-test: repository the issues are filed in (default {FLAKY_TEST_REPOSITORY})")
+    parser.add_argument("--labels", default="", help=f"flaky-test: comma separated labels (default {FLAKY_TEST_LABELS})")
     parser.add_argument("--job-name", default="")
     parser.add_argument("--run-number", default="")
     parser.add_argument("--message", default="")
@@ -325,11 +420,15 @@ def main(argv: Optional[List[str]] = None, gh: Runner = run_gh, today: Optional[
 
     if args.kind == "none":
         return 0
-    with open(args.input_manifest) as manifest_file:
-        manifest = yaml.safe_load(manifest_file)
-    version = args.version or str(manifest["build"]["version"])
-    owners = json.loads(args.release_owners) if args.release_owners.strip() else {}
-    actions = plan_issues(args.kind, manifest, version, args.run_url, failures, load_json_list(args.passed), owners)
+    if args.kind == "flaky-test":
+        with open(args.issues_file) as issues_file:
+            actions = plan_flaky_issues(json.load(issues_file), args.repository, args.labels)
+    else:
+        with open(args.input_manifest) as manifest_file:
+            manifest = yaml.safe_load(manifest_file)
+        version = args.version or str(manifest["build"]["version"])
+        owners = json.loads(args.release_owners) if args.release_owners.strip() else {}
+        actions = plan_issues(args.kind, manifest, version, args.run_url, failures, load_json_list(args.passed), owners)
 
     if args.command == "repos":
         repos = sorted({a.repo for a in actions})
@@ -342,11 +441,12 @@ def main(argv: Optional[List[str]] = None, gh: Runner = run_gh, today: Optional[
         print("\n".join(repos))
         return 0
 
+    if args.dry_run:
+        print_dry_run_plan(actions, gh if args.lookup_existing else None)
+        return 0
+
     errors = 0
     for index, action in enumerate(actions):
-        if args.dry_run:
-            print_dry_run(action)
-            continue
         if index:
             time.sleep(SLEEP_SECONDS)
         try:

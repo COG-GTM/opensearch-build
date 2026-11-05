@@ -1,0 +1,125 @@
+---
+# GitHub Actions port of jenkins/gradle/gradle-check-flaky-test-issue-creation.jenkinsfile
+# (gradleCheckFlakyTestDetector, jenkins@12.0.0). .github/scripts/gradle_check_flaky_tests.py queries the
+# gradle-check index of the metrics cluster and the notify-failure action (kind: flaky-test) creates, edits or
+# reopens the "[AUTOCUT] Gradle Check Flaky Test Report" issues in opensearch-project/OpenSearch.
+#
+# parameterizedCron('H */6 * * *') becomes the schedule below plus a static matrix of its parameter sets.
+# Scheduled runs only write issues once the repository variable AUTOCUT_LIVE is 'true' (set at Jenkins cutover);
+# until then they are dry runs, so Jenkins and Actions never edit the same issues.
+name: gradle-check-flaky-test-detector
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      DRY_RUN:
+        description: Print the issues that would be created or updated instead of writing them.
+        required: false
+        default: true
+        type: boolean
+  pull_request:
+    paths:
+      - .github/workflows/gradle-check-flaky-test-detector.yml
+      - .github/scripts/gradle_check_flaky_tests.py
+      - .github/scripts/metrics_cluster.py
+      - .github/scripts/notify_failure.py
+      - .github/actions/notify-failure/**
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  detect-gradle-check-flaky-tests:
+    name: Detect Gradle Check Flaky Tests (${{ matrix.time-frame }})
+    # Jenkins ran this on Jenkins-Agent-AL2023-X64-M54xlarge-Docker-Host only for the ci-runner image; the job makes
+    # HTTPS calls to the metrics cluster and the GitHub API, so it runs on a hosted runner and can serve the PR dry run.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # the parameter sets of the Jenkins job (it has one: the gradleCheckFlakyTestDetector call)
+          - issue-labels: autocut,>test-failure,flaky-test
+            time-frame: 30d
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Select mode and metrics source
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_DRY_RUN: ${{ inputs.DRY_RUN }}
+          AUTOCUT_LIVE: ${{ vars.AUTOCUT_LIVE }}
+          HAS_ENDPOINT: ${{ secrets.METRICS_CLUSTER_ENDPOINT != '' && secrets.AWS_ROLE_METRICS != '' }}
+        run: |
+          case "$EVENT_NAME" in
+            workflow_dispatch) dry_run="$INPUT_DRY_RUN" ;;
+            schedule) if [ "$AUTOCUT_LIVE" = "true" ]; then dry_run=false; else dry_run=true; fi ;;
+            *) dry_run=true ;;
+          esac
+          echo "dry-run=$dry_run" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_ENDPOINT" = "true" ]; then
+            echo "source=cluster" >> "$GITHUB_OUTPUT"
+          elif [ "$dry_run" = "true" ]; then
+            echo "::notice::METRICS_CLUSTER_ENDPOINT / AWS_ROLE_METRICS not set; the dry run reads the public metrics Dashboards proxy."
+            echo "source=public" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::METRICS_CLUSTER_ENDPOINT and AWS_ROLE_METRICS are required to update issues."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials for the metrics cluster
+        if: steps.mode.outputs.source == 'cluster'
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_METRICS }}
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 1800
+          audience: sts.amazonaws.com
+          aws-region: us-east-1
+
+      - name: Install query dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/metrics-venv"
+          "$RUNNER_TEMP/metrics-venv/bin/pip" install --quiet 'requests==2.32.4' 'requests-aws4auth==1.3.1' 'PyYAML==6.0.2'
+
+      - name: Detect flaky tests
+        env:
+          TIME_FRAME: ${{ matrix.time-frame }}
+          SOURCE: ${{ steps.mode.outputs.source }}
+          METRICS_CLUSTER_ENDPOINT: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+        run: |
+          args=(--time-frame "$TIME_FRAME" --issues-file "$RUNNER_TEMP/flaky-tests.json")
+          if [ "$SOURCE" = "public" ]; then args+=(--dashboards-url https://metrics.opensearch.org/_dashboards); fi
+          "$RUNNER_TEMP/metrics-venv/bin/python" .github/scripts/gradle_check_flaky_tests.py "${args[@]}"
+
+      - name: Create or update flaky test issues
+        uses: ./.github/actions/notify-failure
+        with:
+          kind: flaky-test
+          issues-file: ${{ runner.temp }}/flaky-tests.json
+          repository: opensearch-project/OpenSearch
+          labels: ${{ matrix.issue-labels }}
+          dry-run: ${{ steps.mode.outputs.dry-run }}
+          app-id: ${{ secrets.GH_APP_ID }}
+          app-private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Upload flaky test reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: gradle-check-flaky-tests-${{ matrix.time-frame }}
+          path: ${{ runner.temp }}/flaky-tests.json
+          if-no-files-found: ignore
+          retention-days: 90
