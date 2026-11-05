@@ -1,0 +1,102 @@
+---
+# GitHub Actions port of jenkins/check-for-build.jenkinsfile (Jenkins job `check-for-build`): once a day per input
+# manifest, lock the manifest, skip it when its SHA is already recorded, otherwise trigger
+# distribution-build-opensearch.yml or distribution-build-opensearch-dashboards.yml (s4.1 / s4.2), wait for it and
+# record the SHA. The parameterizedCron entries live in .github/schedules/check-for-build.yml; the work is done by
+# _scheduled-build.yml (see its header for the Jenkins mapping and the SCHEDULED_BUILDS_LIVE switch).
+#
+# BUILD_ARGS is not a Jenkins parameter: a JSON object of extra inputs for the triggered workflow (OPTIONS is
+# appended to the one built from TEST_PLATFORM / TEST_DISTRIBUTION / UPDATE_GITHUB_ISSUE), e.g.
+# {"COMPONENT_NAME":"OpenSearch","RUNS_ON":"[\"ubuntu-24.04\"]","OPTIONS":"no-upload"} for a hosted-runner build.
+#
+# Pull requests check every entry of the three schedules (check-for-build, publish-min-snapshots,
+# feature-build-opensearch) without dispatching anything.
+name: check-for-build
+
+run-name: >-
+  ${{ github.event_name == 'schedule' && format('check-for-build scheduled {0}', github.event.schedule)
+  || github.event_name == 'pull_request' && 'check-for-build dry run'
+  || format('check-for-build {0} {1}', inputs.INPUT_MANIFEST, inputs.TARGET_JOB_NAME) }}
+
+on:
+  schedule:
+    # one cron per distinct parameterizedCron expression in .github/schedules/check-for-build.yml (Jenkins H 1 * * *)
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+    inputs:
+      INPUT_MANIFEST:
+        description: '<Required> Input manifest under the manifests folder, e.g. 2.0.0/opensearch-2.0.0.yml.'
+        required: true
+        type: string
+      TEST_MANIFEST:
+        description: '<Optional> Test manifest under the manifests folder, e.g. 2.0.0/opensearch-2.0.0-test.yml.'
+        required: false
+        default: ''
+        type: string
+      TARGET_JOB_NAME:
+        description: '<Required> Job to trigger if build has changed'
+        required: true
+        type: choice
+        options:
+          - distribution-build-opensearch
+          - distribution-build-opensearch-dashboards
+      BUILD_PLATFORM:
+        description: '<Optional> Platform to build'
+        required: false
+        default: ''
+        type: string
+      BUILD_DISTRIBUTION:
+        description: '<Optional> Distribution to build'
+        required: false
+        default: ''
+        type: string
+      TEST_PLATFORM:
+        description: '<Optional> Platform to test'
+        required: false
+        default: ''
+        type: string
+      TEST_DISTRIBUTION:
+        description: '<Optional> Distribution to test'
+        required: false
+        default: ''
+        type: string
+      UPDATE_GITHUB_ISSUE:
+        description: '<Optional> To create/close/update a github issue for all component or not.'
+        required: false
+        default: true
+        type: boolean
+      BUILD_ARGS:
+        description: '<Optional> JSON object of extra inputs for the triggered workflow, e.g. {"COMPONENT_NAME":"OpenSearch"}.'
+        required: false
+        default: ''
+        type: string
+  pull_request:
+    paths:
+      - .github/workflows/check-for-build.yml
+      - .github/workflows/_scheduled-build.yml
+      - .github/actions/manifest-sha/**
+      - .github/schedules/check-for-build.yml
+      - .github/schedules/publish-min-snapshots.yml
+      - .github/schedules/feature-build-opensearch.yml
+      - .github/scripts/scheduled_builds.py
+      - .github/scripts/dispatch_and_watch.sh
+
+permissions: {}
+
+jobs:
+  check-for-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        workflow: ${{ fromJSON(github.event_name == 'pull_request' && '["check-for-build","publish-min-snapshots","feature-build-opensearch"]' || '["check-for-build"]') }}
+    uses: ./.github/workflows/_scheduled-build.yml
+    permissions:
+      contents: read
+      actions: write
+      id-token: write
+    with:
+      workflow: ${{ matrix.workflow }}
+      data: ${{ toJSON(inputs) }}
+    secrets:
+      AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}

@@ -18,6 +18,12 @@ inputs:
   job-name:
     description: 'Jenkins JOB_NAME equivalent, first segment of the artifact root'
     required: true
+  build-feature:
+    description: >-
+      uploadArtifacts(buildFeature): replaces build.version in the artifact and index roots, e.g. feature-datafusion
+      for feature-build-opensearch (<job>/<feature>/<build>/...). Empty keeps the version.
+    required: false
+    default: ''
   build-number:
     description: 'Jenkins BUILD_NUMBER equivalent; must equal the BUILD_NUMBER build.sh wrote into build.id'
     required: true
@@ -98,6 +104,7 @@ runs:
         JOB_NAME: ${{ inputs.job-name }}
         BUILD_NUMBER: ${{ inputs.build-number }}
         PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+        BUILD_FEATURE: ${{ inputs.build-feature }}
       run: |
         set -euo pipefail
         BUILD_MANIFEST="${DISTRIBUTION}/builds/${FILENAME}/manifest.yml"
@@ -107,7 +114,8 @@ runs:
         fi
         bash "${GITHUB_ACTION_PATH}/../../scripts/ensure-pyyaml.sh"
         python3 "${GITHUB_ACTION_PATH}/../../scripts/manifest_paths.py" build-manifest-info "${BUILD_MANIFEST}" \
-          --job-name "${JOB_NAME}" --build-number "${BUILD_NUMBER}" --public-artifact-url "${PUBLIC_ARTIFACT_URL}" > info.env
+          --job-name "${JOB_NAME}" --build-number "${BUILD_NUMBER}" --public-artifact-url "${PUBLIC_ARTIFACT_URL}" \
+          ${BUILD_FEATURE:+--build-feature "${BUILD_FEATURE}"} > info.env
         ROOT_URL=$(sed -n 's/^artifact-root-url=//p' info.env)
         PACKAGE_NAME=$(sed -n 's/^package-name=//p' info.env)
         {
