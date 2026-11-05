@@ -30,7 +30,7 @@ import yaml
 
 SHA = re.compile(r"\b[0-9a-f]{40}\b")
 SNAPSHOT = re.compile(r"\{version\}(\.0)?-(?:SNAPSHOT|\d{8}\.\d{6}-\d+)")
-SNAPSHOT_METADATA = re.compile(r"/\{version\}/maven-metadata\.xml(\.\w+)?$")
+SNAPSHOT_METADATA = re.compile(r"/\{version\}(?:\.0)?/maven-metadata\.xml(\.\w+)?$")
 INFORMATIONAL = ("shared components", "snapshot-only files")
 
 
