@@ -18,6 +18,13 @@ on:
         description: 'Build manifest URL (Jenkins BUILD_MANIFEST_URL), e.g. the build-manifest-url output of _build-distribution.yml'
         required: true
         type: string
+      opensearch-build-manifest-url:
+        description: >-
+          OpenSearch build manifest URL (Jenkins BUILD_MANIFEST_URL_OPENSEARCH), required for OpenSearch Dashboards
+          builds: its artifacts are downloaded next to the Dashboards ones and reported as the opensearch path.
+        required: false
+        default: ''
+        type: string
       component-name:
         description: 'Space-separated components to test (Jenkins COMPONENT_NAME); empty tests every test-manifest component'
         required: false
@@ -72,7 +79,7 @@ on:
         description: 'JSON array of the components that were tested'
         value: ${{ jobs.setup.outputs.components }}
       test-report-url:
-        description: 'Public URL of test-report.yml'
+        description: 'Public URL of test-report.yml; empty when upload-results is false'
         value: ${{ jobs.test-report.outputs.test-report-url }}
 
 permissions: {}
@@ -97,6 +104,8 @@ jobs:
       filename: ${{ steps.runner.outputs.filename }}
       artifact-root: ${{ steps.build.outputs.artifact-root }}
       artifact-root-url: ${{ steps.build.outputs.artifact-root-url }}
+      opensearch-artifact-root: ${{ steps.opensearch.outputs.artifact-root }}
+      opensearch-artifact-root-url: ${{ steps.opensearch.outputs.artifact-root-url }}
       runs-on: ${{ steps.runner.outputs.runs-on }}
       image: ${{ steps.image.outputs.image }}
       args: ${{ steps.image.outputs.args }}
@@ -112,6 +121,7 @@ jobs:
         env:
           TEST_MANIFEST: ${{ inputs.test-manifest }}
           BUILD_MANIFEST_URL: ${{ inputs.build-manifest-url }}
+          OPENSEARCH_BUILD_MANIFEST_URL: ${{ inputs.opensearch-build-manifest-url }}
           COMPONENT_NAME: ${{ inputs.component-name }}
           RC_NUMBER: ${{ inputs.rc-number }}
           BUILD_JOB_NAME: ${{ inputs.build-job-name }}
@@ -128,6 +138,7 @@ jobs:
           }
           check test-manifest "${TEST_MANIFEST}" '^[A-Za-z0-9._/-]+$'
           check build-manifest-url "${BUILD_MANIFEST_URL}" '^https://[A-Za-z0-9._~/-]+$'
+          check opensearch-build-manifest-url "${OPENSEARCH_BUILD_MANIFEST_URL}" '^(https://[A-Za-z0-9._~/-]+)?$'
           check component-name "${COMPONENT_NAME}" '^[A-Za-z0-9 ._-]*$'
           check rc-number "${RC_NUMBER}" '^[0-9]+$'
           check build-job-name "${BUILD_JOB_NAME}" '^[A-Za-z0-9._-]+$'
@@ -152,6 +163,17 @@ jobs:
           url: ${{ inputs.build-manifest-url }}
           path: ${{ env.BUILD_MANIFEST }}
           job-name: ${{ inputs.build-job-name }}
+          public-artifact-url: ${{ inputs.public-artifact-url }}
+
+      - name: Download the OpenSearch build manifest
+        # opensearch-dashboards/integ-test.jenkinsfile:87-100
+        id: opensearch
+        if: ${{ steps.build.outputs.name != 'OpenSearch' }}
+        uses: ./.github/actions/download-build-manifest
+        with:
+          url: ${{ inputs.opensearch-build-manifest-url || 'https://missing.invalid/opensearch-build-manifest-url' }}
+          path: build-manifest-opensearch.yml
+          job-name: distribution-build-opensearch
           public-artifact-url: ${{ inputs.public-artifact-url }}
 
       - name: Detect the test docker agent
@@ -254,37 +276,34 @@ jobs:
           remote-path: ${{ needs.setup.outputs.artifact-root }}/
           local-path: artifacts
 
+      - name: Download the OpenSearch build artifacts
+        # opensearch-dashboards/integ-test.jenkinsfile:194-205 downloads the OpenSearch build first
+        if: ${{ inputs.download-artifacts && needs.setup.outputs.name != 'OpenSearch' }}
+        uses: ./.github/actions/s3-sync
+        with:
+          direction: download
+          role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+          bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          remote-path: ${{ needs.setup.outputs.opensearch-artifact-root }}/
+          local-path: artifacts-opensearch
+
       - name: Move the artifacts into place
-        # rm -rf $WORKSPACE/$distribution && mv -v $WORKSPACE/artifacts/${artifactPath} $WORKSPACE
+        # rm -rf $WORKSPACE/$distribution && mv -v $WORKSPACE/artifacts/${artifactPath} $WORKSPACE; Dashboards builds
+        # `cp -a` the OpenSearch tree into the same <distribution>/ first, so builds/opensearch and
+        # builds/opensearch-dashboards sit side by side under one local path.
         if: ${{ inputs.download-artifacts }}
         run: |
           set -euo pipefail
           rm -rf "${DISTRIBUTION}"
           mv -v artifacts "${DISTRIBUTION}"
+          if [ -d artifacts-opensearch ]; then
+            cp -a artifacts-opensearch/. "${DISTRIBUTION}/"
+            rm -rf artifacts-opensearch
+          fi
 
       - name: Start the test container
         if: ${{ needs.setup.outputs.platform == 'linux' }}
-        run: |
-          set -euo pipefail
-          read -r -a OPTIONS <<< "${IMAGE_ARGS}"
-          COMMAND=(tail -f /dev/null)
-          for option in "${OPTIONS[@]}"; do
-            # systemd images keep their entrypoint as PID 1 and get no command
-            case "${option}" in --entrypoint|--entrypoint=*) COMMAND=() ;; esac
-            # docker.inside(-u 1000) ran as the agent's uid 1000, which owns the workspace on the Jenkins AMIs
-            case "${option}" in 1000|1000:*) sudo chown -R 1000:1000 "${GITHUB_WORKSPACE}" ;; esac
-          done
-          # Anonymous public.ecr.aws pulls are rate limited (toomanyrequests), so back off and retry.
-          for attempt in 1 2 3 4 5; do
-            docker pull "${IMAGE}" && break
-            [ "${attempt}" = 5 ] && exit 1
-            sleep $(( attempt * 30 ))
-          done
-          docker run -d --name integ-test -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
-            "${OPTIONS[@]}" "${IMAGE}" "${COMMAND[@]}"
-          if [ "${#COMMAND[@]}" = 0 ]; then
-            timeout 180 docker exec integ-test systemctl is-system-running --wait || true
-          fi
+        run: bash .github/scripts/start-ci-container.sh integ-test "${IMAGE}" "${IMAGE_ARGS}"
 
       - name: Run the integration tests
         env:
@@ -374,6 +393,9 @@ jobs:
         shell: bash
     outputs:
       test-report-url: ${{ steps.report.outputs.test-report-url }}
+    env:
+      IMAGE: ${{ needs.setup.outputs.image }}
+      IMAGE_ARGS: ${{ needs.setup.outputs.args }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -386,6 +408,20 @@ jobs:
           path: ${{ env.BUILD_MANIFEST }}
           job-name: ${{ inputs.build-job-name }}
           public-artifact-url: ${{ inputs.public-artifact-url }}
+
+      - name: Collect the test results of the run
+        # Without the S3 upload the component ymls only exist as the matrix legs' artifacts; report.sh reads them locally.
+        if: ${{ !inputs.upload-results }}
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          pattern: test-results-*
+          path: test-results
+          merge-multiple: true
+
+      - name: Start the test container
+        # post { always } ran createUploadTestReportManifest inside the test docker agent
+        if: ${{ needs.setup.outputs.platform == 'linux' }}
+        run: bash .github/scripts/start-ci-container.sh test-report "${IMAGE}" "${IMAGE_ARGS}"
 
       - name: Create the test report
         id: report
@@ -402,24 +438,46 @@ jobs:
           BUILD_JOB_NAME: ${{ inputs.build-job-name }}
           PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
           TEST_RUN_ID: ${{ github.run_id }}
+          NAME: ${{ needs.setup.outputs.name }}
+          ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.artifact-root-url }}
+          OPENSEARCH_ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.opensearch-artifact-root-url }}
+          UPLOAD_RESULTS: ${{ inputs.upload-results }}
         run: |
           set -euo pipefail
           # createUploadTestReportManifest.groovy (jenkins@12.0.1)
           ROOT="${VERSION}/${BUILD_ID}/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}"
-          REPORT=(./report.sh "${TEST_MANIFEST}" --artifact-paths "opensearch=${PUBLIC_ARTIFACT_URL}/${BUILD_JOB_NAME}/${ROOT}"
-            --test-run-id "${TEST_RUN_ID}" --test-type integ-test --base-path "${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${ROOT}")
+          if [ "${NAME}" = OpenSearch ]; then
+            PATHS=("opensearch=${ARTIFACT_ROOT_URL}")
+          else
+            PATHS=("opensearch=${OPENSEARCH_ARTIFACT_ROOT_URL}" "opensearch-dashboards=${ARTIFACT_ROOT_URL}")
+          fi
+          BASE_PATH="${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${ROOT}"
+          [ "${UPLOAD_RESULTS}" = true ] || BASE_PATH="${GITHUB_WORKSPACE}"
+          REPORT=(./report.sh "${TEST_MANIFEST}" --artifact-paths "${PATHS[@]}"
+            --test-run-id "${TEST_RUN_ID}" --test-type integ-test --base-path "${BASE_PATH}")
           [ -n "${RC_NUMBER}" ] && REPORT+=(--release-candidate "${RC_NUMBER}")
           if [ -n "${COMPONENT_NAME}" ]; then
             read -r -a COMPONENTS <<< "${COMPONENT_NAME}"
             REPORT+=(--component "${COMPONENTS[@]}")
           fi
           echo "Run command: ${REPORT[*]}"
-          bash "${REPORT[@]}"
+          if [ "${PLATFORM}" = windows ]; then
+            bash "${REPORT[@]}"
+          else
+            printf -v COMMAND '%q ' "${REPORT[@]}"
+            docker exec test-report bash -c "${COMMAND}"
+          fi
           UPLOAD_PATH="${JOB_NAME}/${ROOT}/test-results/${TEST_RUN_ID}/integ-test/test-report.yml"
-          {
-            echo "upload-path=${UPLOAD_PATH}"
-            echo "test-report-url=${PUBLIC_ARTIFACT_URL}/${UPLOAD_PATH}"
-          } >> "$GITHUB_OUTPUT"
+          echo "upload-path=${UPLOAD_PATH}" >> "$GITHUB_OUTPUT"
+          if [ "${UPLOAD_RESULTS}" = true ]; then
+            echo "test-report-url=${PUBLIC_ARTIFACT_URL}/${UPLOAD_PATH}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stop the test container
+        if: ${{ always() && needs.setup.outputs.platform == 'linux' }}
+        run: |
+          docker rm -f test-report > /dev/null 2>&1 || true
+          sudo chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" || true
 
       - name: Upload the test report
         if: ${{ inputs.upload-results }}

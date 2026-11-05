@@ -276,7 +276,9 @@ jobs:
     # distribution-build.jenkinsfile: timeout(time: 4, unit: 'HOURS')
     timeout-minutes: 240
     # Linux stages ran in a docker agent; GitHub Actions has no job containers on Windows runners.
-    container: ${{ inputs.platform == 'linux' && fromJSON(format('{{"image":"{0}","options":"{1}"}}', needs.setup.outputs.build-image, needs.setup.outputs.build-args)) || null }}
+    # --user root: the CI-runner images default to a non-root user, which cannot write the runner's file-command dir
+    # (actions/checkout EACCES). Jenkins ran the image as the agent's uid instead; a manifest `-u` still wins.
+    container: ${{ inputs.platform == 'linux' && fromJSON(format('{{"image":"{0}","options":"--user root {1}"}}', needs.setup.outputs.build-image, needs.setup.outputs.build-args)) || null }}
     permissions:
       contents: read
       id-token: write
@@ -399,7 +401,7 @@ jobs:
     environment: ${{ inputs.sign-rpm && 'release' || '' }}
     container:
       image: ${{ needs.setup.outputs.assemble-image }}
-      options: ${{ needs.setup.outputs.assemble-args }}
+      options: --user root ${{ needs.setup.outputs.assemble-args }}
     permissions:
       contents: read
       id-token: write
