@@ -397,7 +397,7 @@ jobs:
           set -euo pipefail
           mkdir -p build-record
           if [ -d "${DISTRIBUTION}" ]; then
-            (cd "${DISTRIBUTION}" && find builds dist -type f 2>/dev/null | LC_ALL=C sort) > build-record/file-list.txt
+            (cd "${DISTRIBUTION}" && { find builds dist -type f 2>/dev/null || true; } | LC_ALL=C sort) > build-record/file-list.txt
             (cd "${DISTRIBUTION}" && find builds dist -name manifest.yml -exec cp --parents {} ../build-record/ \; 2>/dev/null) || true
           fi
 
@@ -491,7 +491,7 @@ jobs:
           set -euo pipefail
           mkdir -p build-record
           if [ -d "${DISTRIBUTION}" ]; then
-            (cd "${DISTRIBUTION}" && find builds dist -type f 2>/dev/null | LC_ALL=C sort) > build-record/file-list.txt
+            (cd "${DISTRIBUTION}" && { find builds dist -type f 2>/dev/null || true; } | LC_ALL=C sort) > build-record/file-list.txt
             (cd "${DISTRIBUTION}" && find builds dist -name manifest.yml -exec cp --parents {} ../build-record/ \; 2>/dev/null) || true
           fi
 
