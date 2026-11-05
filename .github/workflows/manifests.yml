@@ -9,6 +9,9 @@ on:
       - '!manifests/templates/**/'
       - 'legacy-manifests/**/*.yml'
 
+permissions:
+  contents: read
+
 jobs:
   list-changed-manifests:
     if: ${{ github.repository == 'opensearch-project/opensearch-build' }}
@@ -17,7 +20,9 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Get changed manifest files
         uses: tj-actions/changed-files@2f7c5bfce28377bc069a65ba478de0a74aa0ca32
         id: list-changed-manifests
@@ -29,7 +34,9 @@ jobs:
 
       - name: Set unique changed manifests as matrix
         id: set-matrix
-        run: echo "matrix={\"manifest\":${{ steps.list-changed-manifests.outputs.all_changed_files }}}" >> "$GITHUB_OUTPUT"
+        env:
+          CHANGED_FILES: ${{ steps.list-changed-manifests.outputs.all_changed_files }}
+        run: echo "matrix={\"manifest\":${CHANGED_FILES}}" >> "$GITHUB_OUTPUT"
 
   manifest-checks:
     needs: [list-changed-manifests]
@@ -40,24 +47,30 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.list-changed-manifests.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Check JDK Version
+        env:
+          MANIFEST: ${{ matrix.manifest }}
         run: |
-          java_version=`cat ${{ matrix.manifest }} | yq -r .ci.image.args | grep -Eo '[0-9]+' || echo ''`
+          java_version=`cat "$MANIFEST" | yq -r .ci.image.args | grep -Eo '[0-9]+' || echo ''`
           echo $java_version
           echo "JAVA_VERSION=$java_version" >> "$GITHUB_ENV"
       - name: Set Up JDK ${{ env.JAVA_VERSION }}
         if: ${{ env.JAVA_VERSION }}
-        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
           java-version: ${{ env.JAVA_VERSION }}
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install Pipenv and Dependencies
         run: |
           python -m pip install --upgrade pipenv wheel
       - name: OpenSearch Manifests
+        env:
+          MANIFEST: ${{ matrix.manifest }}
         run: |-
-          ./ci.sh ${{ matrix.manifest }} --snapshot
+          ./ci.sh "$MANIFEST" --snapshot

@@ -1,1 +1,5 @@
 * @peterzhuamazon @gaiksaya @rishabh6788 @prudhvigodithi @Divyaasm
+
+# Workflow and composite action changes need a maintainer review (guarded by .github/workflows/workflow-lint.yml)
+/.github/workflows/ @peterzhuamazon @gaiksaya @rishabh6788 @prudhvigodithi @Divyaasm @matthewguerra-cog
+/.github/actions/ @peterzhuamazon @gaiksaya @rishabh6788 @prudhvigodithi @Divyaasm @matthewguerra-cog

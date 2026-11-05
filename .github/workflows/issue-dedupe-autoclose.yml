@@ -9,6 +9,9 @@ on:
         default: '7'
         description: 'Days to wait before auto-closing duplicate issues'
 
+permissions:
+  contents: read
+
 jobs:
   auto-close:
     runs-on: ubuntu-latest

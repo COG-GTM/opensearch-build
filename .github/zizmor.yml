@@ -1,0 +1,33 @@
+---
+# Config for zizmor (run by .github/workflows/workflow-lint.yml).
+# Each ignore below is an existing finding that needs a design change rather than a mechanical fix;
+# new workflows must not add entries here without review.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # every non-local action and reusable workflow must be pinned to a full commit SHA
+        "*": hash-pin
+  template-injection:
+    ignore:
+      # composite actions consumed by plugin repos; inputs come from the calling workflow and
+      # the Windows/pwsh steps cannot be exercised from this repo's CI
+      - action.yml
+  dangerous-triggers:
+    ignore:
+      # workflow_run / pull_request_target are required for these bots; jobs never check out PR code
+      - automatic-merges.yml
+      - github-merit-badger.yml
+      - pr_review.yml
+  unpinned-images:
+    ignore:
+      # CI image tag is resolved at runtime by get-ci-image-tag.yml
+      - python-tests.yml
+  artipacked:
+    ignore:
+      # github-wiki-action pushes to the wiki; persisting credentials is untested with it
+      - publish-wiki.yml
+  ref-version-mismatch:
+    ignore:
+      # the peterzhuamazon/pr-agent fork carries no tags; the pinned SHA is upstream qodo-ai/pr-agent v0.36.1
+      - code-diff-reviewer.yml:85

@@ -7,7 +7,6 @@ on:
     - cron: 0 0 * * *
 
 permissions:
-  issues: write
   contents: read
 
 jobs:
@@ -17,18 +16,25 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - id: set-matrix
         # produces a list of versions, e.g. ["1.0.0","1.0.0","1.0.1","1.1.0","1.2.0","2.0.0"]
-        run: echo "::set-output name=matrix::$(ls manifests/**/opensearch*.yml | cut -d'/' -f2 | sort | uniq | jq -R -s -c 'split("\n")[:-1]')"
+        run: echo "matrix=$(ls manifests/**/opensearch*.yml | cut -d'/' -f2 | sort | uniq | jq -R -s -c 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
   check:
     needs: list-manifest-versions
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     strategy:
       matrix:
         release_version: ${{ fromJson(needs.list-manifest-versions.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Create release issue
         uses: dblock/create-a-github-issue@3a643f8910f4a8ecc1da6b577c68eeb4392b067b # v3.0.0
         id: release-issue

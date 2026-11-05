@@ -6,6 +6,9 @@ on:
   schedule:
     - cron: 0 1 * * *
 
+permissions:
+  contents: read
+
 jobs:
   list-manifest-versions:
     if: github.repository == 'opensearch-project/opensearch-build'
@@ -13,7 +16,9 @@ jobs:
     outputs:
       versions_matrix: ${{ steps.set-matrix.outputs.versions }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - id: set-matrix
         # produces a list of major.minor versions only, no patch versions e.g. ["1.4.0","2.10.0","2.6.0","2.7.0","2.8.0","2.9.0","3.0.0"]
         run: echo "versions=$(ls manifests/**/opensearch*.yml | cut -d'/' -f2 | grep '0$' | grep -v '[0-9]0$' | sort | uniq | jq -R -s -c 'split("\n")[:-1]')" >> $GITHUB_OUTPUT
@@ -24,7 +29,9 @@ jobs:
     outputs:
       version_components_matrix: ${{ steps.get-all-components.outputs.combined_matrix }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - id: get-all-components
         run: |
@@ -63,7 +70,8 @@ jobs:
       matrix: ${{ fromJson(needs.list-components-per-version.outputs.version_components_matrix) }}
       fail-fast: false
     uses: ./.github/workflows/create-release-issues.yml
-    secrets: inherit
+    secrets:
+      OPENSEARCH_CI_BOT_TOKEN: ${{ secrets.OPENSEARCH_CI_BOT_TOKEN }}
     with:
       version: ${{ matrix.version }}
       repos: ${{ toJson(matrix.components) }}

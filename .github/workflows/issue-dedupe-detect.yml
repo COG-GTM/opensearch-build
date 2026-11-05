@@ -22,6 +22,9 @@ on:
         description: 'Issue number to check (defaults to github.event.issue.number)'
 
 
+permissions:
+  contents: read
+
 jobs:
   detect:
     runs-on: ubuntu-latest
@@ -34,10 +37,12 @@ jobs:
       ISSUE_NUMBER: ${{ inputs.issue_number || github.event.issue.number }}
     steps:
       - name: Checkout caller repo
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
         with:
           role-to-assume: ${{ secrets.BEDROCK_ACCESS_ROLE_ISSUE_DEDUPE }}
           aws-region: us-east-1
