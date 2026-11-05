@@ -20,7 +20,7 @@ metrics_records = load_script("metrics_records")
 
 INPUT_MANIFEST = os.path.join(DATA_DIR, "input-manifest.yml")
 BUILD_LOG = os.path.join(DATA_DIR, "build-log.txt")
-TEST_REPORT = os.path.join(DATA_DIR, "test-report.yml")
+TEST_REPORT = os.path.join(DATA_DIR, "integ-test-report.yml")
 
 
 def parse_bulk(body: str) -> List[Dict[str, Any]]:

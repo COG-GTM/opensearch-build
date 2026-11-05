@@ -1,0 +1,49 @@
+---
+schema-version: '1.1'
+name: OpenSearch
+version: 3.9.0-alpha1
+platform: linux
+architecture: x64
+distribution: tar
+id: '11089'
+rc: '2'
+test-run:
+  Command: ./test.sh integ-test manifests/3.9.0/opensearch-3.9.0-test.yml --paths opensearch=https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/3.9.0/11089/linux/x64/tar
+  TestType: integ-test
+  TestManifest: manifests/3.9.0/opensearch-3.9.0-test.yml
+  DistributionManifest: https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/3.9.0/11089/linux/x64/tar/dist/opensearch/manifest.yml
+  TestID: '9001'
+components:
+  - name: alerting
+    command: ./test.sh integ-test manifests/3.9.0/opensearch-3.9.0-test.yml --component alerting
+    repository: https://github.com/opensearch-project/alerting.git
+    configs:
+      - name: with-security
+        status: FAIL
+        yml: https://ci.opensearch.org/ci/dbc/integ-test/3.9.0/11089/linux/x64/tar/test-results/9001/integ-test/alerting/with-security/alerting.yml
+        test_stdout: stdout.txt
+        test_stderr: stderr.txt
+        cluster_stdout:
+          - local-cluster-logs/stdout.txt
+        cluster_stderr:
+          - local-cluster-logs/stderr.txt
+        failed_test:
+          - org.opensearch.alerting.MonitorRunnerIT#test execute monitor
+          - org.opensearch.alerting.AlertServiceIT
+      - name: without-security
+        status: PASS
+        yml: https://ci.opensearch.org/ci/dbc/integ-test/3.9.0/11089/linux/x64/tar/test-results/9001/integ-test/alerting/without-security/alerting.yml
+        failed_test:
+          - No Failed Test
+  - name: geospatial
+    command: ./test.sh integ-test manifests/3.9.0/opensearch-3.9.0-test.yml --component geospatial
+    repository: https://github.com/opensearch-project/geospatial.git
+    configs:
+      - name: with-security
+        status: PASS
+        failed_test:
+          - No Failed Test
+      - name: without-security
+        status: Not Available
+        failed_test:
+          - Test Result Not Available

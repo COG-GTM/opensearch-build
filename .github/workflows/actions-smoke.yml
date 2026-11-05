@@ -248,7 +248,7 @@ jobs:
         uses: ./.github/actions/publish-metrics
         with:
           kind: integ
-          test-report: tests/tests_github_scripts/data/test-report.yml
+          test-report: tests/tests_github_scripts/data/integ-test-report.yml
           distribution-build-url: https://example.org/build/11089
           dry-run: 'true'
       - name: Refuse to index without the metrics role
@@ -257,7 +257,7 @@ jobs:
         uses: ./.github/actions/publish-metrics
         with:
           kind: integ
-          test-report: tests/tests_github_scripts/data/test-report.yml
+          test-report: tests/tests_github_scripts/data/integ-test-report.yml
       - name: Check outputs
         env:
           BUILD_COUNT: ${{ steps.build.outputs.record-count }}
