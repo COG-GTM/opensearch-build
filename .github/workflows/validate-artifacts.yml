@@ -4,6 +4,8 @@
 # distribution stages/retry(2) are lines 186-295. Actions dispatch is limited to ten inputs, so the
 # remaining Jenkins values are packed into OPTIONS; see the OPTIONS description below.
 name: Validate Artifacts
+# OPTIONS carries osd-build-number / os-build-number, so a dispatching build can find its own run by title.
+run-name: Validate Artifacts ${{ inputs.VERSION }} ${{ inputs.OPTIONS }}
 
 on:
   # distribution-build-opensearch.yml calls it for release candidates (Jenkins `build job: 'distribution-validation'`).

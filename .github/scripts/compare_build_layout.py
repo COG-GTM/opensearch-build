@@ -17,7 +17,8 @@ snapshot repository adds) is normalised too, so a --snapshot build can be checke
 build; the per-version metadata files are listed separately. Component `ref`s echo the input manifest (a Jenkins build
 from before a release-branch cut records `main` where the current manifest says `3.10`), so they are listed as input
 differences instead of failing the comparison. Lists of plain values (artifact paths) are compared as
-sorted sets because build.sh records them in filesystem order. Prints a unified diff per section; exits 1 when any
+sorted sets because build.sh records them in filesystem order, and components are compared in name order because the
+recorder appends them as they finish building (manifest order serially, completion order with --parallel). Prints a unified diff per section; exits 1 when any
 section differs.
 """
 
@@ -77,7 +78,7 @@ def layout(node: Any, normalize: Callable[[str], str], prefix: str = "") -> List
 
 def only_components(manifest: Dict[str, Any], names: Set[str]) -> Dict[str, Any]:
     scoped = dict(manifest)
-    scoped["components"] = [component for component in manifest.get("components") or [] if component["name"] in names]
+    scoped["components"] = sorted((c for c in manifest.get("components") or [] if c["name"] in names), key=lambda c: c["name"])
     return scoped
 
 
