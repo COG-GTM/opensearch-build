@@ -1,0 +1,118 @@
+---
+# GitHub Actions port of jenkins/docker/docker-copy-lf.jenkinsfile (copyContainer step -> .github/actions/container-copy).
+# workflow_call replaces the `build job: 'docker-copy'` calls in buildDockerImage / promoteContainer.
+# Environment follows ADR 0001: `release` (reviewers, production Docker Hub + AWS_ROLE_PROMOTION) when the destination is a
+# production registry, otherwise `ci`. The Docker Hub account is picked by destination as copyContainer.groovy does:
+# opensearchstaging -> staging, opensearchproject -> production, anything else -> production-readonly.
+name: docker-copy
+run-name: docker-copy ${{ inputs.SOURCE_IMAGE_REGISTRY }}/${{ inputs.SOURCE_IMAGE }} to ${{ inputs.DESTINATION_IMAGE_REGISTRY }}/${{ inputs.DESTINATION_IMAGE }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ALL_TAGS:
+        description: '<Optional> If true, will copy all the tags of SOURCE_IMAGE_REGISTRY/SOURCE_IMAGE to DESTINATION_IMAGE_REGISTRY/DESTINATION_IMAGE, while ignoring IMAGE_TAG even if specified, default to false'
+        required: false
+        default: false
+        type: boolean
+      # Only allow limited source from staging only, to help prevent unexpected image overriding
+      SOURCE_IMAGE_REGISTRY:
+        description: '<Optional> Choose the source image registry. Defaults to opensearchstaging.'
+        required: false
+        default: opensearchstaging
+        type: choice
+        options:
+          - opensearchstaging
+          - public.ecr.aws/opensearchorg/opensearchstaging
+          - public.ecr.aws/t2m2d0w1
+      SOURCE_IMAGE:
+        description: '<Required> Image name and tag <IMAGE_NAME>:<IMAGE_TAG>, Eg: opensearch:1.3.2, tag is ignored when ALL_TAGS=true'
+        required: true
+        type: string
+      DESTINATION_IMAGE_REGISTRY:
+        description: '<Optional> Choose the destination image registry. Defaults to opensearchstaging.'
+        required: false
+        default: opensearchstaging
+        type: choice
+        options:
+          - opensearchstaging
+          - opensearchproject
+          - public.ecr.aws/opensearchorg/opensearchstaging
+          - public.ecr.aws/opensearchorg/opensearchproject
+      DESTINATION_IMAGE:
+        description: '<Required> Image name and tag <IMAGE_NAME>:<IMAGE_TAG>, Eg: opensearch:1.3.2, tag is ignored when ALL_TAGS=true'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      ALL_TAGS:
+        required: false
+        default: false
+        type: boolean
+      SOURCE_IMAGE_REGISTRY:
+        required: false
+        default: opensearchstaging
+        type: string
+      SOURCE_IMAGE:
+        required: true
+        type: string
+      DESTINATION_IMAGE_REGISTRY:
+        required: false
+        default: opensearchstaging
+        type: string
+      DESTINATION_IMAGE:
+        required: true
+        type: string
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  image-copy:
+    name: Image Copy
+    runs-on: [self-hosted, linux, x64, ubuntu2404-x64-m5-2xlarge-docker-builder]
+    timeout-minutes: 30
+    environment: ${{ contains(inputs.DESTINATION_IMAGE_REGISTRY, 'opensearchproject') && 'release' || 'ci' }}
+    permissions:
+      contents: read
+      id-token: write
+    container:
+      # ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1 (crane + aws cli), via the ECR mirror
+      image: public.ecr.aws/opensearchorg/opensearchstaging/ci-runner@sha256:fcad3fee89c90b1f12a224b0dd46609767ace97102b707c1a2a13addfafeff6c
+      options: -u root -v /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - name: Parameters Check
+        env:
+          ALL_TAGS: ${{ inputs.ALL_TAGS }}
+          SOURCE_IMAGE_REGISTRY: ${{ inputs.SOURCE_IMAGE_REGISTRY }}
+          SOURCE_IMAGE: ${{ inputs.SOURCE_IMAGE }}
+          DESTINATION_IMAGE_REGISTRY: ${{ inputs.DESTINATION_IMAGE_REGISTRY }}
+          DESTINATION_IMAGE: ${{ inputs.DESTINATION_IMAGE }}
+        run: |
+          set -euo pipefail
+          echo "ALL_TAGS: ${ALL_TAGS}<br>Copying: ${SOURCE_IMAGE_REGISTRY}/${SOURCE_IMAGE} to ${DESTINATION_IMAGE_REGISTRY}/${DESTINATION_IMAGE}" >> "${GITHUB_STEP_SUMMARY}"
+          if [ -z "${SOURCE_IMAGE}" ] || [ -z "${DESTINATION_IMAGE}" ]; then
+            echo "::error::Make sure all the parameters are passed in."
+            exit 1
+          fi
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/actions
+      - name: Copy Image to ECR/DockerHub
+        uses: ./.github/actions/container-copy
+        with:
+          all-tags: ${{ inputs.ALL_TAGS }}
+          source-image: ${{ inputs.SOURCE_IMAGE }}
+          source-registry: ${{ inputs.SOURCE_IMAGE_REGISTRY }}
+          destination-image: ${{ inputs.DESTINATION_IMAGE }}
+          destination-registry: ${{ inputs.DESTINATION_IMAGE_REGISTRY }}
+          dockerhub-username: ${{ inputs.DESTINATION_IMAGE_REGISTRY == 'opensearchstaging' && secrets.DOCKERHUB_STAGING_USERNAME || inputs.DESTINATION_IMAGE_REGISTRY == 'opensearchproject' && secrets.DOCKERHUB_PRODUCTION_USERNAME || secrets.DOCKERHUB_READONLY_USERNAME }}
+          dockerhub-password: ${{ inputs.DESTINATION_IMAGE_REGISTRY == 'opensearchstaging' && secrets.DOCKERHUB_STAGING_PASSWORD || inputs.DESTINATION_IMAGE_REGISTRY == 'opensearchproject' && secrets.DOCKERHUB_PRODUCTION_PASSWORD || secrets.DOCKERHUB_READONLY_PASSWORD }}
+          promotion-role-to-assume: ${{ secrets.AWS_ROLE_PROMOTION }}
+      - name: Cleanup
+        if: always()
+        run: docker logout && docker logout public.ecr.aws && docker image prune -f --all

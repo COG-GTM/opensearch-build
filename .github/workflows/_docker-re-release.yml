@@ -1,0 +1,160 @@
+---
+# Reusable port of opensearch-build-libraries vars/patchDockerImage.groovy (+ the buildDockerImage calls it makes with
+# buildOption re_release_docker_image): read the released image's labels, then docker-build -> docker-copy (build-number
+# tag) -> docker-scan -> docker-promotion, each `build job:` (wait/propagate true) becoming a needs-chained job.
+name: _docker-re-release
+
+on:
+  workflow_call:
+    inputs:
+      PRODUCT:
+        description: opensearch or opensearch-dashboards
+        required: true
+        type: string
+      TAG:
+        description: Major tag of the released image to re-release (2 or 3)
+        required: true
+        type: string
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  patch-docker-image:
+    name: Patch Docker Image
+    runs-on: [self-hosted, linux, x64, ubuntu2404-x64-m5-2xlarge-docker-builder]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    container:
+      # ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1, via the ECR mirror
+      image: public.ecr.aws/opensearchorg/opensearchstaging/ci-runner@sha256:fcad3fee89c90b1f12a224b0dd46609767ace97102b707c1a2a13addfafeff6c
+      options: -u root -v /var/run/docker.sock:/var/run/docker.sock
+    outputs:
+      version: ${{ steps.patch.outputs.version }}
+      filename: ${{ steps.patch.outputs.filename }}
+      image-version: ${{ steps.patch.outputs.image-version }}
+      build-number: ${{ steps.patch.outputs.build-number }}
+      build-date: ${{ steps.patch.outputs.build-date }}
+      tag-latest: ${{ steps.patch.outputs.tag-latest }}
+      docker-build-script: ${{ steps.patch.outputs.docker-build-script }}
+      source-images: ${{ steps.patch.outputs.source-images }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Read released image and input manifest
+        id: patch
+        env:
+          PRODUCT: ${{ inputs.PRODUCT }}
+          TAG: ${{ inputs.TAG }}
+        run: |
+          set -euo pipefail
+          docker_image="opensearchproject/${PRODUCT}:${TAG}"
+          latest_docker_image="opensearchproject/${PRODUCT}:latest"
+          docker pull "${docker_image}"
+          docker pull "${latest_docker_image}"
+          version=$(docker inspect --format '{{ index .Config.Labels "org.label-schema.version"}}' "${docker_image}")
+          build_date=$(date +%Y%m%d)
+          build_number=$(docker inspect --format '{{ index .Config.Labels "org.label-schema.description"}}' "${docker_image}")
+          latest_version=$(docker inspect --format '{{ index .Config.Labels "org.label-schema.version"}}' "${latest_docker_image}")
+          manifest="manifests/${version}/${PRODUCT}-${version}.yml"
+          # InputManifest: build.version, build.qualifier, build.getFilename() = name lower-cased, spaces -> '-'
+          read -r build_version build_qualifier filename < <(python3 - "${manifest}" <<'PY'
+          import sys
+          import yaml
+          with open(sys.argv[1], encoding="utf-8") as f:
+              build = yaml.safe_load(f)["build"]
+          qualifier = build.get("qualifier")
+          qualifier = "" if qualifier in (None, "null") else f"-{qualifier}"
+          print(build["version"], qualifier or "-", build["name"].lower().replace(" ", "-"))
+          PY
+          )
+          [ "${build_qualifier}" = "-" ] && build_qualifier=""
+          # buildDockerImage: keep al2 for the 1.x versions
+          image_base_os=al2023
+          [ "${build_version%%.*}" = "1" ] && image_base_os=al2
+          artifact_url_x64="https://ci.opensearch.org/ci/dbc/distribution-build-${PRODUCT}/${version}/${build_number}/linux/x64/tar/dist/${PRODUCT}/${PRODUCT}-${version}-linux-x64.tar.gz"
+          artifact_url_arm64="https://ci.opensearch.org/ci/dbc/distribution-build-${PRODUCT}/${version}/${build_number}/linux/arm64/tar/dist/${PRODUCT}/${PRODUCT}-${version}-linux-arm64.tar.gz"
+          script="id && pwd && cd docker/release && curl -sSL ${artifact_url_x64} -o ${filename}-x64.tgz && curl -sSL ${artifact_url_arm64} -o ${filename}-arm64.tgz && bash build-image-multi-arch.sh -v ${build_version}${build_qualifier} -f ./dockerfiles/${filename}.${image_base_os}.dockerfile -p ${filename} -a 'x64,arm64' -r opensearchstaging/${filename} -t '${filename}-x64.tgz,${filename}-arm64.tgz' -n ${build_number}"
+          tag_latest=false
+          [ "${latest_version}" = "${version}" ] && tag_latest=true
+          {
+            echo "version=${version}"
+            echo "filename=${filename}"
+            echo "image-version=${build_version}${build_qualifier}"
+            echo "build-number=${build_number}"
+            echo "build-date=${build_date}"
+            echo "tag-latest=${tag_latest}"
+            echo "docker-build-script=${script}"
+            echo "source-images=${PRODUCT}:${build_version}${build_qualifier}.${build_number}.${build_date}"
+          } | tee -a "${GITHUB_OUTPUT}"
+      - name: Cleanup
+        if: always()
+        run: docker image prune -f --all
+
+  docker-build:
+    name: docker-build
+    needs: patch-docker-image
+    permissions:
+      contents: read
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      DOCKER_BUILD_GIT_REPOSITORY: https://github.com/opensearch-project/opensearch-build
+      DOCKER_BUILD_GIT_REPOSITORY_REFERENCE: ${{ needs.patch-docker-image.outputs.version }}
+      DOCKER_BUILD_SCRIPT_WITH_COMMANDS: ${{ needs.patch-docker-image.outputs.docker-build-script }}
+      DOCKER_BUILD_OS: linux
+
+  docker-copy:
+    name: docker-copy (build-number tag)
+    needs: [patch-docker-image, docker-build]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/docker-copy.yml
+    with:
+      SOURCE_IMAGE_REGISTRY: opensearchstaging
+      SOURCE_IMAGE: ${{ needs.patch-docker-image.outputs.filename }}:${{ needs.patch-docker-image.outputs.image-version }}
+      DESTINATION_IMAGE_REGISTRY: opensearchstaging
+      DESTINATION_IMAGE: ${{ needs.patch-docker-image.outputs.filename }}:${{ needs.patch-docker-image.outputs.image-version }}.${{ needs.patch-docker-image.outputs.build-number }}.${{ needs.patch-docker-image.outputs.build-date }}
+
+  docker-scan:
+    name: docker-scan
+    needs: [patch-docker-image, docker-copy]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/docker-scan.yml
+    with:
+      IMAGE_FULL_NAME: opensearchstaging/${{ needs.patch-docker-image.outputs.filename }}:${{ needs.patch-docker-image.outputs.image-version }}
+
+  # `build job: 'docker-promotion'` (SOURCE_IMAGES, RELEASE_VERSION, TAG_LATEST). promote-docker-ecr.yml is ported in s5.3;
+  # until then this job fails so a scheduled re-release never reports success without promoting, as Jenkins would.
+  docker-promotion:
+    name: docker-promotion
+    needs: [patch-docker-image, docker-scan]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/workflows
+      - name: Promote
+        env:
+          SOURCE_IMAGES: ${{ needs.patch-docker-image.outputs.source-images }}
+          RELEASE_VERSION: ${{ needs.patch-docker-image.outputs.version }}
+          TAG_LATEST: ${{ needs.patch-docker-image.outputs.tag-latest }}
+        run: |
+          set -euo pipefail
+          echo "Triggering docker-promotion SOURCE_IMAGES=${SOURCE_IMAGES} RELEASE_VERSION=${RELEASE_VERSION} TAG_LATEST=${TAG_LATEST}" | tee -a "${GITHUB_STEP_SUMMARY}"
+          if [ ! -f .github/workflows/promote-docker-ecr.yml ]; then
+            echo "::error::promote-docker-ecr.yml is not ported yet (s5.3); promote the images above manually."
+            exit 1
+          fi
+          echo "::error::promote-docker-ecr.yml exists: replace this job with 'uses: ./.github/workflows/promote-docker-ecr.yml'."
+          exit 1

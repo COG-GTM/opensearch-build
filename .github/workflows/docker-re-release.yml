@@ -1,0 +1,68 @@
+---
+# GitHub Actions port of jenkins/docker/docker-re-release-lf.jenkinsfile. The four parameterizedCron entries
+# (all `H 19 15 * *`, PRODUCT x TAG) become one monthly schedule fanned out as a matrix; workflow_dispatch keeps the
+# manual single run. Each matrix cell calls _docker-re-release.yml, the patchDockerImage chain.
+name: docker-re-release
+run-name: docker-re-release ${{ github.event_name == 'schedule' && 'scheduled' || format('{0} {1}', inputs.PRODUCT, inputs.TAG) }}
+
+on:
+  schedule:
+    # Jenkins: H 19 15 * * %PRODUCT=opensearch|opensearch-dashboards;TAG=3|2
+    - cron: '23 19 15 * *'
+  workflow_dispatch:
+    inputs:
+      PRODUCT:
+        description: '<Required> Choose the product type among OpenSearch / OpenSearch-Dashboards. Defaults to opensearch.'
+        required: true
+        default: opensearch
+        type: choice
+        options:
+          - opensearch
+          - opensearch-dashboards
+      TAG:
+        description: '<Required> Choose the tag of the Product. Defaults to 2.'
+        required: true
+        default: '2'
+        type: choice
+        options:
+          - '2'
+          - '3'
+
+permissions: {}
+
+jobs:
+  matrix:
+    name: Resolve matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - id: matrix
+        env:
+          PRODUCT: ${{ inputs.PRODUCT }}
+          TAG: ${{ inputs.TAG }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            include='[{"PRODUCT":"opensearch","TAG":"3"},{"PRODUCT":"opensearch-dashboards","TAG":"3"},{"PRODUCT":"opensearch","TAG":"2"},{"PRODUCT":"opensearch-dashboards","TAG":"2"}]'
+          else
+            include=$(jq -cn --arg p "${PRODUCT}" --arg t "${TAG}" '[{PRODUCT: $p, TAG: $t}]')
+          fi
+          echo "include=${include}" | tee -a "${GITHUB_OUTPUT}"
+
+  re-release:
+    name: Docker re-release ${{ matrix.PRODUCT }}:${{ matrix.TAG }}
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.matrix.outputs.include) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_docker-re-release.yml
+    with:
+      PRODUCT: ${{ matrix.PRODUCT }}
+      TAG: ${{ matrix.TAG }}

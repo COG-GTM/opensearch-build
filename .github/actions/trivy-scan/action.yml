@@ -1,0 +1,32 @@
+---
+# Port of opensearch-build-libraries vars/scanDockerImage.groovy (lf-jenkins). Same commands, so the same
+# <result-file>.txt (table, detailed mode) and <result-file>.json reports. Uses the trivy already installed in the
+# ci-runner image (docker/ci/dockerfiles/current/docker-builder.ubuntu2404.x64.dockerfile), as Jenkins does.
+name: Trivy scan
+description: Scan a container image with trivy and write table + JSON reports (vars/scanDockerImage.groovy).
+inputs:
+  image-full-name:
+    description: Image to scan, e.g. opensearchstaging/opensearch:2.0.0.
+    required: true
+  image-result-file:
+    description: Report file prefix; writes <prefix>.txt and <prefix>.json.
+    required: false
+    default: scan_docker_image
+runs:
+  using: composite
+  steps:
+    - name: trivy image
+      shell: bash
+      env:
+        IMAGE_FULL_NAME: ${{ inputs.image-full-name }}
+        IMAGE_RESULT_FILE: ${{ inputs.image-result-file }}
+      run: |
+        set -e
+        trivy --version
+        touch "${IMAGE_RESULT_FILE}.txt" "${IMAGE_RESULT_FILE}.json"
+        trivy clean --all
+        mapfile -t dangling < <(docker images -f "dangling=true" -q)
+        docker rmi "${dangling[@]}" || echo
+        docker rmi "${IMAGE_FULL_NAME}" || echo
+        trivy image --format table --table-mode detailed --output "${IMAGE_RESULT_FILE}.txt" "${IMAGE_FULL_NAME}"
+        trivy image --format json --output "${IMAGE_RESULT_FILE}.json" "${IMAGE_FULL_NAME}"

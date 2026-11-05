@@ -13,6 +13,8 @@ and outputs; [`actions-smoke.yml`](../workflows/actions-smoke.yml) exercises the
 | [`sign-artifacts`](sign-artifacts/action.yml) | `signArtifacts`, `createSignatureFiles` | `AWS_ROLE_SIGNING_BASE` (signer client), `AWS_ROLE_RPM_SIGNING` (rpm) |
 | [`checksums`](checksums/action.yml) | `createSha512Checksums` | none |
 | [`publish-metrics`](publish-metrics/action.yml) | `publishDistributionBuildResults` (`kind: build`), `publishIntegTestResults` (`kind: integ`) | `AWS_ROLE_METRICS` |
+| [`container-copy`](container-copy/action.yml) | `copyContainer` | `AWS_ROLE_PROMOTION` (production ECR Public only) |
+| [`trivy-scan`](trivy-scan/action.yml) | `scanDockerImage` | none |
 
 `setup-opensearch-dashboards` and `start-opensearch` are consumed by plugin repositories and are unrelated to the
 Jenkins library.

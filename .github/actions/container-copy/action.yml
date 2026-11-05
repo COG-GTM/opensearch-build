@@ -1,0 +1,112 @@
+---
+# Port of opensearch-build-libraries vars/copyContainer.groovy (lf-jenkins): one `docker login` chosen by the
+# destination registry, the two ECR Public logins, then `crane cp` (optionally `--all-tags`).
+# The registry comparisons are copied verbatim from the library, including the ECR ones
+# ('public.ecr.aws/opensearchstaging', 'public.ecr.aws/opensearchproject'), which do not match the
+# 'public.ecr.aws/opensearchorg/...' registries docker-copy offers. Fixing that is a behaviour change, not part of the port.
+name: Container copy
+description: Copy a container image between Docker Hub and ECR Public registries with crane (vars/copyContainer.groovy).
+inputs:
+  source-image:
+    description: Source image and tag, <IMAGE_NAME>:<IMAGE_TAG>; the tag is ignored when all-tags is true.
+    required: true
+  source-registry:
+    description: Source registry, e.g. opensearchstaging.
+    required: true
+  destination-image:
+    description: Destination image and tag, <IMAGE_NAME>:<IMAGE_TAG>; the tag is ignored when all-tags is true.
+    required: true
+  destination-registry:
+    description: Destination registry, e.g. opensearchproject.
+    required: true
+  all-tags:
+    description: Copy every tag of the source image (destination must be opensearchstaging ci-runner).
+    required: false
+    default: 'false'
+  dockerhub-username:
+    description: Docker Hub username for the destination (staging, production or production-readonly, see docker-copy.yml).
+    required: true
+  dockerhub-password:
+    description: Docker Hub password matching dockerhub-username.
+    required: true
+  promotion-role-to-assume:
+    description: AWS_ROLE_PROMOTION role ARN, needed only when a registry is 'public.ecr.aws/opensearchproject'.
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Docker Hub login
+      shell: bash
+      env:
+        DOCKER_USERNAME: ${{ inputs.dockerhub-username }}
+        DOCKER_PASSWORD: ${{ inputs.dockerhub-password }}
+      run: |
+        set -euo pipefail
+        set +x
+        printf '%s' "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USERNAME}" --password-stdin
+
+    - name: ECR Public login (staging)
+      if: inputs.source-registry == 'public.ecr.aws/opensearchstaging' || inputs.destination-registry == 'public.ecr.aws/opensearchstaging'
+      shell: bash
+      env:
+        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+      run: |
+        set -euo pipefail
+        set +x
+        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${DESTINATION_REGISTRY}"
+
+    - name: Assume promotion role (production ECR)
+      if: inputs.source-registry == 'public.ecr.aws/opensearchproject' || inputs.destination-registry == 'public.ecr.aws/opensearchproject'
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
+      with:
+        role-to-assume: ${{ inputs.promotion-role-to-assume }}
+        role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+        role-duration-seconds: 900
+        audience: sts.amazonaws.com
+        aws-region: us-east-1
+
+    - name: ECR Public login (production)
+      if: inputs.source-registry == 'public.ecr.aws/opensearchproject' || inputs.destination-registry == 'public.ecr.aws/opensearchproject'
+      shell: bash
+      env:
+        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+      run: |
+        set -euo pipefail
+        set +x
+        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${DESTINATION_REGISTRY}"
+
+    - name: crane cp
+      shell: bash
+      env:
+        ALL_TAGS: ${{ inputs.all-tags }}
+        SOURCE_REGISTRY: ${{ inputs.source-registry }}
+        SOURCE_IMAGE: ${{ inputs.source-image }}
+        DESTINATION_REGISTRY: ${{ inputs.destination-registry }}
+        DESTINATION_IMAGE: ${{ inputs.destination-image }}
+      run: |
+        set -euo pipefail
+        source_image_no_tag="${SOURCE_IMAGE%%:*}"
+        destination_image_no_tag="${DESTINATION_IMAGE%%:*}"
+        if [ "${ALL_TAGS}" = "true" ]; then
+          if [[ "${DESTINATION_REGISTRY}" == *opensearchstaging* && "${destination_image_no_tag}" == "ci-runner" ]]; then
+            echo "Copying all the tags of image ${SOURCE_REGISTRY}/${source_image_no_tag} to ${DESTINATION_REGISTRY}/${destination_image_no_tag}"
+            set -x
+            crane cp "${SOURCE_REGISTRY}/${source_image_no_tag}" "${DESTINATION_REGISTRY}/${destination_image_no_tag}" --all-tags
+          else
+            echo "::error::'destination_registry' must be opensearchstaging registry and 'destination_image' must be ci-runner"
+            exit 1
+          fi
+        else
+          echo "Copying single image tag from ${SOURCE_REGISTRY}/${SOURCE_IMAGE} to ${DESTINATION_REGISTRY}/${DESTINATION_IMAGE}"
+          set -x
+          crane cp "${SOURCE_REGISTRY}/${SOURCE_IMAGE}" "${DESTINATION_REGISTRY}/${DESTINATION_IMAGE}"
+        fi
+
+    - name: Docker logout
+      if: always()
+      shell: bash
+      run: |
+        set +x
+        docker logout || true
+        docker logout public.ecr.aws || true
