@@ -94,6 +94,14 @@ on:
         required: false
         default: ''
         type: string
+      build-user:
+        description: >-
+          Run ./build.sh as this user of the linux CI-runner image, e.g. ci-runner (uid 1000, the uid the Jenkins
+          docker agents ran as); the workspace is chowned to it first. Empty runs it as the job container user (root).
+          OpenSearch Dashboards needs it: `yarn osd bootstrap` refuses to run as root.
+        required: false
+        default: ''
+        type: string
       public-artifact-url:
         description: 'Public base URL of the artifact bucket (Jenkins PUBLIC_ARTIFACT_URL)'
         required: false
@@ -184,6 +192,7 @@ jobs:
           JOB_NAME: ${{ inputs.job-name }}
           RUNS_ON: ${{ inputs.runs-on }}
           PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+          BUILD_USER: ${{ inputs.build-user }}
         run: |
           set -euo pipefail
           [ "${DISTRIBUTION}" = windows ] && DISTRIBUTION=zip
@@ -202,6 +211,7 @@ jobs:
           check component-name "${COMPONENT_NAME}" '^[A-Za-z0-9 ._-]*$'
           check job-name "${JOB_NAME}" '^[A-Za-z0-9._-]+$'
           check public-artifact-url "${PUBLIC_ARTIFACT_URL}" '^https://[A-Za-z0-9._~/-]+$'
+          check build-user "${BUILD_USER}" '^([a-z_][a-z0-9_-]*)?$'
           case "${PLATFORM}-${DISTRIBUTION}" in
             linux-tar|linux-rpm|linux-deb|windows-zip) ;;
             *) echo "::error::${DISTRIBUTION} is not built on ${PLATFORM} (Jenkins: linux tar/rpm/deb, windows zip)."; exit 1 ;;
@@ -330,6 +340,7 @@ jobs:
           CONTINUE_ON_ERROR: ${{ inputs.continue-on-error }}
           SKIP_ARTIFACT_CHECK: ${{ inputs.skip-artifact-check }}
           PARALLEL: ${{ inputs.parallel }}
+          BUILD_USER: ${{ inputs.build-user }}
         run: |
           set -euo pipefail
           # buildManifest.groovy (jenkins@12.0.0) argument order
@@ -350,7 +361,12 @@ jobs:
           # Tee-ed for publish-metrics / notify-failure, which read the "Error building" / "Successfully built" lines
           # (buildMessage) and "Failed plugins are" (markStageUnstableIfPluginsFailedToBuild) from the log.
           mkdir -p build-log
-          bash ./build.sh "${ARGS[@]}" 2>&1 | tee build-log/build.log
+          RUN=(bash ./build.sh "${ARGS[@]}")
+          if [ -n "${BUILD_USER}" ] && [ "${PLATFORM}" = linux ]; then
+            chown -R "${BUILD_USER}:" "${GITHUB_WORKSPACE}"
+            RUN=(runuser -u "${BUILD_USER}" -- "${RUN[@]}")
+          fi
+          "${RUN[@]}" 2>&1 | tee build-log/build.log
 
       - name: Keep the build log in the run
         if: ${{ always() }}

@@ -192,6 +192,8 @@ jobs:
             fi
           }
           check RC_NUMBER "${RC_NUMBER}" '^[0-9]+$'
+          # params.RC_NUMBER.toInteger(): '00' is 0, so the post jobs' rc-number != '0' checks agree with this one
+          RC_NUMBER=$((10#${RC_NUMBER}))
           check COMPONENT_NAME "${COMPONENT_NAME}" '^[A-Za-z0-9 ._-]*$'
           # Jenkins job names could carry a folder (Playground/...); workflows are flat files in this repository.
           check INTEG_TEST_JOB_NAME "${INTEG_TEST_JOB_NAME}" '^[A-Za-z0-9._-]*$'
@@ -284,6 +286,8 @@ jobs:
       release-candidate-upload: ${{ needs.verify-parameters.outputs.dry-run != 'true' }}
       sign-rpm: ${{ needs.verify-parameters.outputs.dry-run != 'true' && matrix.distribution == 'rpm' }}
       runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
+      # The Jenkins agents ran the ci-runner images as uid 1000; `yarn osd bootstrap` refuses to run as root.
+      build-user: ci-runner
     secrets:
       AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
       ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
@@ -643,15 +647,17 @@ jobs:
           BUILD_NUMBER: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          OPTIONS="os-build-number=latest osd-build-number=${BUILD_NUMBER} optional-args=using-staging-artifact-only"
           gh workflow run validate-artifacts.yml -R "${REPO}" --ref "${REF}" \
             -f VERSION="${REVISION}" -f PROJECTS=Both -f ARTIFACT_TYPE=staging -f DOCKER_SOURCE=dockerhub \
-            -f OPTIONS="os-build-number=latest osd-build-number=${BUILD_NUMBER} optional-args=using-staging-artifact-only"
+            -f OPTIONS="${OPTIONS}"
+          # validate-artifacts.yml's run-name carries OPTIONS, whose osd-build-number is this run's id: that is the
+          # run this build dispatched, even when several release-candidate builds dispatch at once.
           RUN_ID=''
           for _ in $(seq 1 30); do
             sleep 10
-            RUN_ID=$(gh run list -R "${REPO}" --workflow validate-artifacts.yml --event workflow_dispatch --limit 20 \
-              --json databaseId,createdAt --jq "[.[] | select(.createdAt >= \"${SINCE}\")] | sort_by(.createdAt) | .[0].databaseId // empty")
+            RUN_ID=$(gh run list -R "${REPO}" --workflow validate-artifacts.yml --event workflow_dispatch --limit 50 \
+              --json databaseId,displayTitle --jq "[.[] | select(.displayTitle | endswith(\" ${OPTIONS}\"))][0].databaseId // empty")
             [ -n "${RUN_ID}" ] && break
           done
           [ -n "${RUN_ID}" ] || { echo "::error::validate-artifacts run not found after dispatch"; exit 1; }
