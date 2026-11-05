@@ -2,7 +2,8 @@
 # GitHub Actions port of jenkins/validate-artifacts/validate-artifacts-lf.jenkinsfile.
 # Jenkins parameters are lines 50-126, parameter normalization is lines 128-178, and the parallel
 # distribution stages/retry(2) are lines 186-295. Actions dispatch is limited to ten inputs, so the
-# remaining Jenkins values are packed into OPTIONS; see the OPTIONS description below.
+# remaining Jenkins values are packed into OPTIONS; see the OPTIONS description below. workflow_call takes the same inputs,
+# for release-promotion.yml's staging and production gates (Jenkins `build job: 'distribution-validation'`).
 name: Validate Artifacts
 
 on:
@@ -109,6 +110,45 @@ on:
           skip-core-plugins=<csv, default arrow-base,arrow-flight-rpc; None installs all, an empty value
           skips all> allow-http platform=<linux,windows> (accepted for Jenkins parameter parity but unused:
           Jenkins derives the platform from the distribution and never filters on PLATFORM).'
+        required: false
+        default: 'optional-args=using-staging-artifact-only skip-core-plugins=arrow-base,arrow-flight-rpc platform=linux,windows'
+        type: string
+
+  workflow_call:
+    inputs:
+      OPENSEARCH_ARTIFACT_URL:
+        required: false
+        default: ''
+        type: string
+      OPENSEARCH_DASHBOARDS_ARTIFACT_URL:
+        required: false
+        default: ''
+        type: string
+      VERSION:
+        required: false
+        default: ''
+        type: string
+      DISTRIBUTION:
+        required: false
+        default: tar rpm yum deb zip docker
+        type: string
+      ARCHITECTURE:
+        required: false
+        default: x64 arm64
+        type: string
+      PROJECTS:
+        required: false
+        default: opensearch
+        type: string
+      ARTIFACT_TYPE:
+        required: false
+        default: production
+        type: string
+      DOCKER_SOURCE:
+        required: false
+        default: dockerhub
+        type: string
+      OPTIONS:
         required: false
         default: 'optional-args=using-staging-artifact-only skip-core-plugins=arrow-base,arrow-flight-rpc platform=linux,windows'
         type: string
