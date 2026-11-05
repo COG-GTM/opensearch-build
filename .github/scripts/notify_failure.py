@@ -200,14 +200,17 @@ def run_gh(args: List[str]) -> str:
     return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
-def find_issue(gh: Runner, repo: str, query: str) -> str:
-    out = gh(["issue", "list", "--repo", repo, "-S", query, "--json", "number", "--jq", ".[0].number"])
-    return "" if out in ("", "null") else out
+def find_issue(gh: Runner, repo: str, title: str, state: str = "open", extra_query: str = "") -> str:
+    query = f"{title} in:title{extra_query}"
+    out = gh(["issue", "list", "--repo", repo, "--state", state, "-S", query, "--json", "number,title"])
+    # Full-text search also matches longer titles (notifications vs notifications-core); keep exact title matches only.
+    matches = [issue for issue in json.loads(out or "[]") if issue.get("title") == title]
+    return str(matches[0]["number"]) if matches else ""
 
 
 def apply_issue(action: IssueAction, gh: Runner, today: date) -> str:
     """createGithubIssue(issueEdit: true) / closeGithubIssue(); returns what was done."""
-    open_issue = find_issue(gh, action.repo, f"{action.title} in:title")
+    open_issue = find_issue(gh, action.repo, action.title)
     if action.action == "close":
         if not open_issue:
             print(f"No open AUTOCUT issue to close for {action.component} in {action.repo}")
@@ -218,7 +221,7 @@ def apply_issue(action: IssueAction, gh: Runner, today: date) -> str:
         gh(["issue", "edit", open_issue, "--repo", action.repo, "--body", action.body])
         return f"edited #{open_issue}"
     since = (today - timedelta(days=DAYS_TO_REOPEN)).strftime("%Y-%m-%d")
-    closed_issue = find_issue(gh, action.repo, f"{action.title} in:title is:closed closed:>={since}")
+    closed_issue = find_issue(gh, action.repo, action.title, "closed", f" closed:>={since}")
     if closed_issue:
         gh(["issue", "reopen", "--repo", action.repo, closed_issue])
         gh(["issue", "edit", closed_issue, "--repo", action.repo, "--body", action.body])

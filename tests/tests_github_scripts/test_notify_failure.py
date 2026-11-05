@@ -35,6 +35,13 @@ ROW = {
 }
 
 
+TITLE = "[AUTOCUT] Distribution Build Failed for sql-3.9.0"
+
+
+def issues(*pairs: Any) -> str:
+    return json.dumps([{"number": number, "title": title} for number, title in pairs])
+
+
 class FakeGh:
     def __init__(self, responses: Dict[str, str] = None, fail_on: str = None) -> None:
         self.calls: List[List[str]] = []
@@ -164,15 +171,16 @@ class TestApplyIssue(unittest.TestCase):
     today = date(2026, 11, 5)
 
     def test_edits_open_issue(self) -> None:
-        gh = FakeGh({"in:title --json": "12"})
+        gh = FakeGh({"--state open": issues((12, TITLE))})
         self.assertEqual(notify_failure.apply_issue(open_action(), gh, self.today), "edited #12")
-        query = "[AUTOCUT] Distribution Build Failed for sql-3.9.0 in:title"
-        self.assertEqual(gh.calls[0], ["issue", "list", "--repo", "opensearch-project/sql", "-S", query, "--json", "number", "--jq", ".[0].number"])
+        query = f"{TITLE} in:title"
+        self.assertEqual(gh.calls[0], ["issue", "list", "--repo", "opensearch-project/sql", "--state", "open", "-S", query, "--json", "number,title"])
         self.assertEqual(gh.calls[-1], ["issue", "edit", "12", "--repo", "opensearch-project/sql", "--body", "body"])
 
     def test_reopens_recently_closed_issue(self) -> None:
-        gh = FakeGh({"is:closed closed:>=2026-11-02": "9"})
+        gh = FakeGh({"--state closed": issues((9, TITLE))})
         self.assertEqual(notify_failure.apply_issue(open_action(), gh, self.today), "reopened #9")
+        self.assertEqual(gh.calls[1][4:8], ["--state", "closed", "-S", f"{TITLE} in:title closed:>=2026-11-02"])
         self.assertEqual(gh.commands(), ["issue list", "issue list", "issue reopen", "issue edit"])
 
     def test_creates_issue_and_missing_labels(self) -> None:
@@ -185,15 +193,21 @@ class TestApplyIssue(unittest.TestCase):
             "--label", "autocut,v3.9.0", "--label", "untriaged", "--repo", "opensearch-project/sql",
         ])
 
+    def test_ignores_issues_with_a_longer_title(self) -> None:
+        similar = TITLE.replace("sql-", "sql-jdbc-")
+        gh = FakeGh({"--state open": issues((7, similar)), "--state closed": issues((8, similar)), "issue create": "created-url"})
+        self.assertEqual(notify_failure.apply_issue(open_action(), gh, self.today), "created created-url")
+        self.assertNotIn("issue edit", gh.commands())
+
     def test_closes_open_issue(self) -> None:
         action = notify_failure.IssueAction("close", "sql", "opensearch-project/sql", "[AUTOCUT] Distribution Build Failed for sql-3.9.0", "comment")
-        gh = FakeGh({"in:title --json": "5"})
+        gh = FakeGh({"--state open": issues((5, TITLE))})
         self.assertEqual(notify_failure.apply_issue(action, gh, self.today), "closed #5")
         self.assertEqual(gh.calls[-1], ["issue", "close", "5", "-R", "opensearch-project/sql", "--comment", "comment"])
 
     def test_close_without_open_issue_is_noop(self) -> None:
         action = notify_failure.IssueAction("close", "sql", "opensearch-project/sql", "t", "comment")
-        gh = FakeGh({"--jq": "null"})
+        gh = FakeGh({"--state open": "[]"})
         self.assertEqual(notify_failure.apply_issue(action, gh, self.today), "none")
         self.assertEqual(gh.commands(), ["issue list"])
 
@@ -214,7 +228,8 @@ class TestMain(unittest.TestCase):
 
     @patch("time.sleep")
     def test_issues_applies_every_action_and_reports_failures(self, mock_sleep: MagicMock) -> None:
-        gh = FakeGh({"in:title --json": "3"}, fail_on="issue edit")
+        gh = FakeGh({"for sql-3.9.0 in:title": issues((3, notify_failure.issue_title("integ-test", "sql", "3.9.0"))),
+                     "for k-NN-3.9.0 in:title": issues((3, notify_failure.issue_title("integ-test", "k-NN", "3.9.0")))}, fail_on="issue edit")
         args = ["issues", "--kind", "integ-test", "--input-manifest", MANIFEST, "--component", "sql", "--failures", json.dumps([ROW]), "--passed", "k-NN", "--run-url", RUN_URL]
         code = notify_failure.main(args, gh=gh, today=date(2026, 11, 5))
         self.assertEqual(code, 1)
