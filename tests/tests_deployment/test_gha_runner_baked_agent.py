@@ -56,6 +56,7 @@ class TestGhaRunnerBakedAgent(unittest.TestCase):
         self.assertTrue(ps1.endswith("Set-Location C:\\actions-runner"))
 
 
+@unittest.skipIf(os.name == "nt", "the Linux/macOS user-data check needs a POSIX shell")
 class TestBakedRunnerShellCheck(unittest.TestCase):
     MIN_VERSION = "2.338.2"
 
