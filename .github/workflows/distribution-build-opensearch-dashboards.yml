@@ -288,6 +288,9 @@ jobs:
       runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
       # The Jenkins agents ran the ci-runner images as uid 1000; `yarn osd bootstrap` refuses to run as root.
       build-user: ci-runner
+      # distribution-build.jenkinsfile passes no `parallel` to buildAssembleUpload/buildArchive, so buildManifest
+      # (jenkins@12.0.0) builds the components one by one; concurrent plugin builds corrupt the shared yarn cache.
+      parallel: '0'
     secrets:
       AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
       ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
