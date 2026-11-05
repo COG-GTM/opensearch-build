@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import tempfile
 import unittest
 from datetime import date
 from typing import Any, Dict, List
@@ -282,3 +283,105 @@ class TestMain(unittest.TestCase):
         path = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(path, ignore_errors=True))
         return path
+
+
+FLAKY_TITLE = "[AUTOCUT] Gradle Check Flaky Test Report for FooIT"
+FLAKY_HEADER = (
+    "   \n## Flaky Test Report for `FooIT`\n\n### Details\n\n"
+    "| Git Reference | Merged Pull Request | Build Details | Test Name |\n"
+    "|---------------|----------------------|---------------|-----------|\n"
+)
+FLAKY_FOOTER = "\n\nThe other pull requests are:\n\n- [1](https://github.com/opensearch-project/OpenSearch/pull/1)\n"
+FLAKY_BODY = FLAKY_HEADER + "| abc | [7](pr/7) | [9](build/9) | `testA` |\n| def | [8](pr/8) | [10](build/10) | `testB` |" + FLAKY_FOOTER
+
+
+def flaky_action(body: str = FLAKY_BODY) -> Any:
+    return notify_failure.plan_flaky_issues([{"test_class": "FooIT", "title": FLAKY_TITLE, "body": body}], "", "")[0]
+
+
+class TestFlakyTestIssues(unittest.TestCase):
+    def test_plan_defaults_match_jenkins(self) -> None:
+        action = flaky_action()
+        self.assertEqual(action.repo, "opensearch-project/OpenSearch")
+        self.assertEqual(action.labels, ["autocut", ">test-failure", "flaky-test", "untriaged"])
+        self.assertEqual(action.reopen, "table-changed")
+        self.assertEqual(action.component, "FooIT")
+        custom = notify_failure.plan_flaky_issues([{"title": "t", "body": "b"}], "https://github.com/o/r.git", "a, b")[0]
+        self.assertEqual((custom.repo, custom.labels, custom.component), ("o/r", ["a", "b", "untriaged"], "t"))
+
+    def test_parse_table_rows(self) -> None:
+        self.assertEqual(notify_failure.parse_table_rows(FLAKY_BODY), [
+            {"Git Reference": "abc", "Merged Pull Request": "[7](pr/7)", "Build Details": "[9](build/9)", "Test Name": "`testA`"},
+            {"Git Reference": "def", "Merged Pull Request": "[8](pr/8)", "Build Details": "[10](build/10)", "Test Name": "`testB`"},
+        ])
+        self.assertEqual(notify_failure.parse_table_rows(""), [])
+
+    def test_table_differences(self) -> None:
+        older = FLAKY_HEADER + "| abc | [7](pr/7) | [9](build/9) | `testA` |" + FLAKY_FOOTER
+        self.assertEqual(notify_failure.table_differences(older, FLAKY_BODY), [])
+        self.assertEqual([row["Git Reference"] for row in notify_failure.table_differences(FLAKY_BODY, older)], ["def"])
+
+    def test_edits_open_issue(self) -> None:
+        gh = FakeGh({"--state open": issues((5, FLAKY_TITLE))})
+        self.assertEqual(notify_failure.apply_issue(flaky_action(), gh, date(2026, 11, 5)), "edited #5")
+        self.assertEqual(gh.calls[-1], ["issue", "edit", "5", "--repo", "opensearch-project/OpenSearch", "--body", FLAKY_BODY])
+
+    def test_does_not_reopen_unchanged_report(self) -> None:
+        gh = FakeGh({"--state closed": issues((6, FLAKY_TITLE)), "issue view": FLAKY_BODY})
+        self.assertEqual(notify_failure.apply_issue(flaky_action(), gh, date(2026, 11, 5)), "skipped closed #6 (report unchanged)")
+        self.assertNotIn("issue reopen", gh.commands())
+        closed_search = [c for c in gh.calls if "--state" in c and c[c.index("--state") + 1] == "closed"][0]
+        self.assertNotIn("closed:>=", " ".join(closed_search))
+
+    def test_reopens_changed_report(self) -> None:
+        older = FLAKY_HEADER + "| abc | [7](pr/7) | [9](build/9) | `testA` |" + FLAKY_FOOTER
+        gh = FakeGh({"--state closed": issues((6, FLAKY_TITLE)), "issue view": older})
+        with patch("builtins.print"):
+            self.assertEqual(notify_failure.apply_issue(flaky_action(), gh, date(2026, 11, 5)), "reopened #6")
+        self.assertEqual(gh.commands()[-2:], ["issue reopen", "issue edit"])
+
+    def test_creates_issue_with_labels(self) -> None:
+        gh = FakeGh({"label list": ">test-failure"})
+        result = notify_failure.apply_issue(flaky_action(), gh, date(2026, 11, 5))
+        self.assertTrue(result.startswith("created"))
+        create = gh.calls[-1]
+        self.assertEqual(create[:5], ["issue", "create", "--title", FLAKY_TITLE, "--body"])
+        self.assertEqual(create[6:], ["--label", "autocut,>test-failure,flaky-test", "--label", "untriaged", "--repo", "opensearch-project/OpenSearch"])
+
+    def test_main_reads_issues_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "issues.json")
+            with open(path, "w") as f:
+                json.dump([{"test_class": "FooIT", "title": FLAKY_TITLE, "body": FLAKY_BODY}], f)
+            output = os.path.join(tmp, "out")
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": output}), patch("builtins.print"):
+                self.assertEqual(notify_failure.main(["repos", "--kind", "flaky-test", "--issues-file", path], gh=FakeGh()), 0)
+            with open(output) as f:
+                self.assertEqual(f.read(), "owner=opensearch-project\nrepositories=OpenSearch\n")
+            gh = FakeGh({"issue list": issues((5, FLAKY_TITLE), (9, "[AUTOCUT] Gradle Check Flaky Test Report for BarIT"))})
+            with patch("builtins.print") as mock_print:
+                code = notify_failure.main(["issues", "--kind", "flaky-test", "--issues-file", path, "--dry-run", "--lookup-existing"], gh=gh)
+            printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
+        self.assertEqual(code, 0)
+        self.assertEqual(gh.commands(), ["issue list"])
+        self.assertIn("against open issues: edit open #5", printed)
+        self.assertIn(f"| opensearch-project/OpenSearch | {FLAKY_TITLE} | edit open #5 |", printed)
+        self.assertIn("reopen the closed one when its table rows changed", printed)
+
+
+class TestDryRunLookup(unittest.TestCase):
+    def test_outcomes(self) -> None:
+        close = notify_failure.IssueAction("close", "sql", "o/sql", TITLE, "c")
+        self.assertEqual(notify_failure.dry_run_outcome(open_action(), None), "")
+        self.assertEqual(notify_failure.dry_run_outcome(open_action(), {TITLE: "3"}), "edit open #3")
+        self.assertEqual(notify_failure.dry_run_outcome(open_action(), {}), "reopen a recently closed issue, else create")
+        self.assertEqual(notify_failure.dry_run_outcome(close, {TITLE: "4"}), "close open #4")
+        self.assertEqual(notify_failure.dry_run_outcome(close, {}), "nothing to close (no open issue)")
+
+    def test_lookup_failure_is_a_warning(self) -> None:
+        gh = FakeGh(fail_on="issue list")
+        with patch("builtins.print") as mock_print:
+            code = notify_failure.main(["issues", "--kind", "distribution-build", "--input-manifest", MANIFEST, "--failures", "sql", "--dry-run", "--lookup-existing"], gh=gh)
+        printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
+        self.assertEqual(code, 0)
+        self.assertIn("lookup failed", printed)

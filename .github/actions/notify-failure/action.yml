@@ -8,7 +8,8 @@ description: >-
 inputs:
   kind:
     description: >-
-      Issues to update: 'distribution-build', 'integ-test' or 'none' (webhook only).
+      Issues to update: 'distribution-build', 'integ-test', 'flaky-test' (Gradle Check Flaky Test Reports from
+      issues-file) or 'none' (webhook only).
     default: none
   input-manifest:
     description: Input manifest (e.g. manifests/3.9.0/opensearch-3.9.0.yml) mapping components to repositories. Required unless kind is 'none'.
@@ -34,8 +35,21 @@ inputs:
   release-owners:
     description: JSON object mapping a component to the release owner logins tagged in its integration test issue.
     default: ''
+  issues-file:
+    description: >-
+      kind flaky-test: JSON file with the issues to file, [{"test_class", "title", "body"}, ...]
+      (written by .github/scripts/gradle_check_flaky_tests.py).
+    default: ''
+  repository:
+    description: kind flaky-test - repository the issues are filed in. Defaults to opensearch-project/OpenSearch.
+    default: ''
+  labels:
+    description: kind flaky-test - comma separated issue labels ('untriaged' is always added). Defaults to autocut,>test-failure,flaky-test.
+    default: ''
   dry-run:
-    description: Print the issues and webhook payload instead of calling GitHub or the webhook.
+    description: >-
+      Print the issues and webhook payload instead of calling GitHub or the webhook. The open AUTOCUT issues of each
+      repository are read with the workflow token to show which issue every update would land on.
     default: 'false'
   app-id:
     description: GitHub App ID (secrets.GH_APP_ID) used to mint an issues:write token for the component repositories.
@@ -94,9 +108,13 @@ runs:
         RUN_URL: ${{ steps.prepare.outputs.run-url }}
         FAILURES: ${{ inputs.failures }}
         PASSED: ${{ inputs.passed }}
+        ISSUES_FILE: ${{ inputs.issues-file }}
+        REPOSITORY: ${{ inputs.repository }}
+        LABELS: ${{ inputs.labels }}
       run: |
         "$PYTHON" "$SCRIPT" repos --kind "$KIND" --input-manifest "$INPUT_MANIFEST" --component "$COMPONENT" \
-          --version "$VERSION" --run-url "$RUN_URL" --failures "$FAILURES" --passed "$PASSED"
+          --version "$VERSION" --run-url "$RUN_URL" --failures "$FAILURES" --passed "$PASSED" \
+          --issues-file "$ISSUES_FILE" --repository "$REPOSITORY" --labels "$LABELS"
 
     - name: Mint GitHub App token
       id: token
@@ -113,7 +131,7 @@ runs:
       if: inputs.kind != 'none' && (inputs.dry-run == 'true' || steps.plan.outputs.repositories != '')
       shell: bash
       env:
-        GH_TOKEN: ${{ steps.token.outputs.token }}
+        GH_TOKEN: ${{ inputs.dry-run == 'true' && github.token || steps.token.outputs.token }}
         PYTHON: ${{ steps.prepare.outputs.python }}
         SCRIPT: ${{ github.action_path }}/../../scripts/notify_failure.py
         KIND: ${{ inputs.kind }}
@@ -124,11 +142,15 @@ runs:
         FAILURES: ${{ inputs.failures }}
         PASSED: ${{ inputs.passed }}
         RELEASE_OWNERS: ${{ inputs.release-owners }}
+        ISSUES_FILE: ${{ inputs.issues-file }}
+        REPOSITORY: ${{ inputs.repository }}
+        LABELS: ${{ inputs.labels }}
         DRY_RUN: ${{ inputs.dry-run }}
       run: |
         args=(issues --kind "$KIND" --input-manifest "$INPUT_MANIFEST" --component "$COMPONENT" --version "$VERSION"
-          --run-url "$RUN_URL" --failures "$FAILURES" --passed "$PASSED" --release-owners "$RELEASE_OWNERS")
-        if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          --run-url "$RUN_URL" --failures "$FAILURES" --passed "$PASSED" --release-owners "$RELEASE_OWNERS"
+          --issues-file "$ISSUES_FILE" --repository "$REPOSITORY" --labels "$LABELS")
+        if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run --lookup-existing); fi
         "$PYTHON" "$SCRIPT" "${args[@]}"
 
     - name: Post webhook notification
