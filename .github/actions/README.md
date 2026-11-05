@@ -12,6 +12,7 @@ and outputs; [`actions-smoke.yml`](../workflows/actions-smoke.yml) exercises the
 | [`s3-sync`](s3-sync/action.yml) | `uploadToS3`, `downloadFromS3`, `uploadTestResults`, `uploadIndexFile` | `AWS_ROLE_ARTIFACTS`, `AWS_ROLE_TEST_RESULTS`, `AWS_ROLE_PROMOTION` |
 | [`sign-artifacts`](sign-artifacts/action.yml) | `signArtifacts`, `createSignatureFiles` | `AWS_ROLE_SIGNING_BASE` (signer client), `AWS_ROLE_RPM_SIGNING` (rpm) |
 | [`checksums`](checksums/action.yml) | `createSha512Checksums` | none |
+| [`assemble-upload`](assemble-upload/action.yml) | `assembleUpload` (`assembleManifest` + `buildYumRepo` + `uploadArtifacts`), `uploadIndexFile`; called by [`_build-distribution.yml`](../workflows/_build-distribution.yml) | `AWS_ROLE_ARTIFACTS`, `AWS_ROLE_RPM_SIGNING` (rpm) |
 | [`publish-metrics`](publish-metrics/action.yml) | `publishDistributionBuildResults` (`kind: build`), `publishIntegTestResults` (`kind: integ`) | `AWS_ROLE_METRICS` |
 | [`container-copy`](container-copy/action.yml) | `copyContainer` | `AWS_ROLE_PROMOTION` (production ECR Public only) |
 | [`trivy-scan`](trivy-scan/action.yml) | `scanDockerImage` | none |

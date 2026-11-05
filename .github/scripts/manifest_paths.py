@@ -84,8 +84,12 @@ def index_file_root(manifest: Dict[str, Any], job_name: str, build_feature: Opti
 UNSUPPORTED_CONTAINER_OPTIONS = ("--entrypoint", "--network")
 
 
-def sanitize_container_options(args: str) -> str:
-    """Filter manifest ci.image args down to options GitHub Actions accepts in a job container."""
+def sanitize_container_options(args: str, keep_unsupported: bool = False) -> str:
+    """Filter manifest ci.image args down to options GitHub Actions accepts in a job container.
+
+    keep_unsupported keeps `--entrypoint` / `--network` for callers that start the image with `docker run` themselves
+    (the systemd rpm/deb test images need their entrypoint); the character check still applies.
+    """
     tokens = args.split()
     kept: List[str] = []
     skip_value = False
@@ -98,7 +102,7 @@ def sanitize_container_options(args: str) -> str:
             # so a quote, a backslash or a control character would break the fromJSON() parse of the caller.
             raise ValueError(f"container option {token!r} contains a character that cannot be passed through JSON")
         name = token.split("=", 1)[0]
-        if name in UNSUPPORTED_CONTAINER_OPTIONS:
+        if name in UNSUPPORTED_CONTAINER_OPTIONS and not keep_unsupported:
             print(f"Dropping container option {token}: GitHub Actions does not support it.", file=sys.stderr)
             skip_value = "=" not in token
             continue
@@ -121,7 +125,7 @@ def validate_ci_image(image: str) -> str:
     return image
 
 
-def ci_image(manifest: Dict[str, Any], kind: str, platform: str, distribution: str) -> Dict[str, str]:
+def ci_image(manifest: Dict[str, Any], kind: str, platform: str, distribution: str, docker_run: bool = False) -> Dict[str, str]:
     """detectDockerAgent() / detectTestDockerAgent().
 
     The manifest schema kept the `ci.image` key but changed its shape from a single `{name, args}` to a
@@ -147,7 +151,7 @@ def ci_image(manifest: Dict[str, Any], kind: str, platform: str, distribution: s
     java_match = re.search(r"openjdk-\d+", args)
     return {
         "image": validate_ci_image(image),
-        "args": sanitize_container_options(args),
+        "args": sanitize_container_options(args, keep_unsupported=docker_run),
         "java-version": java_match.group(0) if java_match else DEFAULT_JAVA_VERSION,
     }
 
@@ -171,6 +175,35 @@ def runs_on(platform: str, architecture: str) -> str:
     if key not in RUNS_ON:
         raise ValueError(f"no runner pool for {key}; known: {', '.join(sorted(RUNS_ON))}")
     return json.dumps(RUNS_ON[key], separators=(",", ":"))
+
+
+# integ-test.jenkinsfile:157-171: deb/rpm hosts cannot form the extra cluster these plugins' remote integ tests need.
+INTEG_TEST_SKIPPED_ON_PACKAGES = ("cross-cluster-replication", "query-insights")
+
+
+def integ_test_components(test_manifest: Dict[str, Any], build_manifest: Dict[str, Any], requested: str) -> List[str]:
+    """Component list of integ-test.jenkinsfile:149-171.
+
+    COMPONENT_NAME (space-separated) or every test-manifest component; a requested name missing from the test manifest
+    is an error, names missing from the build manifest are skipped, and the deb/rpm exclusions apply.
+    """
+    in_test_manifest = component_names(test_manifest)
+    in_build_manifest = component_names(build_manifest)
+    distribution = build_manifest["build"].get("distribution") or ""
+    selected = requested.split() if requested.strip() else list(in_test_manifest)
+    components: List[str] = []
+    for name in selected:
+        if name not in in_test_manifest:
+            raise ValueError(f"{name} is not present in the test manifest")
+        if name not in in_build_manifest:
+            print(f"Skipping tests for {name} as is not present in the provided build manifest.", file=sys.stderr)
+            continue
+        if distribution in ("rpm", "deb") and name in INTEG_TEST_SKIPPED_ON_PACKAGES:
+            print(f"Skipping integTest for {distribution} distribution for {name}", file=sys.stderr)
+            continue
+        if name not in components:
+            components.append(name)
+    return components
 
 
 def build_manifest_info(manifest: Dict[str, Any], job_name: str, build_number: str, build_feature: Optional[str], public_artifact_url: str) -> Dict[str, str]:
@@ -229,8 +262,21 @@ def main() -> int:
     image.add_argument("--kind", choices=["input", "test"], default="input")
     image.add_argument("--platform", default="linux")
     image.add_argument("--distribution", default="tar")
+    image.add_argument("--docker-run", action="store_true", help="Keep --entrypoint/--network for a `docker run` start")
+
+    runner = subparsers.add_parser("runs-on", help="ADR 0001 runs-on label array of a platform/architecture")
+    runner.add_argument("--platform", required=True)
+    runner.add_argument("--architecture", required=True)
+
+    integ = subparsers.add_parser("integ-test-components", help="Component matrix of integ-test.jenkinsfile")
+    integ.add_argument("manifest", help="Test manifest")
+    integ.add_argument("--build-manifest", required=True)
+    integ.add_argument("--component-name", default="")
 
     args = parser.parse_args()
+    if args.command == "runs-on":
+        emit({"runs-on": runs_on(args.platform, args.architecture)})
+        return 0
     manifest = load(args.manifest)
 
     if args.command == "build-manifest-info":
@@ -238,8 +284,11 @@ def main() -> int:
         emit(build_manifest_info(manifest, args.job_name, build_number, args.build_feature, args.public_artifact_url))
     elif args.command == "input-manifest-info":
         emit(input_manifest_info(manifest))
+    elif args.command == "integ-test-components":
+        components = integ_test_components(manifest, load(args.build_manifest), args.component_name)
+        emit({"components": json.dumps(components, separators=(",", ":")), "has-components": "true" if components else "false"})
     else:
-        emit(ci_image(manifest, args.kind, args.platform, args.distribution))
+        emit(ci_image(manifest, args.kind, args.platform, args.distribution, args.docker_run))
 
     return 0
 

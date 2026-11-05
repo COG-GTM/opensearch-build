@@ -23,6 +23,8 @@ rules:
     ignore:
       # CI image tag is resolved at runtime by get-ci-image-tag.yml
       - python-tests.yml
+      # CI-runner image is resolved at runtime from the input manifest (detectDockerAgent, ADR 0001 Containers)
+      - _build-distribution.yml
   artipacked:
     ignore:
       # github-wiki-action pushes to the wiki; persisting credentials is untested with it

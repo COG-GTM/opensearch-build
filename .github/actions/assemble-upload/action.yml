@@ -1,0 +1,236 @@
+---
+name: 'Assemble and upload'
+description: >-
+  The assemble half of the shared-library steps buildAssembleUpload() / archiveAssembleUpload() (jenkins@12.0.0):
+  assembleManifest() runs `./assemble.sh <distribution>/builds/<filename>/manifest.yml --base-url
+  <PUBLIC_ARTIFACT_URL>/<JOB_NAME>/<version>/<BUILD_NUMBER>/<platform>/<architecture>`, signs and indexes rpm
+  packages (signArtifacts + buildYumRepo), then uploadArtifacts() copies <distribution>/builds and <distribution>/dist
+  to <artifact-root>/builds and <artifact-root>/dist in the artifact bucket with the s3-sync action. Used by
+  .github/workflows/_build-distribution.yml only; it reads secrets there and passes them in as inputs.
+
+inputs:
+  distribution:
+    description: 'tar, rpm, deb or zip'
+    required: true
+  filename:
+    description: 'Lower-case product name, e.g. opensearch (InputManifest build.getFilename())'
+    required: true
+  job-name:
+    description: 'Jenkins JOB_NAME equivalent, first segment of the artifact root'
+    required: true
+  build-number:
+    description: 'Jenkins BUILD_NUMBER equivalent; must equal the BUILD_NUMBER build.sh wrote into build.id'
+    required: true
+  public-artifact-url:
+    description: 'Public base URL of the artifact bucket'
+    required: false
+    default: 'https://ci.opensearch.org/ci/dbc'
+  upload:
+    description: '''false'' assembles without touching S3 (dry runs)'
+    required: false
+    default: 'true'
+  role-to-assume:
+    description: 'AWS_ROLE_ARTIFACTS role ARN (uploadArtifacts used opensearch-bundle)'
+    required: false
+    default: ''
+  bucket:
+    description: 'ARTIFACT_BUCKET_NAME'
+    required: false
+    default: ''
+  update-latest-url:
+    description: >-
+      'true' writes index.json {"latest": "<build-number>"} to <index-file-root>/ after the upload (uploadIndexFile)
+    required: false
+    default: 'true'
+  sign-rpm:
+    description: '''true'' signs the rpm packages with sign-artifacts (the RPM_* variables must be exported)'
+    required: false
+    default: 'false'
+  rpm-signing-role:
+    description: 'AWS_ROLE_RPM_SIGNING role ARN'
+    required: false
+    default: ''
+
+outputs:
+  build-manifest:
+    description: 'Path of the build manifest, <distribution>/builds/<filename>/manifest.yml'
+    value: ${{ steps.info.outputs.build-manifest }}
+  build-id:
+    description: 'build.id of the build manifest'
+    value: ${{ steps.info.outputs.build-id }}
+  version:
+    description: 'build.version'
+    value: ${{ steps.info.outputs.version }}
+  artifact-root:
+    description: 'Artifact root inside the bucket, <job>/<version>/<build>/<platform>/<arch>/<distribution>'
+    value: ${{ steps.info.outputs.artifact-root }}
+  artifact-root-url:
+    description: 'Public URL of the artifact root'
+    value: ${{ steps.info.outputs.artifact-root-url }}
+  build-manifest-url:
+    description: 'BuildManifest.getUrl(): <artifact-root-url>/builds/<filename>/manifest.yml'
+    value: ${{ steps.info.outputs.build-manifest-url }}
+  bundle-manifest-url:
+    description: 'BuildManifest.getBundleManifestUrl(): <artifact-root-url>/dist/<filename>/manifest.yml'
+    value: ${{ steps.info.outputs.bundle-manifest-url }}
+  artifact-url:
+    description: 'BuildManifest.getArtifactUrl(): <artifact-root-url>/dist/<filename>/<package-name>'
+    value: ${{ steps.info.outputs.artifact-url }}
+  package-name:
+    description: 'Bundle file name, e.g. opensearch-3.9.0-linux-x64.tar.gz'
+    value: ${{ steps.info.outputs.package-name }}
+  min-artifact:
+    description: 'Path of the core min artifact under <distribution>/builds/<filename>/'
+    value: ${{ steps.info.outputs.min-artifact }}
+  index-file-root:
+    description: 'BuildManifest.getIndexFileRoot(JOB_NAME), the prefix uploadIndexFile writes index.json to'
+    value: ${{ steps.info.outputs.index-file-root }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Read the build manifest
+      id: info
+      shell: bash
+      env:
+        DISTRIBUTION: ${{ inputs.distribution }}
+        FILENAME: ${{ inputs.filename }}
+        JOB_NAME: ${{ inputs.job-name }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+        PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+      run: |
+        set -euo pipefail
+        BUILD_MANIFEST="${DISTRIBUTION}/builds/${FILENAME}/manifest.yml"
+        if [ ! -f "${BUILD_MANIFEST}" ]; then
+          echo "::error::${BUILD_MANIFEST} not found; build.sh did not produce a build manifest."
+          exit 1
+        fi
+        bash "${GITHUB_ACTION_PATH}/../../scripts/ensure-pyyaml.sh"
+        python3 "${GITHUB_ACTION_PATH}/../../scripts/manifest_paths.py" build-manifest-info "${BUILD_MANIFEST}" \
+          --job-name "${JOB_NAME}" --build-number "${BUILD_NUMBER}" --public-artifact-url "${PUBLIC_ARTIFACT_URL}" > info.env
+        ROOT_URL=$(sed -n 's/^artifact-root-url=//p' info.env)
+        PACKAGE_NAME=$(sed -n 's/^package-name=//p' info.env)
+        {
+          cat info.env
+          echo "build-manifest=${BUILD_MANIFEST}"
+          echo "build-manifest-url=${ROOT_URL}/builds/${FILENAME}/manifest.yml"
+          echo "bundle-manifest-url=${ROOT_URL}/dist/${FILENAME}/manifest.yml"
+          echo "artifact-url=${ROOT_URL}/dist/${FILENAME}/${PACKAGE_NAME}"
+        } | tee -a "$GITHUB_OUTPUT"
+        rm -f info.env
+
+    - name: Assemble
+      shell: bash
+      env:
+        BUILD_MANIFEST: ${{ steps.info.outputs.build-manifest }}
+        BASE_URL: ${{ steps.info.outputs.artifact-root-url-without-distribution }}
+      run: |
+        set -euo pipefail
+        # assembleManifest.groovy: ./assemble.sh "<build manifest>" --base-url <artifact root URL without distribution>
+        bash ./assemble.sh "${BUILD_MANIFEST}" --base-url "${BASE_URL}"
+
+    - name: Sign the rpm packages
+      if: ${{ inputs.distribution == 'rpm' && inputs.sign-rpm == 'true' }}
+      uses: ./.github/actions/sign-artifacts
+      with:
+        artifact-path: rpm/dist/${{ inputs.filename }}
+        sigtype: '.rpm'
+        platform: 'linux'
+        # assembleManifest.groovy: release@opensearch.org from major version 3, opensearch@amazon.com before
+        email: ${{ startsWith(steps.info.outputs.version, '1.') && 'opensearch@amazon.com' || startsWith(steps.info.outputs.version, '2.') && 'opensearch@amazon.com' || 'release@opensearch.org' }}
+        role-to-assume: ${{ inputs.rpm-signing-role }}
+
+    - name: Build the yum repository
+      if: ${{ inputs.distribution == 'rpm' }}
+      shell: bash
+      env:
+        FILENAME: ${{ inputs.filename }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+        BUILD_MANIFEST: ${{ steps.info.outputs.build-manifest }}
+        BASE_URL: ${{ steps.info.outputs.artifact-root-url-without-distribution }}
+        SIGN_RPM: ${{ inputs.sign-rpm }}
+      run: |
+        set -euo pipefail
+        if [ "${SIGN_RPM}" != 'true' ]; then
+          echo "::warning::rpm packages are not signed (sign-rpm is false); Jenkins always signed them in assembleManifest."
+        fi
+        # buildYumRepo.groovy
+        NAME=$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["build"]["name"])' "${BUILD_MANIFEST}")
+        VERSION=$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["build"]["version"])' "${BUILD_MANIFEST}")
+        REPO_FILE_PATH="rpm/dist/${FILENAME}"
+        createrepo "${REPO_FILE_PATH}"
+        printf '%s\n' \
+          "[${FILENAME}-${VERSION}-${BUILD_NUMBER}-staging]" \
+          "name=${NAME} ${VERSION} ${BUILD_NUMBER} Staging" \
+          "baseurl=${BASE_URL}/${REPO_FILE_PATH}/" \
+          "enabled=1" \
+          "gpgcheck=0" \
+          "autorefresh=1" \
+          "type=rpm-md" > "${REPO_FILE_PATH}/${FILENAME}-${VERSION}.staging.repo"
+        # writeFile wrote the content without a trailing newline
+        truncate -s -1 "${REPO_FILE_PATH}/${FILENAME}-${VERSION}.staging.repo"
+
+    - name: Make sure the AWS CLI is available
+      if: ${{ inputs.upload == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The Jenkins agents uploaded with the pipeline-aws plugin, so the CI-runner images need not ship the AWS CLI.
+        if ! command -v aws > /dev/null 2>&1; then
+          python3 -m pip install --quiet awscli
+          aws --version
+        fi
+
+    - name: Upload the builds
+      if: ${{ inputs.upload == 'true' }}
+      uses: ./.github/actions/s3-sync
+      with:
+        direction: upload
+        role-to-assume: ${{ inputs.role-to-assume }}
+        bucket: ${{ inputs.bucket }}
+        remote-path: ${{ steps.info.outputs.artifact-root }}/builds
+        local-path: ${{ inputs.distribution }}/builds
+
+    - name: Upload the dist
+      if: ${{ inputs.upload == 'true' }}
+      uses: ./.github/actions/s3-sync
+      with:
+        direction: upload
+        role-to-assume: ${{ inputs.role-to-assume }}
+        bucket: ${{ inputs.bucket }}
+        remote-path: ${{ steps.info.outputs.artifact-root }}/dist
+        local-path: ${{ inputs.distribution }}/dist
+
+    - name: Write index.json
+      if: ${{ inputs.upload == 'true' && inputs.update-latest-url == 'true' }}
+      shell: bash
+      env:
+        BUILD_NUMBER: ${{ inputs.build-number }}
+      run: |
+        set -euo pipefail
+        # uploadIndexFile.groovy: writeJSON file: 'index.json', json: ['latest': "${BUILD_NUMBER}"]
+        python3 -c 'import json, sys; open("index.json", "w").write(json.dumps({"latest": sys.argv[1]}))' "${BUILD_NUMBER}"
+
+    - name: Upload index.json
+      if: ${{ inputs.upload == 'true' && inputs.update-latest-url == 'true' }}
+      uses: ./.github/actions/s3-sync
+      with:
+        direction: upload
+        role-to-assume: ${{ inputs.role-to-assume }}
+        bucket: ${{ inputs.bucket }}
+        remote-path: ${{ steps.info.outputs.index-file-root }}/index.json
+        local-path: index.json
+
+    - name: Summarize
+      shell: bash
+      env:
+        BUILD_MANIFEST_URL: ${{ steps.info.outputs.build-manifest-url }}
+        BUNDLE_MANIFEST_URL: ${{ steps.info.outputs.bundle-manifest-url }}
+        UPLOAD: ${{ inputs.upload }}
+      run: |
+        {
+          echo "buildManifestUrl: ${BUILD_MANIFEST_URL}"
+          echo
+          echo "bundleManifestUrl: ${BUNDLE_MANIFEST_URL}"
+          [ "${UPLOAD}" = 'true' ] || echo $'\n(upload=false: nothing was copied to S3)'
+        } >> "$GITHUB_STEP_SUMMARY"
