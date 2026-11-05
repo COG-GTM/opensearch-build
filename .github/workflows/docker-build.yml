@@ -1,0 +1,228 @@
+---
+# GitHub Actions port of jenkins/docker/docker-build-lf.jenkinsfile: checks out an opensearch-project repository,
+# logs in to the Docker Hub staging account and evals DOCKER_BUILD_SCRIPT_WITH_COMMANDS (multi-arch builds go through
+# docker/ci/build-image-multi-arch.sh, i.e. buildx + qemu inside the ci-runner image, as in Jenkins).
+# workflow_call replaces the `build job: 'docker-build'` calls in buildDockerImage / patchDockerImage.
+# Runners and secrets follow ADR 0001: the Ubuntu 24.04 / Windows 2019 Docker-Builder pools, environment `ci`.
+# pull_request runs only the `dry-run` job on a GitHub-hosted runner: it builds one docker/ci image for
+# linux/amd64 + linux/arm64 (setup-qemu + setup-buildx) and pushes it to a throwaway local registry to show the
+# manifest list; it never sees a secret or a self-hosted runner.
+name: docker-build
+run-name: docker-build ${{ inputs.DOCKER_BUILD_OS || github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      DOCKER_BUILD_GIT_REPOSITORY:
+        description: '<Optional> The git repository name that contains dockerfiles and the docker build script.'
+        required: false
+        default: https://github.com/opensearch-project/opensearch-build
+        type: string
+      DOCKER_BUILD_GIT_REPOSITORY_REFERENCE:
+        description: '<Optional> The git reference (branch/tag/commit_id) of above repository.'
+        required: false
+        default: main
+        type: string
+      DOCKER_BUILD_SCRIPT_WITH_COMMANDS:
+        description: '<Required> The script path of the docker build script, assuming you are already in root dir of DOCKER_BUILD_GIT_REPOSITORY. Example: cd docker/ci && bash build-image-multi-arch.sh -r <REPO_NAME> -v <TAG_NAME> -f <DOCKERFILE PATH> -a <(Optional, default to amd64+arm64) linux/amd64,linux/arm64,linux/ppc64le>'
+        required: true
+        type: string
+      DOCKER_BUILD_OS:
+        description: '<Optional> Build docker image on which operating system. Defaults to linux.'
+        required: false
+        default: linux
+        type: choice
+        options:
+          - linux
+          - windows
+  workflow_call:
+    inputs:
+      DOCKER_BUILD_GIT_REPOSITORY:
+        required: false
+        default: https://github.com/opensearch-project/opensearch-build
+        type: string
+      DOCKER_BUILD_GIT_REPOSITORY_REFERENCE:
+        required: false
+        default: main
+        type: string
+      DOCKER_BUILD_SCRIPT_WITH_COMMANDS:
+        required: true
+        type: string
+      DOCKER_BUILD_OS:
+        description: 'linux or windows (workflow_call has no choice type; checked in parameters-check).'
+        required: false
+        default: linux
+        type: string
+  pull_request:
+    paths:
+      - '.github/workflows/docker-build.yml'
+      - 'docker/ci/**'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  parameters-check:
+    name: Parameters Check
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      repository: ${{ steps.check.outputs.repository }}
+    steps:
+      - name: Parameters check
+        id: check
+        env:
+          DOCKER_BUILD_GIT_REPOSITORY: ${{ inputs.DOCKER_BUILD_GIT_REPOSITORY }}
+          DOCKER_BUILD_SCRIPT_WITH_COMMANDS: ${{ inputs.DOCKER_BUILD_SCRIPT_WITH_COMMANDS }}
+          DOCKER_BUILD_OS: ${{ inputs.DOCKER_BUILD_OS }}
+        run: |
+          set -euo pipefail
+          if [[ "${DOCKER_BUILD_GIT_REPOSITORY}" != https://github.com/opensearch-project/* ]]; then
+            echo "::error::The repository needs to be an opensearch-project repository"
+            exit 1
+          fi
+          if [ "${DOCKER_BUILD_OS}" != "linux" ] && [ "${DOCKER_BUILD_OS}" != "windows" ]; then
+            echo "::error::DOCKER_BUILD_OS must be linux or windows, got '${DOCKER_BUILD_OS}'"
+            exit 1
+          fi
+          if [ -z "${DOCKER_BUILD_SCRIPT_WITH_COMMANDS}" ]; then
+            echo "::error::DOCKER_BUILD_SCRIPT_WITH_COMMANDS cannot be empty"
+            exit 1
+          fi
+          repository="${DOCKER_BUILD_GIT_REPOSITORY#https://github.com/}"
+          repository="${repository%/}"
+          echo "repository=${repository%.git}" >> "${GITHUB_OUTPUT}"
+
+  docker-build-linux:
+    name: docker-build (linux)
+    needs: parameters-check
+    if: inputs.DOCKER_BUILD_OS == 'linux'
+    runs-on: [self-hosted, linux, x64, ubuntu2404-x64-m5-2xlarge-docker-builder]
+    timeout-minutes: 360
+    environment: ci
+    permissions:
+      contents: read
+    container:
+      # ci-runner:ubuntu2404-x64-docker-buildx0.9.1-qemu8.2-v1, the Jenkins docker_images["linux"] image via the ECR mirror
+      image: public.ecr.aws/opensearchorg/opensearchstaging/ci-runner@sha256:fcad3fee89c90b1f12a224b0dd46609767ace97102b707c1a2a13addfafeff6c
+      options: -u root -v /var/run/docker.sock:/var/run/docker.sock
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ${{ needs.parameters-check.outputs.repository }}
+          ref: ${{ inputs.DOCKER_BUILD_GIT_REPOSITORY_REFERENCE }}
+          persist-credentials: false
+      - name: docker login (staging) + build script
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKERHUB_STAGING_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_STAGING_PASSWORD }}
+          DOCKER_BUILD_SCRIPT_WITH_COMMANDS: ${{ inputs.DOCKER_BUILD_SCRIPT_WITH_COMMANDS }}
+        run: |
+          set -e
+          set +x
+          echo 'The docker-build workflow will only push docker images to staging, please use docker-copy to move the image to other repositories'
+          echo "Account: dockerhub staging"
+          docker logout && printf '%s' "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USERNAME}" --password-stdin && eval "${DOCKER_BUILD_SCRIPT_WITH_COMMANDS}"
+      - name: Cleanup
+        if: always()
+        run: docker logout && docker image prune -f --all
+
+  docker-build-windows:
+    name: docker-build (windows)
+    needs: parameters-check
+    if: inputs.DOCKER_BUILD_OS == 'windows'
+    runs-on: [self-hosted, windows, x64, windows2019-x64-m5-4xlarge-docker-builder]
+    timeout-minutes: 360
+    environment: ci
+    permissions:
+      contents: read
+    env:
+      # Jenkins docker_images["windows"]; GHA has no job container on Windows, so it is started with docker run (ADR 0001)
+      CI_IMAGE: public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-windows2019-opensearch-build-v1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ${{ needs.parameters-check.outputs.repository }}
+          ref: ${{ inputs.DOCKER_BUILD_GIT_REPOSITORY_REFERENCE }}
+          persist-credentials: false
+      - name: docker login (staging) + build script
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKERHUB_STAGING_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_STAGING_PASSWORD }}
+          DOCKER_BUILD_SCRIPT_WITH_COMMANDS: ${{ inputs.DOCKER_BUILD_SCRIPT_WITH_COMMANDS }}
+        run: |
+          set -e
+          set +x
+          echo 'The docker-build workflow will only push docker images to staging, please use docker-copy to move the image to other repositories'
+          echo "Account: dockerhub staging"
+          docker pull "${CI_IMAGE}"
+          # shellcheck disable=SC2016  # expanded inside the container
+          docker run --rm -u ContainerAdministrator \
+            -v //./pipe/docker_engine://./pipe/docker_engine \
+            -v "${GITHUB_WORKSPACE}:C:/workspace" -w C:/workspace \
+            -e DOCKER_USERNAME -e DOCKER_PASSWORD -e DOCKER_BUILD_SCRIPT_WITH_COMMANDS \
+            "${CI_IMAGE}" bash -c 'set -e && set +x && docker logout && echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin && eval "$DOCKER_BUILD_SCRIPT_WITH_COMMANDS"'
+      - name: Cleanup
+        if: always()
+        run: docker logout && docker image prune -f --all
+
+  dry-run:
+    name: dry-run (docker/ci multi-arch, push to local registry)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    services:
+      registry:
+        image: registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373  # registry:2
+        ports:
+          - 5000:5000
+    env:
+      DOCKERFILE: dockerfiles/current/build.ubuntu2404.opensearch.x64.arm64.dockerfile
+      IMAGE: localhost:5000/opensearchstaging/ci-runner
+      TAG: ci-runner-ubuntu2404-opensearch-build-gha-dry-run-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+        with:
+          driver-opts: network=host
+      # same buildx invocation as docker/ci/build-image-multi-arch.sh, with the tag pointed at the local registry
+      - name: docker buildx build --platform linux/amd64,linux/arm64 --push
+        working-directory: docker/ci
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION="${TAG}" --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t "${IMAGE}:${TAG}" -f "${DOCKERFILE}" --push .
+      - name: Show manifest list
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE}:${TAG}" | tee "${RUNNER_TEMP}/manifest-list.txt"
+          docker buildx imagetools inspect --raw "${IMAGE}:${TAG}" | jq . | tee "${RUNNER_TEMP}/manifest-list.json"
+          {
+            echo "### ${DOCKERFILE} (linux/amd64 + linux/arm64)"
+            echo '```'
+            cat "${RUNNER_TEMP}/manifest-list.txt"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          jq -e '[.manifests[].platform | select(.os != "unknown") | .architecture] | sort == ["amd64","arm64"]' "${RUNNER_TEMP}/manifest-list.json"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: docker-build-dry-run-manifest
+          path: ${{ runner.temp }}/manifest-list.*
+          retention-days: 30
