@@ -48,6 +48,10 @@ jobs:
       architecture: x64
       component-name: OpenSearch
       snapshot: true
+      # PR jobs have no OIDC subject the artifact role trusts (main / env ci), so only dispatches upload.
+      upload: ${{ github.event_name != 'pull_request' }}
+      # A min-only build must never become the `latest` of the full distribution index.
+      update-latest-url: false
       runs-on: '["ubuntu-24.04"]'
     secrets:
       AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
