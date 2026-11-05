@@ -6,9 +6,10 @@
 # this file be licensed under the Apache-2.0 license or a
 # compatible open source license.
 
-"""Port of the record generation inside publishDistributionBuildResults() and publishIntegTestResults().
+"""Port of the record generation inside publishDistributionBuildResults(), publishIntegTestResults() and
+publishSmokeTestResults().
 
-Those two shared-library steps (opensearch-build-libraries vars/) build OpenSearch `_bulk` bodies in Groovy
+Those shared-library steps (opensearch-build-libraries vars/) build OpenSearch `_bulk` bodies in Groovy
 and then curl them into the metrics cluster. The curl part stayed in the composite actions under
 .github/actions/ because it is identical to the Jenkins shell block; the record generation lives here so
 that the field names, index names and aliases can be diffed against the Groovy source.
@@ -28,6 +29,7 @@ import yaml
 BUILD_RESULTS_ALIAS = "opensearch-distribution-build-results"
 INTEG_RESULTS_ALIAS = "opensearch-integration-test-results"
 INTEG_FAILURES_ALIAS = "opensearch-integration-test-failures"
+SMOKE_RESULTS_ALIAS = "opensearch-smoke-test-results"
 
 
 def monthly_index(alias: str) -> str:
@@ -209,6 +211,75 @@ def integ_test_records(
     return {"results": results_body, "failures": failures_body}
 
 
+def smoke_test_records(
+    index: str,
+    report: Dict[str, Any],
+    job_name: str,
+    smoke_test_build_number: str,
+    smoke_test_build_url: str,
+    distribution_build_url: str,
+    build_start_time: int,
+) -> str:
+    """publishSmokeTestResults.groovy (jenkins@lf-jenkins), one record per component test config."""
+    full_version = str(report["version"])
+    tokens = full_version.split("-")
+    distribution_build_number = report["id"]
+    rc_number = int(report["rc"])
+    platform, architecture, distribution = report["platform"], report["architecture"], report["distribution"]
+    report_url = "/".join(
+        [
+            "https://ci.opensearch.org/ci/dbc",
+            job_name,
+            full_version,
+            str(distribution_build_number),
+            platform,
+            architecture,
+            distribution,
+            "test-results",
+            smoke_test_build_number,
+            "smoke-test",
+            "test-report.yml",
+        ]
+    )
+
+    def joined(value: Any) -> Any:
+        return ", ".join(value) if isinstance(value, list) else value
+
+    body = ""
+    for component in report.get("components") or []:
+        for config in component.get("configs") or []:
+            body += bulk_line(
+                index,
+                {
+                    "component": component["name"],
+                    "component_repo": repo_name(component["repository"]),
+                    "component_repo_url": repo_url(component["repository"]),
+                    "version": tokens[0],
+                    "qualifier": tokens[1] if len(tokens) > 1 else "None",
+                    "smoke_test_build_number": int(smoke_test_build_number),
+                    "smoke_test_build_url": smoke_test_build_url,
+                    "distribution_build_number": int(distribution_build_number),
+                    "distribution_build_url": distribution_build_url,
+                    "build_start_time": build_start_time,
+                    "rc": rc_number > 0,
+                    "rc_number": rc_number,
+                    "platform": platform,
+                    "architecture": architecture,
+                    "distribution": distribution,
+                    "component_category": report["name"],
+                    "test_report_manifest_yml": report_url,
+                    "component_test_spec_name": config.get("name"),
+                    "component_test_spec_yml": config.get("yml"),
+                    "component_test_spec_result": config.get("status"),
+                    "component_test_spec_cluster_stdout": joined(config.get("cluster_stdout")),
+                    "component_test_spec_cluster_stderr": joined(config.get("cluster_stderr")),
+                    "component_test_spec_test_stdout": config.get("test_stdout"),
+                    "component_test_spec_test_stderr": config.get("test_stderr"),
+                },
+            )
+    return body
+
+
 def failed_tests(entries: List[str]) -> List[Tuple[str, str]]:
     """publishIntegTestResults.groovy:processFailedTests(), including its three sentinel values."""
     if not entries or "No Failed Test" in entries:
@@ -273,6 +344,15 @@ def main() -> int:
     integ.add_argument("--output", default="test-records.json")
     integ.add_argument("--failures-output", default="test-failures.json")
 
+    smoke = subparsers.add_parser("smoke-test-results", help="publishSmokeTestResults()")
+    smoke.add_argument("--test-report", required=True)
+    smoke.add_argument("--job-name", default="smoke-test")
+    smoke.add_argument("--smoke-test-build-number", required=True)
+    smoke.add_argument("--smoke-test-build-url", required=True)
+    smoke.add_argument("--distribution-build-url", required=True)
+    smoke.add_argument("--build-start-time", required=True, type=int, help="Epoch milliseconds")
+    smoke.add_argument("--output", default="test-records.json")
+
     args = parser.parse_args()
 
     if args.command == "distribution-build-results":
@@ -293,6 +373,20 @@ def main() -> int:
         write(args.output, body)
         print(f"index={index}")
         print(f"alias={BUILD_RESULTS_ALIAS}")
+    elif args.command == "smoke-test-results":
+        index = monthly_index(SMOKE_RESULTS_ALIAS)
+        body = smoke_test_records(
+            index,
+            load(args.test_report),
+            args.job_name,
+            args.smoke_test_build_number,
+            args.smoke_test_build_url,
+            args.distribution_build_url,
+            args.build_start_time,
+        )
+        write(args.output, body)
+        print(f"index={index}")
+        print(f"alias={SMOKE_RESULTS_ALIAS}")
     else:
         results_index = monthly_index(INTEG_RESULTS_ALIAS)
         failures_index = monthly_index(INTEG_FAILURES_ALIAS)

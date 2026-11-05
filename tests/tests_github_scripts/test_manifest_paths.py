@@ -143,6 +143,14 @@ class TestManifestPaths(unittest.TestCase):
             ["query-insights"],
         )
 
+    def test_expand_ci_groups(self) -> None:
+        self.assertEqual(manifest_paths.expand_ci_groups(["OpenSearch-Dashboards", "securityDashboards"], 0), ["OpenSearch-Dashboards", "securityDashboards"])
+        expanded = manifest_paths.expand_ci_groups(["OpenSearch-Dashboards", "securityDashboards"], manifest_paths.OSD_CI_GROUPS)
+        self.assertEqual(len(expanded), 10)
+        self.assertEqual(expanded[0], "OpenSearch-Dashboards-ci-group-1")
+        self.assertEqual(expanded[8], "OpenSearch-Dashboards-ci-group-9")
+        self.assertEqual(expanded[9], "securityDashboards")
+
     def test_integ_test_components_rejects_unknown(self) -> None:
         with self.assertRaisesRegex(ValueError, "k-NN is not present in the test manifest"):
             manifest_paths.integ_test_components({"components": [{"name": "OpenSearch"}]}, {"build": {}, "components": []}, "k-NN")

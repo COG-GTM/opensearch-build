@@ -87,7 +87,7 @@ jobs:
           INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
           DRY_RUN: ${{ inputs.DRY_RUN }}
         run: |
-          if [ "$EVENT_NAME" = "pull_request" ]; then
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -z "$INPUT_MANIFEST" ]; then
             # current release: the newest version folder with both distribution input manifests
             release=$(find manifests -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -printf '%f\n' | sort -V |
               while read -r v; do
@@ -101,6 +101,8 @@ jobs:
               exit 1
             fi
             manifests=("$INPUT_MANIFEST")
+            # pull requests (including the test workflows' dry runs that call this one) never write issues
+            [ "$EVENT_NAME" = "pull_request" ] && DRY_RUN=true
           fi
           echo "manifests=$(printf '%s\n' "${manifests[@]}" | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
           echo "dry-run=${DRY_RUN:-false}" >> "$GITHUB_OUTPUT"
