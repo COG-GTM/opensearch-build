@@ -1,0 +1,282 @@
+---
+# GitHub Actions port of jenkins/release-workflows/release-chores.jenkinsfile (Jenkins job distribution-release-chores).
+# RELEASE_CHORE picks the chore and ACTION its mode, as in Jenkins. Every library step the Jenkins stages called runs
+# through the release-chore composite action (.github/scripts/release_chores.py); checkReleaseNotes create / compile
+# call release-notes-generate.yml (once per product, one after the other) and release-notes-check.yml (compile)
+# through workflow_call instead of `build job:`. Jenkins used propagate: false for those two, so its run stayed green
+# when they failed; a failed called workflow fails this run.
+# Metrics reads assume AWS_ROLE_METRICS through OIDC; writes to component repositories and documentation-website use the
+# GitHub App token, workflow dispatches in this repository (checkReleaseIssues create, buildRC) use github.token.
+# DRY_RUN runs every read for real and prints the comments, assignments, dispatches and PRs instead of making them.
+name: release-chores
+run-name: release-chores ${{ inputs.RELEASE_CHORE }}/${{ inputs.ACTION }}/${{ inputs.RELEASE_VERSION }}${{ inputs.DRY_RUN && ' (dry run)' || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      RELEASE_CHORE:
+        description: '<Required> Release chore to carry out'
+        required: true
+        type: choice
+        options:
+          - checkReleaseOwners
+          - checkDocumentation
+          - checkCodeCoverage
+          - checkReleaseNotes
+          - checkReleaseIssues
+          - buildRC
+          - addRcDetailsComment
+          - checkDocumentationPullRequests
+          - checkIntegTestResultsOverview
+      ACTION:
+        # Jenkins used an Active Choices reactive parameter; the allowed values per chore are checked in Parameters Check:
+        #   checkReleaseOwners check|request|assign, checkDocumentation check|notify, checkCodeCoverage check|notify,
+        #   checkReleaseNotes check|create|compile|notify, checkReleaseIssues check|create, checkDocumentationPullRequests check,
+        #   checkIntegTestResultsOverview check, addRcDetailsComment add, buildRC both|opensearch|opensearch-dashboards
+        description: '<Optional> Release chore action, must be valid for the selected chore. Defaults to the first choice of the chore'
+        required: false
+        default: ''
+        type: string
+      RELEASE_VERSION:
+        description: '<Required> Release version to be used for the release chore'
+        required: true
+        type: string
+      GIT_LOG_DATE:
+        description: '<Conditionally-Required> Date to check commits for release notes in format yyyy-mm-dd, example 2022-07-26.'
+        required: false
+        default: ''
+        type: string
+      DRY_RUN:
+        description: 'Run the reads, print the GitHub writes instead of making them'
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      RELEASE_CHORE:
+        required: true
+        type: string
+      ACTION:
+        required: false
+        default: ''
+        type: string
+      RELEASE_VERSION:
+        required: true
+        type: string
+      GIT_LOG_DATE:
+        required: false
+        default: ''
+        type: string
+      DRY_RUN:
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      AWS_ROLE_METRICS:
+        required: false
+      METRICS_CLUSTER_ENDPOINT:
+        required: false
+      BEDROCK_ACCESS_ROLE:
+        required: false
+      GH_APP_ID:
+        required: false
+      GH_APP_PRIVATE_KEY:
+        required: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  parameters:
+    name: Parameters Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      chore: ${{ steps.validate.outputs.chore }}
+      action: ${{ steps.validate.outputs.action }}
+      metrics: ${{ steps.validate.outputs.metrics }}
+      upstream-writes: ${{ steps.validate.outputs.upstream-writes }}
+      app-repositories: ${{ steps.validate.outputs.app-repositories }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Validate chore, action and version
+        id: validate
+        env:
+          CHORE: ${{ inputs.RELEASE_CHORE }}
+          ACTION: ${{ inputs.ACTION }}
+          RELEASE_VERSION: ${{ inputs.RELEASE_VERSION }}
+          GIT_LOG_DATE: ${{ inputs.GIT_LOG_DATE }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          # chore → release-chore name, allowed actions (first is the Jenkins default), metrics reads
+          case "$CHORE" in
+            checkReleaseOwners)             SCRIPT=release-owners; ALLOWED="check request assign"; METRICS=true ;;
+            checkDocumentation)             SCRIPT=doc-issues;     ALLOWED="check notify";         METRICS=false ;;
+            checkCodeCoverage)              SCRIPT=code-coverage;  ALLOWED="check notify";         METRICS=true ;;
+            checkReleaseNotes)              SCRIPT=release-notes;  ALLOWED="check create compile notify"; METRICS=true ;;
+            checkReleaseIssues)             SCRIPT=release-issues; ALLOWED="check create";         METRICS=true ;;
+            checkDocumentationPullRequests) SCRIPT=doc-prs;        ALLOWED="check";                METRICS=false ;;
+            checkIntegTestResultsOverview)  SCRIPT=integ-overview; ALLOWED="check";                METRICS=true ;;
+            addRcDetailsComment)            SCRIPT=rc-details;     ALLOWED="add";                  METRICS=true ;;
+            buildRC)                        SCRIPT=build-rc;       ALLOWED="both opensearch opensearch-dashboards"; METRICS=true ;;
+            *) fail "Unknown chore '$CHORE'" ;;
+          esac
+          [[ -n "$RELEASE_VERSION" ]] || fail 'RELEASE_VERSION parameter cannot be empty!'
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || fail "RELEASE_VERSION '$RELEASE_VERSION' is not a version"
+          [[ -n "$ACTION" ]] || ACTION="${ALLOWED%% *}"
+          [[ " $ALLOWED " == *" $ACTION "* ]] || fail "Invalid action '$ACTION' for chore '$CHORE'. Allowed actions: $ALLOWED"
+          if [[ "$CHORE" == checkReleaseNotes && "$ACTION" != compile && -z "$GIT_LOG_DATE" ]]; then
+            fail 'GIT_LOG_DATE parameter cannot be empty for checkReleaseNotes'
+          fi
+          if [[ -n "$GIT_LOG_DATE" ]]; then
+            [[ "$GIT_LOG_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && "$(date -d "$GIT_LOG_DATE" +%Y-%m-%d 2>/dev/null)" == "$GIT_LOG_DATE" ]] \
+              || fail "GIT_LOG_DATE '$GIT_LOG_DATE' is not a valid yyyy-mm-dd date"
+          fi
+          for manifest in "manifests/$RELEASE_VERSION/opensearch-$RELEASE_VERSION.yml" "manifests/$RELEASE_VERSION/opensearch-dashboards-$RELEASE_VERSION.yml"; do
+            [[ -f "$manifest" ]] || fail "Missing input manifest $manifest"
+          done
+          [[ "$CHORE/$ACTION" == checkReleaseNotes/check ]] && METRICS=false
+          # comments / assignments on opensearch-project repositories need the GitHub App token
+          case "$SCRIPT/$ACTION" in
+            release-owners/request|release-owners/assign|doc-issues/notify|code-coverage/notify|release-notes/notify|rc-details/add) UPSTREAM=true ;;
+            *) UPSTREAM=false ;;
+          esac
+          # GitHub App token scope: the repositories this chore comments on
+          case "$SCRIPT" in
+            doc-issues) REPOS=documentation-website ;;
+            rc-details) REPOS=opensearch-build ;;
+            *) REPOS=$(grep -h 'repository:' "manifests/$RELEASE_VERSION/opensearch-$RELEASE_VERSION.yml" "manifests/$RELEASE_VERSION/opensearch-dashboards-$RELEASE_VERSION.yml" \
+                 | sed -E 's#.*/([^/]+)$#\1#; s#\.git$##' | sort -u | paste -sd, -) ;;
+          esac
+          {
+            echo "app-repositories=$REPOS"
+            echo "chore=$SCRIPT"
+            echo "action=$ACTION"
+            echo "metrics=$METRICS"
+            echo "upstream-writes=$UPSTREAM"
+          } >> "$GITHUB_OUTPUT"
+          echo "### $CHORE/$ACTION/$RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+  chore:
+    name: ${{ inputs.RELEASE_CHORE }}
+    needs: parameters
+    if: ${{ !(inputs.RELEASE_CHORE == 'checkReleaseNotes' && (needs.parameters.outputs.action == 'create' || needs.parameters.outputs.action == 'compile')) }}
+    # Jenkins agent label Jenkins-Agent-AL2023-X64-M54xlarge-Docker-Host; dry runs stay on a hosted runner.
+    runs-on: ${{ fromJSON(inputs.DRY_RUN && '["ubuntu-24.04"]' || '["self-hosted","linux","x64","al2023-x64-m5-4xlarge-docker-host"]') }}
+    container:
+      image: public.ecr.aws/opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-build-v1
+      options: --user root
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      actions: write
+    env:
+      HAS_METRICS_ROLE: ${{ secrets.AWS_ROLE_METRICS != '' }}
+      HAS_APP: ${{ secrets.GH_APP_ID != '' && secrets.GH_APP_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Check release notes
+        if: needs.parameters.outputs.chore == 'release-notes'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.RELEASE_VERSION }}
+          GIT_LOG_DATE: ${{ inputs.GIT_LOG_DATE }}
+        run: |
+          ./release_notes.sh check "manifests/$RELEASE_VERSION/opensearch-$RELEASE_VERSION.yml" \
+            "manifests/$RELEASE_VERSION/opensearch-dashboards-$RELEASE_VERSION.yml" --date "$GIT_LOG_DATE" --output "$GITHUB_WORKSPACE/table.md"
+          cat "$GITHUB_WORKSPACE/table.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Require metrics and GitHub App credentials
+        if: ${{ !inputs.DRY_RUN }}
+        env:
+          NEEDS_METRICS: ${{ needs.parameters.outputs.metrics }}
+          UPSTREAM_WRITES: ${{ needs.parameters.outputs.upstream-writes }}
+        run: |
+          if [[ "$NEEDS_METRICS" == true && "$HAS_METRICS_ROLE" != true ]]; then
+            echo "::error::secrets.AWS_ROLE_METRICS / METRICS_CLUSTER_ENDPOINT are required for this chore"
+            exit 1
+          fi
+          if [[ "$UPSTREAM_WRITES" == true && "$HAS_APP" != true ]]; then
+            echo "::error::secrets.GH_APP_ID / GH_APP_PRIVATE_KEY are required to comment on opensearch-project repositories"
+            exit 1
+          fi
+      - name: Configure AWS credentials (metrics cluster)
+        if: needs.parameters.outputs.metrics == 'true' && env.HAS_METRICS_ROLE == 'true'
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_METRICS }}
+          role-session-name: gha-release-chores
+          role-duration-seconds: 900
+          aws-region: us-east-1
+      - name: Mint GitHub App token
+        id: app-token
+        if: needs.parameters.outputs.upstream-writes == 'true' && env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: opensearch-project
+          repositories: ${{ needs.parameters.outputs.app-repositories }}
+          permission-issues: write
+      - name: Run ${{ needs.parameters.outputs.chore }}
+        uses: ./.github/actions/release-chore
+        with:
+          chore: ${{ needs.parameters.outputs.chore }}
+          action: ${{ needs.parameters.outputs.action }}
+          version: ${{ inputs.RELEASE_VERSION }}
+          manifests: |
+            manifests/${{ inputs.RELEASE_VERSION }}/opensearch-${{ inputs.RELEASE_VERSION }}.yml
+            manifests/${{ inputs.RELEASE_VERSION }}/opensearch-dashboards-${{ inputs.RELEASE_VERSION }}.yml
+          table: ${{ needs.parameters.outputs.chore == 'release-notes' && format('{0}/table.md', github.workspace) || '' }}
+          git-log-date: ${{ inputs.GIT_LOG_DATE }}
+          metrics-endpoint: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+          github-token: ${{ steps.app-token.outputs.token || github.token }}
+          dry-run: ${{ inputs.DRY_RUN }}
+
+  release-notes-generate:
+    name: Create release notes (${{ matrix.product }})
+    needs: parameters
+    if: inputs.RELEASE_CHORE == 'checkReleaseNotes' && needs.parameters.outputs.action == 'create'
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        product: [opensearch, opensearch-dashboards]
+    uses: ./.github/workflows/release-notes-generate.yml
+    with:
+      INPUT_MANIFEST: ${{ inputs.RELEASE_VERSION }}/${{ matrix.product }}-${{ inputs.RELEASE_VERSION }}.yml
+      GIT_LOG_DATE: ${{ inputs.GIT_LOG_DATE }}
+      DRY_RUN: ${{ inputs.DRY_RUN }}
+    secrets:
+      BEDROCK_ACCESS_ROLE: ${{ secrets.BEDROCK_ACCESS_ROLE }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+  release-notes-compile:
+    name: Compile release notes
+    needs: parameters
+    if: inputs.RELEASE_CHORE == 'checkReleaseNotes' && needs.parameters.outputs.action == 'compile'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    uses: ./.github/workflows/release-notes-check.yml
+    with:
+      RELEASE_VERSION: ${{ inputs.RELEASE_VERSION }}
+      ACTION: compile
+      GIT_LOG_DATE: ${{ inputs.GIT_LOG_DATE }}
+      COMMENT: NO_COMMENT
+      DRY_RUN: ${{ inputs.DRY_RUN }}

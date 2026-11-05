@@ -1,0 +1,227 @@
+---
+# GitHub Actions port of jenkins/release-workflows/release-notes-check-lf.jenkinsfile (Jenkins job release-notes-tracker).
+# check: release_notes.sh check over the OpenSearch and OpenSearch Dashboards manifests, optionally posted (ADD) or
+# updated (UPDATE) as a comment on GIT_ISSUE_NUMBER of this repository. compile: consolidated release notes and the
+# 'Add consolidated release notes for <version>' PR (branch release-notes/compiled) on this repository.
+# release-chores.yml calls compile through workflow_call. DRY_RUN prints the comment / diff / PR instead of writing.
+name: release-notes-check
+run-name: release-notes-check ${{ inputs.ACTION }} ${{ inputs.RELEASE_VERSION }}${{ inputs.DRY_RUN && ' (dry run)' || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      RELEASE_VERSION:
+        description: '<Required> Release version number to fetch input manifest path'
+        required: true
+        type: string
+      ACTION:
+        description: '<Optional> check - Checks the release notes for all components. compile - Consolidates all release notes.'
+        required: false
+        default: check
+        type: choice
+        options:
+          - check
+          - compile
+      GIT_LOG_DATE:
+        description: '<Conditionally-Required> in format yyyy-mm-dd, example 2022-07-26.'
+        required: false
+        default: ''
+        type: string
+      COMMENT:
+        description: '<Optional> Adds MarkdownTable output as comment on GIT_ISSUE_NUMBER. Defaults to ADD.'
+        required: false
+        default: ADD
+        type: choice
+        options:
+          - ADD
+          - UPDATE
+          - NO_COMMENT
+      GIT_ISSUE_NUMBER:
+        description: '<Conditionally-Required> The release issue number from opensearch-build repo.'
+        required: false
+        default: ''
+        type: string
+      COMMENT_UNIQUE_ID:
+        description: '<Conditionally-Required> Use only with COMMENT: UPDATE'
+        required: false
+        default: ''
+        type: string
+      DRY_RUN:
+        description: 'Print the comment or PR instead of writing it'
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      RELEASE_VERSION:
+        required: true
+        type: string
+      ACTION:
+        required: false
+        default: check
+        type: string
+      GIT_LOG_DATE:
+        required: false
+        default: ''
+        type: string
+      COMMENT:
+        required: false
+        default: ADD
+        type: string
+      GIT_ISSUE_NUMBER:
+        required: false
+        default: ''
+        type: string
+      COMMENT_UNIQUE_ID:
+        required: false
+        default: ''
+        type: string
+      DRY_RUN:
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  parameters:
+    name: Parameters Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Parameters Check
+        env:
+          RELEASE_VERSION: ${{ inputs.RELEASE_VERSION }}
+          ACTION: ${{ inputs.ACTION }}
+          GIT_LOG_DATE: ${{ inputs.GIT_LOG_DATE }}
+          COMMENT: ${{ inputs.COMMENT }}
+          GIT_ISSUE_NUMBER: ${{ inputs.GIT_ISSUE_NUMBER }}
+          COMMENT_UNIQUE_ID: ${{ inputs.COMMENT_UNIQUE_ID }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          [[ -n "$ACTION" && -n "$RELEASE_VERSION" ]] || fail 'ACTION and RELEASE_VERSION parameters cannot be empty!'
+          [[ "$ACTION" == check || "$ACTION" == compile ]] || fail "Invalid ACTION '$ACTION'. Valid values: check, compile"
+          [[ "$COMMENT" == ADD || "$COMMENT" == UPDATE || "$COMMENT" == NO_COMMENT ]] || fail "Invalid COMMENT '$COMMENT'"
+          if [[ "$ACTION" == check && "$COMMENT" == ADD && ( -z "$GIT_LOG_DATE" || -z "$GIT_ISSUE_NUMBER" ) ]]; then
+            fail 'GIT_LOG_DATE, COMMENT or GIT_ISSUE_NUMBER parameters cannot be empty when ACTION = check!'
+          fi
+          if [[ "$ACTION" == check && "$COMMENT" == UPDATE && ( -z "$GIT_LOG_DATE" || -z "$COMMENT_UNIQUE_ID" ) ]]; then
+            fail 'GIT_LOG_DATE, COMMENT or COMMENT_UNIQUE_ID parameters cannot be empty when ACTION = check!'
+          fi
+          [[ "$ACTION" != check || -n "$GIT_LOG_DATE" ]] || fail 'GIT_LOG_DATE is required when ACTION = check'
+          if [[ -n "$GIT_LOG_DATE" ]]; then
+            [[ "$GIT_LOG_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && "$(date -d "$GIT_LOG_DATE" +%Y-%m-%d 2>/dev/null)" == "$GIT_LOG_DATE" ]] \
+              || fail "GIT_LOG_DATE '$GIT_LOG_DATE' is not a valid yyyy-mm-dd date"
+          fi
+          [[ -z "$GIT_ISSUE_NUMBER" || "$GIT_ISSUE_NUMBER" =~ ^[0-9]+$ ]] || fail 'GIT_ISSUE_NUMBER must be a number'
+          [[ -z "$COMMENT_UNIQUE_ID" || "$COMMENT_UNIQUE_ID" =~ ^[0-9]+$ ]] || fail 'COMMENT_UNIQUE_ID must be a number'
+          for manifest in "manifests/$RELEASE_VERSION/opensearch-$RELEASE_VERSION.yml" "manifests/$RELEASE_VERSION/opensearch-dashboards-$RELEASE_VERSION.yml"; do
+            [[ "$RELEASE_VERSION" != *..* && -f "$manifest" ]] || fail "Missing input manifest $manifest"
+          done
+
+  check:
+    name: Check release notes
+    needs: parameters
+    if: inputs.ACTION == 'check'
+    # Jenkins agent label Jenkins-Agent-AL2023-X64-M54xlarge-Docker-Host; dry runs stay on a hosted runner.
+    runs-on: ${{ fromJSON(inputs.DRY_RUN && '["ubuntu-24.04"]' || '["self-hosted","linux","x64","al2023-x64-m5-4xlarge-docker-host"]') }}
+    container:
+      image: public.ecr.aws/opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-build-v1
+      options: --user root
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Check release notes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.RELEASE_VERSION }}
+          GIT_LOG_DATE: ${{ inputs.GIT_LOG_DATE }}
+        run: |
+          ./release_notes.sh check "manifests/$RELEASE_VERSION/opensearch-$RELEASE_VERSION.yml" \
+            "manifests/$RELEASE_VERSION/opensearch-dashboards-$RELEASE_VERSION.yml" --date "$GIT_LOG_DATE" --output table.md
+          cat table.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload release notes table
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-notes-table-${{ inputs.RELEASE_VERSION }}
+          path: table.md
+          if-no-files-found: ignore
+      - name: Comment on release issue
+        if: inputs.COMMENT != 'NO_COMMENT'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENT: ${{ inputs.COMMENT }}
+          GIT_ISSUE_NUMBER: ${{ inputs.GIT_ISSUE_NUMBER }}
+          COMMENT_UNIQUE_ID: ${{ inputs.COMMENT_UNIQUE_ID }}
+          DRY_RUN: ${{ inputs.DRY_RUN }}
+        run: |
+          set -euo pipefail
+          if [[ "$COMMENT" == ADD ]]; then
+            echo "Adding Comment on issue $GIT_ISSUE_NUMBER"
+            cmd=(gh issue comment "$GIT_ISSUE_NUMBER" --body-file table.md --repo "$GITHUB_REPOSITORY")
+          else
+            echo "Updating Comment $COMMENT_UNIQUE_ID on issue $GIT_ISSUE_NUMBER"
+            cmd=(gh api --method PATCH -H 'Accept: application/vnd.github+json' "/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_UNIQUE_ID" -F body=@table.md)
+          fi
+          if [[ "$DRY_RUN" == 'true' ]]; then
+            echo "[dry-run] would run: ${cmd[*]}"
+          else
+            "${cmd[@]}"
+          fi
+
+  compile:
+    name: Generate consolidated release notes
+    needs: parameters
+    if: inputs.ACTION == 'compile'
+    runs-on: ${{ fromJSON(inputs.DRY_RUN && '["ubuntu-24.04"]' || '["self-hosted","linux","x64","al2023-x64-m5-4xlarge-docker-host"]') }}
+    container:
+      image: public.ecr.aws/opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-build-v1
+      options: --user root
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Compile release notes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.RELEASE_VERSION }}
+        run: |
+          ./release_notes.sh compile "manifests/$RELEASE_VERSION/opensearch-$RELEASE_VERSION.yml" \
+            "manifests/$RELEASE_VERSION/opensearch-dashboards-$RELEASE_VERSION.yml" \
+            --output "release-notes/opensearch-release-notes-$RELEASE_VERSION.md"
+      - name: Upload consolidated release notes
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: opensearch-release-notes-${{ inputs.RELEASE_VERSION }}
+          path: release-notes/opensearch-release-notes-${{ inputs.RELEASE_VERSION }}.md
+          if-no-files-found: ignore
+      - name: Open consolidated release notes PR
+        uses: ./.github/actions/release-chore
+        with:
+          chore: notes-compiled-pr
+          version: ${{ inputs.RELEASE_VERSION }}
+          git-name: github-actions[bot]
+          git-email: 41898282+github-actions[bot]@users.noreply.github.com
+          github-token: ${{ github.token }}
+          dry-run: ${{ inputs.DRY_RUN }}

@@ -1,0 +1,51 @@
+---
+# Dry runs of the release-chore composite action against live GitHub data (reads only). Chores that need the
+# metrics cluster look release issues up by title on GitHub in dry-run mode when METRICS_CLUSTER_ENDPOINT is unset.
+name: release-chores-dry-run
+
+on:
+  pull_request:
+    paths:
+      - .github/actions/release-chore/**
+      - .github/scripts/release_chores.py
+      - .github/workflows/release-chores-dry-run.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: checkDocumentation notify
+        uses: ./.github/actions/release-chore
+        with:
+          chore: doc-issues
+          action: notify
+          version: 3.9.0
+          github-token: ${{ github.token }}
+          dry-run: 'true'
+      - name: checkDocumentationPullRequests check
+        uses: ./.github/actions/release-chore
+        with:
+          chore: doc-prs
+          action: check
+          version: 3.9.0
+          github-token: ${{ github.token }}
+          dry-run: 'true'
+      - name: checkReleaseIssues create
+        uses: ./.github/actions/release-chore
+        with:
+          chore: release-issues
+          action: create
+          version: 3.9.0
+          manifests: |
+            manifests/3.9.0/opensearch-3.9.0.yml
+            manifests/3.9.0/opensearch-dashboards-3.9.0.yml
+          github-token: ${{ github.token }}
+          dry-run: 'true'
