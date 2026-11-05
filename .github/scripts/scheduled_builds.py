@@ -159,7 +159,12 @@ def check_for_build_inputs(params: Dict[str, str]) -> Dict[str, str]:
 
 def publishes(target: str, inputs: Dict[str, str]) -> bool:
     if target == "distribution-build-opensearch":
-        return "no-upload" not in inputs.get("OPTIONS", "").split()
+        # distribution-build-opensearch.yml applies the upload / no-upload flags of OPTIONS in order, upload on by default
+        upload = True
+        for flag in inputs.get("OPTIONS", "").split():
+            if flag in ("upload", "no-upload"):
+                upload = flag == "upload"
+        return upload
     if target == "publish-min-snapshots":
         return to_bool(inputs.get("PUBLISH"), True)
     return True

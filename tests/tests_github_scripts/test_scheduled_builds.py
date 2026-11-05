@@ -175,6 +175,15 @@ class TestResolve(unittest.TestCase):
                                                      "PUBLISH": "False", "CHECK_FOR_CHANGES": "false"})
         self.assertEqual(row["publishes"], "false")
 
+    def test_upload_flags_apply_in_order(self) -> None:
+        target = "distribution-build-opensearch"
+        self.assertTrue(scheduled_builds.publishes(target, {}))
+        self.assertFalse(scheduled_builds.publishes(target, {"OPTIONS": "no-upload"}))
+        self.assertTrue(scheduled_builds.publishes(target, {"OPTIONS": "no-upload upload"}))
+        self.assertFalse(scheduled_builds.publishes(target, {"OPTIONS": "upload compare-jenkins no-upload"}))
+        self.assertTrue(scheduled_builds.publishes("publish-min-snapshots", {}))
+        self.assertTrue(scheduled_builds.publishes("distribution-build-opensearch-dashboards", {"OPTIONS": "update-github-issue=false"}))
+
     def test_scheduled_rows_publish(self) -> None:
         for workflow, cron in (("check-for-build", "17 1 * * *"), ("publish-min-snapshots", "37 */4 * * *")):
             for row in scheduled_builds.resolve(workflow, "schedule", cron, {})["matrix"]["include"]:
