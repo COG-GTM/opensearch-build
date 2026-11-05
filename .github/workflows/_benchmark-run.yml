@@ -235,7 +235,16 @@ jobs:
           set -euo pipefail
           args=(run --params "$PARAMS" --suffix "$SUFFIX" --insecure "$INSECURE" --user-tag "$USER_TAG")
           if [ "$LOCAL_CLUSTER" = "true" ]; then
-            args+=(--endpoint "$LOCAL_ENDPOINT")
+            # the S3 benchmark.ini keeps results under /opensearch-benchmark, where the suite copies test_executions
+            # from; the dry run writes the same layout with an in-memory datastore
+            printf '%s\n' '[meta]' 'config.version = 17' '[system]' 'env.name = local' '[node]' \
+              'root.dir = /opensearch-benchmark' 'src.root.dir = /opensearch-benchmark/src' '[source]' \
+              'remote.repo.url = https://github.com/opensearch-project/OpenSearch.git' 'opensearch.src.subdir = opensearch' \
+              '[benchmarks]' 'local.dataset.cache = /opensearch-benchmark/data' '[results_publishing]' 'datastore.type = in-memory' \
+              '[workloads]' 'default.url = https://github.com/opensearch-project/opensearch-benchmark-workloads' \
+              '[provision_configs]' 'default.dir = default-provision-config' '[defaults]' 'preserve_benchmark_candidate = false' \
+              '[distributions]' 'release.cache = true' > "$RUNNER_TEMP/benchmark.ini"
+            args+=(--endpoint "$LOCAL_ENDPOINT" --benchmark-config "$RUNNER_TEMP/benchmark.ini")
           else
             args+=(--config "$GITHUB_WORKSPACE/config.yml" --benchmark-config "$GITHUB_WORKSPACE/benchmark.ini")
           fi
