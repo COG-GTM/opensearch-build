@@ -79,7 +79,7 @@ class TestGitRemote(unittest.TestCase):
         refs.session.post.return_value = MagicMock(status_code=422, text="Reference already exists")
         refs.session.get.return_value.json.return_value = {"object": {"type": "commit", "sha": "abc"}}
         self.assertFalse(refs.create_ref(OS_REPO, "refs/tags/3.10.0", "abc"))
-        refs.session.get.assert_called_with("https://api.github.com/repos/opensearch-project/OpenSearch/git/refs/tags/3.10.0", timeout=60)
+        refs.session.get.assert_called_with("https://api.github.com/repos/opensearch-project/OpenSearch/git/ref/tags/3.10.0", timeout=60)
         refs.session.get.return_value.json.return_value = {"object": {"type": "commit", "sha": "other"}}
         with self.assertRaisesRegex(RuntimeError, "at other since the plan ran, expected abc"):
             refs.create_ref(OS_REPO, "refs/tags/3.10.0", "abc")

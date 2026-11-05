@@ -72,7 +72,7 @@ class GitHubRefs:
 
     def ref_commit(self, owner: str, name: str, ref: str) -> Optional[str]:
         """Commit ref points at, peeling annotated tags."""
-        response = self.session.get(f"{self.API}/repos/{owner}/{name}/git/{ref}", timeout=60)
+        response = self.session.get(f"{self.API}/repos/{owner}/{name}/git/ref/{ref.removeprefix('refs/')}", timeout=60)
         response.raise_for_status()
         target = response.json()["object"]
         if target["type"] == "tag":
