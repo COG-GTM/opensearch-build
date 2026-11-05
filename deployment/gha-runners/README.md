@@ -70,7 +70,10 @@ work and the release roles trust nothing but the `release` environment, which re
 5. **Bucket / signer trust** owned elsewhere: the signer roles' trust policies must allow
    `AWS_ROLE_SIGNING_BASE`, and the artifacts bucket policy must allow cross-account reads by the
    promotion role if the release job reads bundles with it.
-6. **GitHub token** with org admin (runner group) and repo admin (environments, secrets) in `GITHUB_TOKEN`.
+6. **EC2 Mac capacity**: each macOS pool gets one dedicated host in `mac_dedicated_host_azs[<pool>]`
+   (default `<aws_region>a`). `subnet_ids` must include a subnet in that AZ that offers `mac1.metal` /
+   `mac2.metal`; otherwise set the AZs explicitly.
+7. **GitHub token** with org admin (runner group) and repo admin (environments, secrets) in `GITHUB_TOKEN`.
 
 ## Validate and plan
 

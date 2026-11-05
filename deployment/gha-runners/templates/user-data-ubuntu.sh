@@ -26,6 +26,7 @@ install_with_retry() {
       sleep 5
     fi
   done
+  [ $success = true ]
 }
 
 exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
@@ -36,6 +37,14 @@ set +x
 set -x
 %{ endif }
 
+# unattended-upgrades / apt-daily hold the dpkg lock shortly after boot (same as the module's Ubuntu example).
+systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+systemctl mask unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+  echo "Waiting for dpkg lock to be released..."
+  sleep 5
+done
+
 ${pre_install}
 
 command -v docker >/dev/null || install_with_retry docker.io
@@ -43,6 +52,15 @@ systemctl enable --now docker
 usermod -a -G docker ubuntu
 
 install_with_retry jq git curl unzip
+# The module's start script needs the AWS CLI (ssm get-parameter, ec2 terminate-instances).
+if ! command -v aws >/dev/null; then
+  cli_arch=$(uname -m)
+  curl -fsSL -o /root/awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-$cli_arch.zip"
+  unzip -q -d /root /root/awscliv2.zip
+  /root/aws/install
+  rm -rf /root/aws /root/awscliv2.zip
+fi
+aws --version
 if ! dpkg -s amazon-cloudwatch-agent >/dev/null 2>&1; then
   arch=$(dpkg --print-architecture)
   curl -fsSL -o /tmp/amazon-cloudwatch-agent.deb "https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/$arch/latest/amazon-cloudwatch-agent.deb"
