@@ -63,6 +63,7 @@ jobs:
       - name: Manifest diff
         id: diff
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git status --porcelain
           git add -A
           git diff --cached --binary > "$RUNNER_TEMP/manifests-update.patch"
