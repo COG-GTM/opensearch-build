@@ -341,17 +341,23 @@ class Chores:
         manifests = self._manifests()
         metrics = self.metrics_factory(str(manifests[0]["build"]["version"]), None)
         missing: List[str] = []
+        unknown: List[str] = []
         for manifest in manifests:
             for component in manifest.get("components", []):
                 owners = metrics.release_owners(component["name"])
                 if owners is None:
-                    echo(f"No release metrics document for {component['name']}; skipping.")
+                    unknown.append(component["name"])
                     continue
                 if not owners:
                     missing.append(component["name"])
                     if self.args.action != "check":
                         self._handle_missing_owner(component, metrics)
-        echo(f"Components missing release owner: {missing}" if missing else "All components have release owner assigned.")
+        if unknown:
+            echo(f"Components without a release metrics document (owner unknown, not requested/assigned): {unknown}")
+        if missing:
+            echo(f"Components missing release owner: {missing}")
+        elif not unknown:
+            echo("All components have release owner assigned.")
 
     def _handle_missing_owner(self, component: Dict[str, Any], metrics: ReleaseMetrics) -> None:
         name = repo_name(component["repository"])

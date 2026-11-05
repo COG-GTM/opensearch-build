@@ -308,11 +308,14 @@ def test_release_owners_metrics_failure_does_not_assign() -> None:
     assert gh.calls == []
 
 
-def test_release_owners_without_metrics_document_is_skipped() -> None:
+def test_release_owners_without_metrics_document_is_skipped(capsys: pytest.CaptureFixture[str]) -> None:
     gh = FakeGh()
     chore, _ = chores(["release-owners", "--action", "assign", "--manifest", OS_MANIFEST], gh, FakeMetrics({release_chores.RELEASE_METRICS_INDEX: {"hits": {"hits": []}}}))
     chore.run("release-owners")
     assert gh.calls == []
+    out = capsys.readouterr().out
+    assert "owner unknown" in out
+    assert "All components have release owner assigned." not in out
 
 
 def test_release_issues_metrics_failure_does_not_dispatch() -> None:
