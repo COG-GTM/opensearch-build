@@ -1,0 +1,55 @@
+{
+  "mappings": {
+    "properties": {
+      "component": {
+        "type": "keyword"
+      },
+      "component_repo": {
+        "type": "keyword"
+      },
+      "component_repo_url": {
+        "type": "keyword"
+      },
+      "component_ref": {
+        "type": "keyword"
+      },
+      "version": {
+        "type": "keyword"
+      },
+      "qualifier": {
+        "type": "keyword"
+      },
+      "distribution_build_number": {
+        "type": "integer"
+      },
+      "distribution_build_url": {
+        "type": "keyword"
+      },
+      "build_start_time": {
+        "type": "date",
+        "format": "epoch_millis"
+      },
+      "rc": {
+        "type": "keyword"
+      },
+      "rc_number": {
+        "type": "integer"
+      },
+      "component_category": {
+        "type": "keyword"
+      },
+      "component_build_result": {
+        "type": "keyword"
+      },
+      "overall_build_result": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      }
+    }
+  }
+}

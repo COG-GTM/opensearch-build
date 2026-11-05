@@ -1,0 +1,241 @@
+---
+name: 'Sign artifacts'
+description: >-
+  Port of the shared-library step signArtifacts() (opensearch-build-libraries vars/signArtifacts.groovy), which also
+  backs createSignatureFiles(). Two paths, as in Groovy:
+  `sigtype: .rpm` imports the RPM signing key from Secrets Manager and runs `rpm --addsign`;
+  every other sigtype runs `./sign.sh` (src/run_sign.py, the opensearch-signer-client) for the linux (PGP), windows,
+  mac or jar_signer platform. The role is assumed through GitHub OIDC (`role-to-assume`): AWS_ROLE_RPM_SIGNING for
+  rpm, AWS_ROLE_SIGNING_BASE for the signer client (ADR 0001). The calling job runs in `environment: release`,
+  declares `permissions: id-token: write` and exports the per-platform signing secrets listed in
+  .github/actions/README.md as environment variables (composite actions cannot read `secrets`).
+
+inputs:
+  artifact-path:
+    description: 'File, directory or manifest yml to sign'
+    required: true
+  sigtype:
+    description: 'Signature type: .sig, .asc or .rpm'
+    required: false
+    default: '.sig'
+  platform:
+    description: 'Signing platform for sign.sh: linux (PGP), windows, mac or jar_signer. Ignored for .rpm.'
+    required: false
+    default: 'linux'
+  type:
+    description: 'Artifact type in the manifest, required by sign.sh when artifact-path is a manifest yml'
+    required: false
+    default: ''
+  component:
+    description: 'Space-separated components to sign when artifact-path is a manifest yml. Empty signs all.'
+    required: false
+    default: ''
+  email:
+    description: 'Signing identity: release@opensearch.org or opensearch@amazon.com'
+    required: false
+    default: 'release@opensearch.org'
+  overwrite:
+    description: 'Overwrite existing artifacts or signature files'
+    required: false
+    default: 'false'
+  role-to-assume:
+    description: 'ARN of the signing role, passed from a secret (AWS_ROLE_RPM_SIGNING or AWS_ROLE_SIGNING_BASE)'
+    required: false
+    default: ''
+  aws-region:
+    description: 'Region of the signer client role session'
+    required: false
+    default: 'us-east-1'
+  rpm-secrets-region:
+    description: 'Region of the Secrets Manager entries holding the RPM signing key and passphrase'
+    required: false
+    default: 'us-west-2'
+  dry-run:
+    description: >-
+      Validate the inputs and print the command that would run, without assuming a role, reading secrets or signing.
+    required: false
+    default: 'false'
+
+outputs:
+  command:
+    description: 'The sign.sh command line (or "rpm --addsign") that was run, or would run with dry-run'
+    value: ${{ steps.plan.outputs.command }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      id: plan
+      shell: bash
+      env:
+        ARTIFACT_PATH: ${{ inputs.artifact-path }}
+        SIGTYPE: ${{ inputs.sigtype }}
+        PLATFORM: ${{ inputs.platform }}
+        ARTIFACT_TYPE: ${{ inputs.type }}
+        COMPONENTS: ${{ inputs.component }}
+        SIGNING_EMAIL: ${{ inputs.email }}
+        OVERWRITE: ${{ inputs.overwrite }}
+        ROLE_TO_ASSUME: ${{ inputs.role-to-assume }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        set -euo pipefail
+        fail() { echo "::error::$1"; exit 1; }
+        [ -e "${ARTIFACT_PATH}" ] || fail "artifact-path ${ARTIFACT_PATH} does not exist."
+        case "${SIGTYPE}" in .sig|.asc|.rpm) ;; *) fail "sigtype must be .sig, .asc or .rpm, got '${SIGTYPE}'." ;; esac
+        case "${SIGNING_EMAIL}" in release@opensearch.org|opensearch@amazon.com) ;; *) fail "email must be release@opensearch.org or opensearch@amazon.com." ;; esac
+        if [ "${SIGTYPE}" = .rpm ]; then
+          REQUIRED=(RPM_SIGNING_KEY_ID RPM_SIGNING_PASSPHRASE_SECRETS_ARN RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN
+                    RPM_RELEASE_SIGNING_KEY_ID RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN)
+          COMMAND="rpm --addsign (${SIGNING_EMAIL} key) ${ARTIFACT_PATH}"
+        else
+          case "${PLATFORM}" in
+            linux) PREFIX=SIGNER_CLIENT ;;
+            windows) PREFIX=SIGNER_WINDOWS ;;
+            mac) PREFIX=SIGNER_MAC ;;
+            jar_signer) PREFIX=JAR_SIGNER ;;
+            *) fail "platform must be linux, windows, mac or jar_signer, got '${PLATFORM}'." ;;
+          esac
+          REQUIRED=("${PREFIX}_ROLE" "${PREFIX}_EXTERNAL_ID" "${PREFIX}_UNSIGNED_BUCKET" "${PREFIX}_SIGNED_BUCKET")
+          if [ "${PLATFORM}" = windows ]; then
+            REQUIRED+=(SIGNER_WINDOWS_PROFILE_IDENTIFIER SIGNER_WINDOWS_PLATFORM_IDENTIFIER)
+          fi
+          # signArtifacts.groovy generateArguments(): the path first, then one --key value per argument.
+          ARGS=("${ARTIFACT_PATH}" --sigtype "${SIGTYPE}" --platform "${PLATFORM}" --email "${SIGNING_EMAIL}")
+          [ -n "${ARTIFACT_TYPE}" ] && ARGS+=(--type "${ARTIFACT_TYPE}")
+          if [ -n "${COMPONENTS}" ]; then
+            read -r -a COMPONENT_LIST <<< "${COMPONENTS}"
+            ARGS+=(--component "${COMPONENT_LIST[@]}")
+          fi
+          [ "${OVERWRITE}" = 'true' ] && ARGS+=(--overwrite)
+          COMMAND="./sign.sh ${ARGS[*]}"
+          printf '%s\0' "${ARGS[@]}" > "${RUNNER_TEMP}/sign-artifacts-args"
+        fi
+        echo "command=${COMMAND}" >> "$GITHUB_OUTPUT"
+        echo "Signing command: ${COMMAND}"
+        if [ "${DRY_RUN}" = 'true' ]; then
+          echo "::notice::sign-artifacts dry run: nothing signed. A real run needs role-to-assume and these env vars: ${REQUIRED[*]}"
+          exit 0
+        fi
+        [ -n "${ROLE_TO_ASSUME}" ] || fail "role-to-assume is empty. Pass secrets.AWS_ROLE_RPM_SIGNING (rpm) or secrets.AWS_ROLE_SIGNING_BASE (signer client)."
+        MISSING=()
+        for VAR in "${REQUIRED[@]}"; do
+          [ -n "${!VAR:-}" ] || MISSING+=("${VAR}")
+        done
+        if [ "${#MISSING[@]}" -gt 0 ]; then
+          fail "Missing signing env vars: ${MISSING[*]}. Export them from the release-environment secrets of the same names."
+        fi
+
+    - name: Assume the signing role
+      if: ${{ inputs.dry-run != 'true' }}
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+      with:
+        role-to-assume: ${{ inputs.role-to-assume }}
+        role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+        role-duration-seconds: 900
+        audience: sts.amazonaws.com
+        aws-region: ${{ inputs.sigtype == '.rpm' && inputs.rpm-secrets-region || inputs.aws-region }}
+
+    - name: Sign RPM packages
+      if: ${{ inputs.dry-run != 'true' && inputs.sigtype == '.rpm' }}
+      shell: bash
+      env:
+        ARTIFACT_PATH: ${{ inputs.artifact-path }}
+        SIGNING_EMAIL: ${{ inputs.email }}
+        SECRETS_REGION: ${{ inputs.rpm-secrets-region }}
+        RPMMACROS_TEMPLATE: ${{ github.action_path }}/../../../scripts/pkg/sign_templates/rpmmacros
+      run: |
+        set -euo pipefail
+        set +x
+        gpg_version_requirement='2.2.0'
+        # https://bugzilla.redhat.com/show_bug.cgi?id=227632
+        rpm_version_requirement='4.13.0'
+        gpg_version=$(gpg --version | head -n 1 | grep -oE '[0-9.]+' | head -n 1)
+        rpm_version=$(rpm --version | head -n 1 | grep -oE '[0-9.]+' | head -n 1)
+        echo "gpg ${gpg_version} (needs ${gpg_version_requirement}), rpm ${rpm_version} (needs ${rpm_version_requirement})"
+        if [ "$(printf '%s\n%s\n' "${gpg_version}" "${gpg_version_requirement}" | sort -V | head -n 1)" != "${gpg_version_requirement}" ] \
+          || [ "$(printf '%s\n%s\n' "${rpm_version}" "${rpm_version_requirement}" | sort -V | head -n 1)" != "${rpm_version_requirement}" ]; then
+          echo '::error::gpg or rpm is older than required.'
+          exit 1
+        fi
+        GPG_TTY=$(tty || true)
+        export GPG_TTY
+
+        PASSPHRASE_SECRETS_ARN="${RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN}"
+        SECRET_KEY_ID_SECRETS_ARN="${RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN}"
+        KEY_ID="${RPM_RELEASE_SIGNING_KEY_ID}"
+        KEY_NAME='OpenSearch Project'
+        if [ "${SIGNING_EMAIL}" = 'opensearch@amazon.com' ]; then
+          PASSPHRASE_SECRETS_ARN="${RPM_SIGNING_PASSPHRASE_SECRETS_ARN}"
+          SECRET_KEY_ID_SECRETS_ARN="${RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN}"
+          KEY_ID="${RPM_SIGNING_KEY_ID}"
+          KEY_NAME='OpenSearch project'
+        fi
+
+        PASSPHRASE_FILE=$(mktemp)
+        # The imported private key and the passphrase must not outlive the step, even when signing fails.
+        cleanup() {
+          gpg --batch --yes --delete-secret-keys "${KEY_ID}" > /dev/null 2>&1 || true
+          gpg --batch --yes --delete-keys "${KEY_ID}" > /dev/null 2>&1 || true
+          rm -f "${PASSPHRASE_FILE}"
+        }
+        trap cleanup EXIT
+
+        cp "${RPMMACROS_TEMPLATE}" ~/.rpmmacros
+        sed -i "s/##key_name##/${KEY_NAME}/g;s|##passphrase_name##|${PASSPHRASE_FILE}|g" ~/.rpmmacros
+
+        aws secretsmanager get-secret-value --region "${SECRETS_REGION}" --secret-id "${PASSPHRASE_SECRETS_ARN}" \
+          | jq -r .SecretBinary | base64 --decode > "${PASSPHRASE_FILE}"
+        aws secretsmanager get-secret-value --region "${SECRETS_REGION}" --secret-id "${SECRET_KEY_ID_SECRETS_ARN}" \
+          | jq -r .SecretBinary | base64 --decode \
+          | gpg --quiet --import --pinentry-mode loopback --passphrase-file "${PASSPHRASE_FILE}" -
+
+        sign_rpm() {
+          rpm --addsign "$1"
+          rpm -qip "$1" | grep Signature
+        }
+        if [ -d "${ARTIFACT_PATH}" ]; then
+          for rpm_file in "${ARTIFACT_PATH}"/*; do
+            if file "${rpm_file}" | grep -q RPM; then
+              sign_rpm "${rpm_file}"
+            fi
+          done
+        elif file "${ARTIFACT_PATH}" | grep -q RPM; then
+          sign_rpm "${ARTIFACT_PATH}"
+        else
+          echo "::error::${ARTIFACT_PATH} is neither a directory nor an RPM package."
+          exit 1
+        fi
+
+    - name: Sign with the signer client
+      if: ${{ inputs.dry-run != 'true' && inputs.sigtype != '.rpm' }}
+      shell: bash
+      env:
+        PLATFORM: ${{ inputs.platform }}
+        SIGN_SH: ${{ github.action_path }}/../../../sign.sh
+      run: |
+        set -euo pipefail
+        set +x
+        case "${PLATFORM}" in
+          linux)
+            # importPGPKey(): the public keys sign_workflow verifies the new signatures against.
+            curl -sSfL --proto '=https' https://artifacts.opensearch.org/publickeys/opensearch.pgp | gpg --import -
+            curl -sSfL --proto '=https' https://artifacts.opensearch.org/publickeys/opensearch-release.pgp | gpg --import -
+            PREFIX=SIGNER_CLIENT
+            ;;
+          windows) PREFIX=SIGNER_WINDOWS ;;
+          mac) PREFIX=SIGNER_MAC ;;
+          jar_signer) PREFIX=JAR_SIGNER ;;
+        esac
+        # The signer client reads these generic names (signArtifacts.groovy exported them the same way).
+        ROLE_VAR="${PREFIX}_ROLE"; EXTERNAL_ID_VAR="${PREFIX}_EXTERNAL_ID"
+        UNSIGNED_VAR="${PREFIX}_UNSIGNED_BUCKET"; SIGNED_VAR="${PREFIX}_SIGNED_BUCKET"
+        export ROLE="${!ROLE_VAR}" EXTERNAL_ID="${!EXTERNAL_ID_VAR}"
+        export UNSIGNED_BUCKET="${!UNSIGNED_VAR}" SIGNED_BUCKET="${!SIGNED_VAR}"
+        if [ "${PLATFORM}" = windows ]; then
+          export PROFILE_IDENTIFIER="${SIGNER_WINDOWS_PROFILE_IDENTIFIER}" PLATFORM_IDENTIFIER="${SIGNER_WINDOWS_PLATFORM_IDENTIFIER}"
+        fi
+        ARGS=()
+        while IFS= read -r -d '' arg; do
+          ARGS+=("${arg}")
+        done < "${RUNNER_TEMP}/sign-artifacts-args"
+        "${SIGN_SH}" "${ARGS[@]}"

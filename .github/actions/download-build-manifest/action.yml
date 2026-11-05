@@ -1,0 +1,104 @@
+---
+name: 'Download build manifest'
+description: >-
+  Port of the shared-library step downloadBuildManifest() (opensearch-build-libraries vars/downloadBuildManifest.groovy):
+  `curl --retry 5` a build manifest to a local path. Also returns the BuildManifest accessors the test and promotion
+  pipelines read next (artifact root, package name, components) and the `runs-on` label array of the matching
+  self-hosted pool from ADR 0001.
+
+inputs:
+  url:
+    description: 'Build manifest URL (https://, or file:// for a manifest already on the runner)'
+    required: true
+  path:
+    description: 'Local path the manifest is written to'
+    required: false
+    default: 'build-manifest.yml'
+  job-name:
+    description: 'Build job the artifacts belong to, the first segment of the artifact root (Jenkins BUILD_JOB_NAME)'
+    required: false
+    default: 'distribution-build-opensearch'
+  build-number:
+    description: 'Build number segment of the artifact root. Empty uses build.id of the manifest.'
+    required: false
+    default: ''
+  public-artifact-url:
+    description: 'Public base URL of the artifact bucket'
+    required: false
+    default: 'https://ci.opensearch.org/ci/dbc'
+
+outputs:
+  manifest-file:
+    description: 'Path the manifest was written to'
+    value: ${{ inputs.path }}
+  build-id:
+    description: 'build.id'
+    value: ${{ steps.info.outputs.build-id }}
+  name:
+    description: 'build.name'
+    value: ${{ steps.info.outputs.name }}
+  version:
+    description: 'build.version'
+    value: ${{ steps.info.outputs.version }}
+  platform:
+    description: 'build.platform'
+    value: ${{ steps.info.outputs.platform }}
+  architecture:
+    description: 'build.architecture'
+    value: ${{ steps.info.outputs.architecture }}
+  distribution:
+    description: 'build.distribution'
+    value: ${{ steps.info.outputs.distribution }}
+  package-name:
+    description: 'Bundle file name, e.g. opensearch-3.9.0-linux-x64.tar.gz'
+    value: ${{ steps.info.outputs.package-name }}
+  min-artifact:
+    description: 'First dist artifact of the core component'
+    value: ${{ steps.info.outputs.min-artifact }}
+  artifact-root:
+    description: 'Artifact root inside the artifact bucket: <job>/<version>/<build>/<platform>/<arch>/<distribution>'
+    value: ${{ steps.info.outputs.artifact-root }}
+  artifact-root-url:
+    description: 'Public URL of the artifact root'
+    value: ${{ steps.info.outputs.artifact-root-url }}
+  index-file-root:
+    description: 'Prefix of the index.json written by uploadIndexFile'
+    value: ${{ steps.info.outputs.index-file-root }}
+  components:
+    description: 'JSON array of component names'
+    value: ${{ steps.info.outputs.components }}
+  runs-on:
+    description: 'JSON label array of the Docker-host runner pool for this platform/architecture (ADR 0001 label map)'
+    value: ${{ steps.info.outputs.runs-on }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Download the build manifest
+      shell: bash
+      env:
+        MANIFEST_PATH: ${{ inputs.path }}
+        URL: ${{ inputs.url }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "${MANIFEST_PATH}")"
+        # --fail so an S3/CloudFront error page is never written out and parsed as the manifest.
+        curl -sSL --fail --retry 5 --proto '=https,file' "${URL}" --output "${MANIFEST_PATH}"
+        echo "Downloaded ${URL} to ${MANIFEST_PATH}"
+
+    - name: Read the build manifest
+      id: info
+      shell: bash
+      env:
+        MANIFEST_PATH: ${{ inputs.path }}
+        JOB_NAME: ${{ inputs.job-name }}
+        BUILD_NUMBER: ${{ inputs.build-number }}
+        PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+      run: |
+        set -euo pipefail
+        bash "${GITHUB_ACTION_PATH}/../../scripts/ensure-pyyaml.sh"
+        ARGS=(build-manifest-info "${MANIFEST_PATH}" --job-name "${JOB_NAME}" --public-artifact-url "${PUBLIC_ARTIFACT_URL}")
+        if [ -n "${BUILD_NUMBER}" ]; then
+          ARGS+=(--build-number "${BUILD_NUMBER}")
+        fi
+        python3 "${GITHUB_ACTION_PATH}/../../scripts/manifest_paths.py" "${ARGS[@]}" | tee -a "$GITHUB_OUTPUT"

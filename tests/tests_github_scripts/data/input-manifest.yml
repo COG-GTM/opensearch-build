@@ -1,0 +1,25 @@
+---
+schema-version: '1.2'
+build:
+  name: OpenSearch Dashboards
+  version: 3.9.0
+  qualifier: alpha1
+ci:
+  image:
+    linux:
+      tar:
+        name: opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-dashboards-build-v1
+        args: -e JAVA_HOME=/opt/java/openjdk-21 --entrypoint=/usr/sbin/init
+      rpm:
+        name: opensearchstaging/ci-runner:ci-runner-almalinux8-systemd-base-integtest-v1
+        args: -e JAVA_HOME=/opt/java/openjdk-21 --entrypoint /usr/sbin/init
+components:
+  - name: OpenSearch-Dashboards
+    repository: https://github.com/opensearch-project/OpenSearch-Dashboards.git
+    ref: main
+  - name: alertingDashboards
+    repository: https://github.com/opensearch-project/alerting-dashboards-plugin
+    ref: main
+  - name: securityDashboards
+    repository: https://github.com/opensearch-project/security-dashboards-plugin.git
+    ref: main

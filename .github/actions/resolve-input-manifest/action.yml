@@ -1,0 +1,131 @@
+---
+name: 'Resolve input manifest'
+description: >-
+  Checks out opensearch-build and resolves an input manifest the way the Jenkins pipelines did with
+  `checkout scm` + `InputManifest.new(readYaml(file: "manifests/${INPUT_MANIFEST}"))` and detectDockerAgent().
+  Outputs the manifest path, build metadata and the CI-runner image for one platform/distribution. Replaces the
+  manifest-reading preamble of every distribution-build, check-for-build and test pipeline (docs/jenkins-gha-inventory.md, s1.2).
+
+inputs:
+  input-manifest:
+    description: >-
+      Input manifest, either relative to manifests/ as the Jenkins INPUT_MANIFEST parameter was
+      (e.g. "3.9.0/opensearch-3.9.0.yml") or with the manifests/ prefix. It must resolve to a file under manifests/.
+    required: true
+  checkout:
+    description: >-
+      Check out the repository into `path` first. Set to 'false' when the job already checked out the ref it wants
+      (a local `uses: ./.github/actions/...` needs a checkout before it can run).
+    required: false
+    default: 'true'
+  repository:
+    description: 'Repository to check out'
+    required: false
+    default: ${{ github.repository }}
+  ref:
+    description: 'Branch, tag or SHA to check out. Empty checks out the ref of the triggering event.'
+    required: false
+    default: ''
+  path:
+    description: 'Directory (relative to the workspace) the repository is or gets checked out in'
+    required: false
+    default: '.'
+  platform:
+    description: 'Platform whose CI image is resolved: linux or windows'
+    required: false
+    default: 'linux'
+  distribution:
+    description: 'Distribution whose CI image is resolved: tar, rpm, deb or zip'
+    required: false
+    default: 'tar'
+
+outputs:
+  manifest-path:
+    description: 'Manifest path relative to `path`, e.g. manifests/3.9.0/opensearch-3.9.0.yml'
+    value: ${{ steps.resolve.outputs.manifest-path }}
+  manifest-file:
+    description: 'Absolute path of the manifest on the runner'
+    value: ${{ steps.resolve.outputs.manifest-file }}
+  sha:
+    description: 'Commit of the checkout the manifest was read from'
+    value: ${{ steps.resolve.outputs.sha }}
+  name:
+    description: 'build.name, e.g. OpenSearch'
+    value: ${{ steps.info.outputs.name }}
+  version:
+    description: 'build.version'
+    value: ${{ steps.info.outputs.version }}
+  qualifier:
+    description: 'build.qualifier, empty when unset'
+    value: ${{ steps.info.outputs.qualifier }}
+  revision:
+    description: 'version, or version-qualifier when a qualifier is set'
+    value: ${{ steps.info.outputs.revision }}
+  filename:
+    description: 'Lower-case, dash-separated product name, e.g. opensearch-dashboards'
+    value: ${{ steps.info.outputs.filename }}
+  components:
+    description: 'JSON array of component names'
+    value: ${{ steps.info.outputs.components }}
+  ci-image:
+    description: 'CI-runner image for `platform`/`distribution` (detectDockerAgent)'
+    value: ${{ steps.info.outputs.image }}
+  ci-args:
+    description: 'Container options for that image, with the options GitHub Actions rejects dropped'
+    value: ${{ steps.info.outputs.args }}
+  java-version:
+    description: 'JDK the image args select, e.g. openjdk-25'
+    value: ${{ steps.info.outputs.java-version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check out ${{ inputs.repository }}
+      if: ${{ inputs.checkout == 'true' }}
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.ref }}
+        path: ${{ inputs.path }}
+        persist-credentials: false
+
+    - name: Resolve the manifest path
+      id: resolve
+      shell: bash
+      env:
+        CHECKOUT_PATH: ${{ inputs.path }}
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
+      run: |
+        set -euo pipefail
+        ROOT=$(cd "${GITHUB_WORKSPACE}/${CHECKOUT_PATH}" && pwd -P)
+        RELATIVE="${INPUT_MANIFEST#./}"
+        RELATIVE="${RELATIVE#manifests/}"
+        if [ -z "${RELATIVE}" ] || [ ! -f "${ROOT}/manifests/${RELATIVE}" ]; then
+          echo "::error::Input manifest '${INPUT_MANIFEST}' not found under ${CHECKOUT_PATH}/manifests/."
+          exit 1
+        fi
+        FILE=$(realpath "${ROOT}/manifests/${RELATIVE}")
+        case "${FILE}" in
+          "${ROOT}/manifests/"*) ;;
+          *) echo "::error::Input manifest '${INPUT_MANIFEST}' resolves outside manifests/."; exit 1 ;;
+        esac
+        {
+          echo "manifest-path=${FILE#"${ROOT}/"}"
+          echo "manifest-file=${FILE}"
+          echo "sha=$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null || true)"
+        } >> "$GITHUB_OUTPUT"
+        echo "Resolved ${INPUT_MANIFEST} to ${FILE#"${ROOT}/"}"
+
+    - name: Read the manifest
+      id: info
+      shell: bash
+      env:
+        MANIFEST_FILE: ${{ steps.resolve.outputs.manifest-file }}
+        PLATFORM: ${{ inputs.platform }}
+        DISTRIBUTION: ${{ inputs.distribution }}
+        SCRIPT: ${{ github.action_path }}/../../scripts/manifest_paths.py
+      run: |
+        set -euo pipefail
+        bash "${GITHUB_ACTION_PATH}/../../scripts/ensure-pyyaml.sh"
+        python3 "${SCRIPT}" input-manifest-info "${MANIFEST_FILE}" | tee -a "$GITHUB_OUTPUT"
+        python3 "${SCRIPT}" ci-image "${MANIFEST_FILE}" --kind input --platform "${PLATFORM}" --distribution "${DISTRIBUTION}" | tee -a "$GITHUB_OUTPUT"

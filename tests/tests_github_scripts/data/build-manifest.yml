@@ -1,0 +1,26 @@
+---
+schema-version: '1.2'
+build:
+  architecture: arm64
+  distribution: tar
+  id: '11089'
+  name: OpenSearch
+  platform: linux
+  version: 3.9.0
+components:
+  - name: OpenSearch
+    repository: https://github.com/opensearch-project/OpenSearch.git
+    ref: main
+    commit_id: 0123456789abcdef0123456789abcdef01234567
+    version: 3.9.0
+    artifacts:
+      dist:
+        - dist/opensearch-min-3.9.0-linux-arm64.tar.gz
+  - name: common-utils
+    repository: https://github.com/opensearch-project/common-utils.git
+    ref: main
+    commit_id: 89abcdef0123456789abcdef0123456789abcdef
+    version: 3.9.0.0
+    artifacts:
+      maven:
+        - maven/org/opensearch/common-utils/3.9.0.0/common-utils-3.9.0.0.jar
