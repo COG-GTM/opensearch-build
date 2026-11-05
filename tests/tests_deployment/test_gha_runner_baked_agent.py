@@ -48,6 +48,13 @@ class TestGhaRunnerBakedAgent(unittest.TestCase):
             self.assertEqual(re.findall(r"(?<!\$)\$\{([^}]+)\}", content), ["min_runner_version"], ext)
         self.assertRegex(json.loads(read(RUNNER_VERSION_JSON))["version"], r"^\d+\.\d+\.\d+$")
 
+    def test_start_runner_runs_from_agent_directory(self) -> None:
+        # The module's start scripts call ./config.sh / ./run.sh (.\\run.cmd); install_runner used to cd there.
+        sh = read(os.path.join(TEMPLATES, "baked-runner.sh.tftpl")).rstrip()
+        ps1 = read(os.path.join(TEMPLATES, "baked-runner.ps1.tftpl")).rstrip()
+        self.assertTrue(sh.endswith('cd "$runner_dir"'))
+        self.assertTrue(ps1.endswith("Set-Location C:\\actions-runner"))
+
 
 class TestBakedRunnerShellCheck(unittest.TestCase):
     MIN_VERSION = "2.338.2"
@@ -76,16 +83,17 @@ class TestBakedRunnerShellCheck(unittest.TestCase):
         script = script.replace("/opt/actions-runner", runner_dir).replace("/opt/hostedtoolcache", os.path.join(tmp, "toolcache"))
         script = script.replace("/Users/runner", os.path.join(tmp, "runner-home"))
         env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
-        result = subprocess.run(["bash", "-e", "-c", f"user_name=ec2-user\n{script}\necho START_RUNNER"],
+        result = subprocess.run(["bash", "-e", "-c", f"user_name=ec2-user\ncd /\n{script}\necho START_RUNNER in $PWD"],
                                 capture_output=True, text=True, env=env)
         result.calls = read(calls) if os.path.exists(calls) else ""  # type: ignore
+        result.runner_dir = runner_dir  # type: ignore
         return result
 
     def test_current_agent_starts(self) -> None:
         result = self.run_check(self.MIN_VERSION)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"Using baked actions/runner {self.MIN_VERSION}", result.stdout)
-        self.assertIn("START_RUNNER", result.stdout)
+        self.assertIn(f"START_RUNNER in {result.runner_dir}", result.stdout)  # type: ignore
         self.assertNotIn("terminate-instances", result.calls)  # type: ignore
 
     def test_newer_agent_starts(self) -> None:

@@ -1,4 +1,12 @@
 # shellcheck shell=bash
+
+# Copyright OpenSearch Contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# The OpenSearch Contributors require contributions made to
+# this file be licensed under the Apache-2.0 license or a
+# compatible open source license.
+
 ## Baked GitHub Actions runner agent (deployment/packer/gha-runner/runner-version.json).
 # Rendered by runners.tf into the pool's userdata_post_install. Replaces the module's install_runner:
 # nothing is downloaded at boot. A missing or older agent stops the instance before the runner registers.
@@ -48,3 +56,6 @@ else
   mkdir -p /opt/hostedtoolcache
   chown -R "$user_name":"$user_name" "$runner_dir" /opt/hostedtoolcache
 fi
+
+# The module's start_runner (which replaced install_runner's cd) runs ./config.sh and ./run.sh from here.
+cd "$runner_dir"
