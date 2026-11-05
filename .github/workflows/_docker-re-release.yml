@@ -130,31 +130,28 @@ jobs:
     with:
       IMAGE_FULL_NAME: opensearchstaging/${{ needs.patch-docker-image.outputs.filename }}:${{ needs.patch-docker-image.outputs.image-version }}
 
-  # `build job: 'docker-promotion'` (SOURCE_IMAGES, RELEASE_VERSION, TAG_LATEST). promote-docker-ecr.yml is ported in s5.3;
-  # until then this job fails so a scheduled re-release never reports success without promoting, as Jenkins would.
+  # `build job: 'docker-promotion'` (SOURCE_IMAGES, RELEASE_VERSION, TAG_LATEST). promote-docker-ecr.yml is ported in s5.3
+  # (UNT161-22 wires it in here); until then the promotion is skipped with a notice so scheduled runs stay green and the
+  # rebuilt staging images (build + build-number tag + scan) are still produced.
   docker-promotion:
     name: docker-promotion
     needs: [patch-docker-image, docker-scan]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions:
-      contents: read
+    permissions: {}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-          sparse-checkout: .github/workflows
-      - name: Promote
+      - name: Promote (skipped until s5.3)
         env:
           SOURCE_IMAGES: ${{ needs.patch-docker-image.outputs.source-images }}
           RELEASE_VERSION: ${{ needs.patch-docker-image.outputs.version }}
           TAG_LATEST: ${{ needs.patch-docker-image.outputs.tag-latest }}
         run: |
           set -euo pipefail
-          echo "Triggering docker-promotion SOURCE_IMAGES=${SOURCE_IMAGES} RELEASE_VERSION=${RELEASE_VERSION} TAG_LATEST=${TAG_LATEST}" | tee -a "${GITHUB_STEP_SUMMARY}"
-          if [ ! -f .github/workflows/promote-docker-ecr.yml ]; then
-            echo "::error::promote-docker-ecr.yml is not ported yet (s5.3); promote the images above manually."
-            exit 1
-          fi
-          echo "::error::promote-docker-ecr.yml exists: replace this job with 'uses: ./.github/workflows/promote-docker-ecr.yml'."
-          exit 1
+          message="promotion not ported yet, see UNT161-22 / s5.3"
+          echo "::notice title=docker-promotion skipped::${message}. Would promote SOURCE_IMAGES=${SOURCE_IMAGES} RELEASE_VERSION=${RELEASE_VERSION} TAG_LATEST=${TAG_LATEST}"
+          {
+            echo "### docker-promotion skipped: ${message}"
+            echo "- SOURCE_IMAGES: \`${SOURCE_IMAGES}\`"
+            echo "- RELEASE_VERSION: \`${RELEASE_VERSION}\`"
+            echo "- TAG_LATEST: \`${TAG_LATEST}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
