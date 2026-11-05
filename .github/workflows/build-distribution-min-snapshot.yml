@@ -1,17 +1,18 @@
 ---
-# Dry run of the reusable _build-distribution.yml and _integ-test.yml on a GitHub-hosted runner, without AWS secrets:
-# builds the OpenSearch min snapshot (buildManifest(componentName: "OpenSearch", snapshot: true), as
-# publish-min-snapshots.jenkinsfile does) for linux x64 tar, keeps the build record in the run instead of uploading it,
+# Real build through the reusable _build-distribution.yml and _integ-test.yml on a GitHub-hosted runner until the
+# ADR 0001 self-hosted pools exist: ./build.sh + ./assemble.sh of the OpenSearch min snapshot (buildManifest(componentName: "OpenSearch", snapshot: true), as
+# publish-min-snapshots.jenkinsfile does) for linux x64 tar inside the docker/ci image. The S3 upload is skipped with a
+# notice while AWS_ROLE_ARTIFACTS is unset. The build record (manifests + file list) is kept in the run,
 # and diffs its file names and manifest layout against the latest Jenkins distribution-build-opensearch build of the
 # same version. The integ-test leg runs one component against that Jenkins build's public artifacts.
-name: build-distribution-dry-run
+name: build-distribution-min-snapshot
 
 on:
   pull_request:
     paths:
       - .github/workflows/_build-distribution.yml
       - .github/workflows/_integ-test.yml
-      - .github/workflows/build-distribution-dry-run.yml
+      - .github/workflows/build-distribution-min-snapshot.yml
       - .github/actions/assemble-upload/**
       - .github/scripts/manifest_paths.py
       - .github/scripts/compare_build_layout.py
@@ -31,7 +32,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: build-distribution-dry-run-${{ github.ref }}
+  group: build-distribution-min-snapshot-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -47,8 +48,10 @@ jobs:
       architecture: x64
       component-name: OpenSearch
       snapshot: true
-      upload: false
       runs-on: '["ubuntu-24.04"]'
+    secrets:
+      AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
 
   jenkins:
     name: latest Jenkins build

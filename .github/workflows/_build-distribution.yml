@@ -66,7 +66,9 @@ on:
         default: '4'
         type: string
       upload:
-        description: 'Upload builds/ and dist/ to the artifact bucket. false keeps everything inside the run (dry runs).'
+        description: >-
+          Upload builds/ and dist/ to the artifact bucket. Skipped with a notice when AWS_ROLE_ARTIFACTS or
+          ARTIFACT_BUCKET_NAME is not set; false never uploads.
         required: false
         default: true
         type: boolean
@@ -297,6 +299,7 @@ jobs:
       version: ${{ steps.assemble.outputs.version }}
       package-name: ${{ steps.assemble.outputs.package-name }}
       min-artifact: ${{ steps.assemble.outputs.min-artifact }}
+      uploaded: ${{ steps.creds.outputs.upload }}
     defaults:
       run:
         shell: bash
@@ -356,6 +359,20 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Check the upload credentials
+        id: creds
+        env:
+          UPLOAD: ${{ inputs.upload }}
+          ROLE: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+          BUCKET: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+        run: |
+          if [ "${UPLOAD}" = true ] && { [ -z "${ROLE}" ] || [ -z "${BUCKET}" ]; }; then
+            echo "::notice::S3 upload skipped: AWS_ROLE_ARTIFACTS / ARTIFACT_BUCKET_NAME are not configured. Build and assemble still ran; the build record is kept in the run."
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "upload=${UPLOAD}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Assemble and upload
         id: assemble
         if: ${{ needs.setup.outputs.package != 'true' }}
@@ -366,7 +383,7 @@ jobs:
           job-name: ${{ inputs.job-name }}
           build-number: ${{ github.run_id }}
           public-artifact-url: ${{ inputs.public-artifact-url }}
-          upload: ${{ inputs.upload }}
+          upload: ${{ steps.creds.outputs.upload }}
           role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
           bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
           update-latest-url: ${{ inputs.update-latest-url }}
@@ -435,6 +452,20 @@ jobs:
           name: builds-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
           path: ${{ needs.setup.outputs.distribution }}/builds
 
+      - name: Check the upload credentials
+        id: creds
+        env:
+          UPLOAD: ${{ inputs.upload }}
+          ROLE: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+          BUCKET: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+        run: |
+          if [ "${UPLOAD}" = true ] && { [ -z "${ROLE}" ] || [ -z "${BUCKET}" ]; }; then
+            echo "::notice::S3 upload skipped: AWS_ROLE_ARTIFACTS / ARTIFACT_BUCKET_NAME are not configured. Build and assemble still ran; the build record is kept in the run."
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "upload=${UPLOAD}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Assemble and upload
         id: assemble
         uses: ./.github/actions/assemble-upload
@@ -444,7 +475,7 @@ jobs:
           job-name: ${{ inputs.job-name }}
           build-number: ${{ github.run_id }}
           public-artifact-url: ${{ inputs.public-artifact-url }}
-          upload: ${{ inputs.upload }}
+          upload: ${{ steps.creds.outputs.upload }}
           role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
           bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
           update-latest-url: ${{ inputs.update-latest-url }}
@@ -477,7 +508,7 @@ jobs:
     # and the bundle are copied to release-candidates/{core,bundle}/<filename>/<version>/ with the promotion role.
     name: release-candidate-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
     needs: [setup, build, assemble]
-    if: ${{ always() && inputs.release-candidate-upload && inputs.upload && (needs.assemble.result == 'success' || (needs.assemble.result == 'skipped' && needs.build.result == 'success')) }}
+    if: ${{ always() && inputs.release-candidate-upload && inputs.upload && needs.build.outputs.uploaded != 'false' && (needs.assemble.result == 'success' || (needs.assemble.result == 'skipped' && needs.build.result == 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     environment: release
