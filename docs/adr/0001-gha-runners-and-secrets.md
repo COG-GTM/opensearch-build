@@ -20,7 +20,7 @@ GitHub Actions has to keep three things identical: the hardware/OS a job runs on
 3. **Scale from zero on `workflow_job` events.** s2.4 provisions this with a maintained autoscaler for ephemeral EC2 runners (the `github-aws-runners/terraform-aws-github-runner` Terraform module unless s2.4 records a better fit), one runner pool per row of the label map below, in a runner group restricted to `COG-GTM/opensearch-build`. macOS pools keep their dedicated hosts allocated (EC2 Mac hosts have a 24 h minimum) and re-launch the instance from the AMI after each job.
 4. **Self-hosted runners never run untrusted code.** No workflow on a self-hosted label triggers on `pull_request` / `pull_request_target` from forks; ports use `workflow_dispatch`, `schedule`, `workflow_call`, `repository_dispatch` and `push` to protected branches. The existing PR-checking workflows (`python-tests.yml`, `groovy-tests.yml`, `workflow-lint.yml`, …) stay on GitHub-hosted `ubuntu-latest`.
 5. **Instance profile grants nothing a job needs.** The runner's instance profile only allows what the runner itself needs to boot (SSM / CloudWatch agent, ECR pull for the CI images). Every AWS call a job makes goes through the OIDC roles in section 2, so a job only gets the role its workflow asks for.
-6. **Timeouts and concurrency are explicit.** Every job sets `timeout-minutes` from the Jenkins `timeout(...)` option (e.g. `distribution-build` 240, `benchmark-test` 1440; self-hosted jobs can run up to 5 days) and every workflow that had `disableConcurrentBuilds` / `skipIfLocked` gets a `concurrency:` group.
+6. **Timeouts and concurrency are explicit.** Every job sets `timeout-minutes` from the Jenkins `timeout(...)` option (e.g. `distribution-build` 240, `benchmark-test` 1440). Self-hosted jobs are capped at 5 days (7200 min), so `benchmark-test-endpoint` (10 days in Jenkins) cannot keep its timeout: s4.5 caps it at 7200 min or splits the run into resumable jobs. Every workflow that had `disableConcurrentBuilds` gets a `concurrency:` group. `skipIfLocked` (`check-for-build`) is different: a `concurrency:` group queues the duplicate instead of dropping it, so that port starts with a guard job that exits early when another run of the same workflow and inputs is `in_progress` (via `gh run list`), and the build jobs depend on it.
 
 #### Label map
 
@@ -68,7 +68,7 @@ Every AWS call uses `aws-actions/configure-aws-credentials` (pinned by SHA) with
 | `opensearch-bundle` @ `aws-accounts/jenkins-aws-account-public` | `AWS_ROLE_ARTIFACTS` | main / ci, release | 900 s | `promote-artifacts`, `sign-standalone-artifacts` (`uploadToS3`), artifact reads (`downloadFromS3`) |
 | `jenkins-artifact-promotion-role` (`aws-iam-roles/`) @ `aws-accounts/jenkins-aws-production-account` | `AWS_ROLE_PROMOTION` | release | 900 s | `promote-artifacts`, `promote-repos`, `promote-docker-ecr` / production `docker-copy` (ECR Public login), `publish-min-snapshots`, `release-promotion` (CloudFront invalidation) |
 | `jenkins-prod-rpm-signing-assume-role` @ `rpm-signing/jenkins-rpm-signing-account-number` | `AWS_ROLE_RPM_SIGNING` | release | 900 s | `promote-repos`, `sign-standalone-artifacts` (RPM) |
-| `opensearch-full-access-nightlies` @ `aws-accounts/perf-test-account-id` | `AWS_ROLE_BENCHMARK` | benchmark | 43200 s (role `MaxSessionDuration` must be 12 h) | `benchmark-test`, `benchmark-test-endpoint`, `benchmark-pull-request`, `benchmark-compare` |
+| `opensearch-full-access-nightlies` @ `aws-accounts/perf-test-account-id` | `AWS_ROLE_BENCHMARK` | benchmark | 43200 s (role `MaxSessionDuration` 12 h, the IAM maximum); benchmark jobs run up to 24 h, so each phase that calls AWS re-runs `configure-aws-credentials` instead of reusing the first session | `benchmark-test`, `benchmark-test-endpoint`, `benchmark-pull-request`, `benchmark-compare` |
 | `opensearch-packer` @ `aws-accounts/jenkins-aws-account-public-lf` | `AWS_ROLE_PACKER` | main / ci | 3600 s | `packer-build` |
 | agent instance profile (signer client base identity) | `AWS_ROLE_SIGNING_BASE` | release | 900 s | `sign-standalone-artifacts`, `promote-repos`; the `SIGNER_*_ROLE` trust policies must allow this role |
 | agent instance profile (Bedrock) | `BEDROCK_ACCESS_ROLE` (exists, reused) | main / ci | 900 s | `release-notes-generate` |
@@ -91,12 +91,12 @@ Repository-level secrets hold only the non-release role ARNs, the GitHub App cre
 
 #### Secret list for p2
 
-Names only; values are copied from the 1Password item in the **Replaces** column (or, for role ARNs, from the role s2.4 creates). Every name below is referenced as `${{ secrets.NAME }}`; no value is ever committed.
+Names only; values are copied from the 1Password item in the **Replaces** column, except role ARNs (from the roles s2.4 creates) and `GH_APP_ID` / `GH_APP_PRIVATE_KEY` (from the new GitHub App s2.4 registers; the bot username/token they replace cannot mint installation tokens). Every name below is referenced as `${{ secrets.NAME }}`; no value is ever committed.
 
 | Secret | Scope | Replaces (Jenkins / `op://opensearch-release-secrets/…`) | Used by |
 | --- | --- | --- | --- |
-| `GH_APP_ID` | repo | `github-bot/ci-bot-username` | every job that writes to GitHub beyond `GITHUB_TOKEN` |
-| `GH_APP_PRIVATE_KEY` | repo | `github-bot/ci-bot-token`, `jenkins-github-bot-token` | same |
+| `GH_APP_ID` | repo | `github-bot/ci-bot-username` (new value: the App's ID) | every job that writes to GitHub beyond `GITHUB_TOKEN` |
+| `GH_APP_PRIVATE_KEY` | repo | `github-bot/ci-bot-token`, `jenkins-github-bot-token` (new value: the App's private key) | same |
 | `AWS_ROLE_METRICS` | repo | `OpenSearchJenkinsAccessRole` + `aws-accounts/jenkins-health-metrics-account-number` | see role table |
 | `AWS_ROLE_TEST_RESULTS` | repo | `opensearch-test` + `aws-accounts/jenkins-aws-account-public` | see role table |
 | `AWS_ROLE_ARTIFACTS` | repo | `opensearch-bundle` + `aws-accounts/jenkins-aws-account-public` | see role table |
