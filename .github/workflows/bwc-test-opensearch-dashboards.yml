@@ -1,0 +1,115 @@
+---
+# GitHub Actions port of jenkins/opensearch-dashboards/bwc-test.jenkinsfile (job bwc-test-opensearch-dashboards,
+# jenkins@12.0.0): verify-parameters, detectTestDockerAgent and one runBwcTestScript() stage (`./test.sh bwc-test
+# <manifest> --test-run-id <run id> --paths opensearch-dashboards=<artifact root URL>`) with uploadTestResults() to
+# bwc-test-opensearch-dashboards/<version>/<build>/<platform>/<arch>/<distribution>/test-results, through
+# _integ-test.yml (test-type bwc-test). post { success / failure } publishNotification(jenkins-integ-test-webhook)
+# is the notify job: the notify-failure webhook post, a dry run until vars.AUTOCUT_LIVE is 'true'. Jenkins AGENT_LABEL becomes RUNS_ON;
+# empty uses the ADR 0001 pool of the build platform/architecture. BUILD_JOB_NAME replaces the upstreamBuilds lookup.
+# distribution-build-opensearch-dashboards.yml calls it for the linux tar builds (Jenkins triggerBWCTests, wait: false).
+name: bwc-test-opensearch-dashboards
+run-name: bwc-test-opensearch-dashboards ${{ inputs.TEST_MANIFEST }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      TEST_MANIFEST:
+        description: '<Required> Test manifest under the manifests folder, e.g. 2.0.0/opensearch-dashboards-2.0.0-test.yml.'
+        required: true
+        type: string
+      BUILD_MANIFEST_URL:
+        description: '<Required> The build manifest URL, e.g. https://ci.opensearch.org/ci/dbc/distribution-build-opensearch-dashboards/2.0.0/98/linux/x64/tar/builds/opensearch-dashboards/manifest.yml.'
+        required: true
+        type: string
+      RUNS_ON:
+        description: '<Optional> JSON runner label array (Jenkins AGENT_LABEL); empty uses the pool of the build platform/architecture.'
+        required: false
+        default: ''
+        type: string
+  workflow_call:
+    inputs:
+      TEST_MANIFEST:
+        required: true
+        type: string
+      BUILD_MANIFEST_URL:
+        required: true
+        type: string
+      RUNS_ON:
+        required: false
+        default: ''
+        type: string
+      BUILD_JOB_NAME:
+        description: 'Job of the build under test (Jenkins currentBuild.upstreamBuilds[0].fullProjectName)'
+        required: false
+        default: 'distribution-build-opensearch-dashboards'
+        type: string
+      ARTIFACTS_FROM_RUN:
+        description: 'Test the keep-distribution artifact of this run instead of the public artifact URL (dry runs)'
+        required: false
+        default: ''
+        type: string
+    secrets:
+      AWS_ROLE_TEST_RESULTS:
+        required: false
+      ARTIFACT_BUCKET_NAME:
+        required: false
+      INTEG_TEST_WEBHOOK_URL:
+        required: false
+
+permissions: {}
+
+jobs:
+  bwc-test:
+    uses: ./.github/workflows/_integ-test.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      test-type: bwc-test
+      test-manifest: ${{ inputs.TEST_MANIFEST }}
+      build-manifest-url: ${{ inputs.BUILD_MANIFEST_URL }}
+      build-job-name: ${{ inputs.BUILD_JOB_NAME || 'distribution-build-opensearch-dashboards' }}
+      job-name: bwc-test-opensearch-dashboards
+      download-artifacts: false
+      artifacts-from-run: ${{ inputs.ARTIFACTS_FROM_RUN }}
+      publish-results: false
+      timeout-minutes: 240
+      runs-on: ${{ inputs.RUNS_ON }}
+    secrets:
+      AWS_ROLE_TEST_RESULTS: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+
+  notify:
+    # post { success } ':white_check_mark: BWC Tests Successful' / post { failure } ':warning: Failed BWC Tests'
+    needs: bwc-test
+    if: ${{ always() && (needs.bwc-test.result == 'success' || needs.bwc-test.result == 'failure') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Check the webhook
+        id: webhook
+        env:
+          EVENT: ${{ github.event_name }}
+          LIVE: ${{ vars.AUTOCUT_LIVE == 'true' }}
+          HAS_WEBHOOK: ${{ secrets.INTEG_TEST_WEBHOOK_URL != '' }}
+        run: |
+          if [ "${EVENT}" != pull_request ] && [ "${LIVE}" = true ] && [ "${HAS_WEBHOOK}" = true ]; then
+            echo "dry-run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::BWC webhook post is a dry run (vars.AUTOCUT_LIVE not 'true', INTEG_TEST_WEBHOOK_URL not configured or pull request)."
+            echo "dry-run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Post the BWC result
+        uses: ./.github/actions/notify-failure
+        with:
+          kind: none
+          webhook-url: ${{ secrets.INTEG_TEST_WEBHOOK_URL }}
+          webhook-icon: ${{ needs.bwc-test.result == 'success' && ':white_check_mark:' || ':warning:' }}
+          webhook-message: ${{ needs.bwc-test.result == 'success' && 'BWC Tests Successful' || 'Failed BWC Tests' }}
+          webhook-manifest: ${{ inputs.TEST_MANIFEST }}
+          dry-run: ${{ steps.webhook.outputs.dry-run }}

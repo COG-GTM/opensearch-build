@@ -1,0 +1,79 @@
+{
+  "mappings": {
+    "properties": {
+      "architecture": {
+        "type": "keyword"
+      },
+      "build_start_time": {
+        "format": "epoch_millis",
+        "type": "date"
+      },
+      "component": {
+        "type": "keyword"
+      },
+      "component_category": {
+        "type": "keyword"
+      },
+      "component_repo": {
+        "type": "keyword"
+      },
+      "component_repo_url": {
+        "type": "keyword"
+      },
+      "distribution": {
+        "type": "keyword"
+      },
+      "distribution_build_number": {
+        "type": "integer"
+      },
+      "distribution_build_url": {
+        "type": "keyword"
+      },
+      "platform": {
+        "type": "keyword"
+      },
+      "qualifier": {
+        "type": "keyword"
+      },
+      "rc": {
+        "type": "keyword"
+      },
+      "rc_number": {
+        "type": "integer"
+      },
+      "smoke_test_build_number": {
+        "type": "integer"
+      },
+      "smoke_test_build_url": {
+        "type": "keyword"
+      },
+      "test_report_manifest_yml": {
+        "type": "keyword"
+      },
+      "version": {
+        "type": "keyword"
+      },
+      "component_test_spec_name": {
+        "type": "keyword"
+      },
+      "component_test_spec_result": {
+        "type": "keyword"
+      },
+      "component_test_spec_yml": {
+        "type": "keyword"
+      },
+      "component_test_spec_test_stderr": {
+        "type": "keyword"
+      },
+      "component_test_spec_test_stdout": {
+        "type": "keyword"
+      },
+      "component_test_spec_cluster_stderr": {
+        "type": "keyword"
+      },
+      "component_test_spec_cluster_stdout": {
+        "type": "keyword"
+      }
+    }
+  }
+}

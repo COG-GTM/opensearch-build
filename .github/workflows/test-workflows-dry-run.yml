@@ -1,0 +1,122 @@
+---
+# Evidence run of the s4.3 test workflows against GitHub-built distributions, on a GitHub-hosted runner with no AWS
+# secrets: OpenSearch 3.8.0 (OpenSearch, job-scheduler, security) and OpenSearch Dashboards 3.8.0 (core,
+# functionalTestDashboards, securityDashboards, customImportMapDashboards) are built for linux x64 tar through
+# _build-distribution.yml with keep-distribution, then
+#   integ-test-opensearch.yml             runs one OpenSearch plugin (job-scheduler) against the OpenSearch build,
+#   integ-test-opensearch-dashboards.yml  runs one Dashboards plugin (customImportMapDashboards) against both builds,
+#   smoke-test-opensearch.yml             runs the smoke tests against Jenkins build 12115 of OpenSearch 3.8.0 (its
+#                                         public artifact URL, as Jenkins did; the partial bundle above lacks the
+#                                         plugins the smoke specs call),
+# each printing the S3 keys of the test results and test-report.yml (same layout as Jenkins) instead of uploading,
+# publishing the metrics records as a dry run and calling integ-test-notification.yml as a dry run.
+name: test-workflows-dry-run
+
+on:
+  workflow_dispatch:
+    inputs:
+      OPENSEARCH_COMPONENT:
+        description: 'OpenSearch component to integ-test (must be built: OpenSearch, job-scheduler or security)'
+        required: false
+        default: job-scheduler
+        type: string
+      DASHBOARDS_COMPONENT:
+        description: 'OpenSearch Dashboards component to integ-test (must be built: securityDashboards or customImportMapDashboards)'
+        required: false
+        default: customImportMapDashboards
+        type: string
+  pull_request:
+    paths:
+      - .github/workflows/test-workflows-dry-run.yml
+      - .github/workflows/_integ-test.yml
+      - .github/workflows/integ-test-opensearch.yml
+      - .github/workflows/integ-test-opensearch-dashboards.yml
+      - .github/workflows/bwc-test-opensearch.yml
+      - .github/workflows/bwc-test-opensearch-dashboards.yml
+      - .github/workflows/smoke-test-opensearch.yml
+      - .github/scripts/print-s3-keys.sh
+
+permissions: {}
+
+concurrency:
+  group: test-workflows-dry-run-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-opensearch:
+    uses: ./.github/workflows/_build-distribution.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      input-manifest: 3.8.0/opensearch-3.8.0.yml
+      platform: linux
+      architecture: x64
+      distribution: tar
+      component-name: OpenSearch job-scheduler security
+      job-name: distribution-build-opensearch
+      upload: false
+      update-latest-url: false
+      keep-distribution: true
+      artifact-suffix: -opensearch
+      runs-on: '["ubuntu-24.04"]'
+
+  build-dashboards:
+    uses: ./.github/workflows/_build-distribution.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      input-manifest: 3.8.0/opensearch-dashboards-3.8.0.yml
+      platform: linux
+      architecture: x64
+      distribution: tar
+      component-name: OpenSearch-Dashboards functionalTestDashboards securityDashboards customImportMapDashboards
+      job-name: distribution-build-opensearch-dashboards
+      upload: false
+      update-latest-url: false
+      keep-distribution: true
+      artifact-suffix: -dashboards
+      build-user: ci-runner
+      parallel: '0'
+      runs-on: '["ubuntu-24.04"]'
+
+  integ-test-opensearch:
+    needs: build-opensearch
+    uses: ./.github/workflows/integ-test-opensearch.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      TEST_MANIFEST: 3.8.0/opensearch-3.8.0-test.yml
+      BUILD_MANIFEST_URL: builds/opensearch/manifest.yml
+      COMPONENT_NAME: ${{ inputs.OPENSEARCH_COMPONENT || 'job-scheduler' }}
+      VALIDATE_ARTIFACTS: false
+      RUNS_ON: '["ubuntu-24.04"]'
+      ARTIFACTS_FROM_RUN: distribution-linux-x64-tar-opensearch
+
+  integ-test-dashboards:
+    needs: [build-opensearch, build-dashboards]
+    uses: ./.github/workflows/integ-test-opensearch-dashboards.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      TEST_MANIFEST: 3.8.0/opensearch-dashboards-3.8.0-test.yml
+      BUILD_MANIFEST_URL: builds/opensearch-dashboards/manifest.yml
+      BUILD_MANIFEST_URL_OPENSEARCH: builds/opensearch/manifest.yml
+      COMPONENT_NAME: ${{ inputs.DASHBOARDS_COMPONENT || 'customImportMapDashboards' }}
+      VALIDATE_ARTIFACTS: false
+      RUNS_ON: '["ubuntu-24.04"]'
+      ARTIFACTS_FROM_RUN: distribution-linux-x64-tar-dashboards
+      OPENSEARCH_ARTIFACTS_FROM_RUN: distribution-linux-x64-tar-opensearch
+
+  smoke-test-opensearch:
+    uses: ./.github/workflows/smoke-test-opensearch.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      TEST_MANIFEST: 3.8.0/opensearch-3.8.0-test.yml
+      BUILD_MANIFEST_URL: https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/3.8.0/12115/linux/x64/tar/builds/opensearch/manifest.yml
+      RUNS_ON: '["ubuntu-24.04"]'

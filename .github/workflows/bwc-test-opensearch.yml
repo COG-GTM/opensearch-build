@@ -1,0 +1,76 @@
+---
+# GitHub Actions port of jenkins/opensearch/bwc-test.jenkinsfile (job bwc-test, jenkins@12.0.0): verify-parameters,
+# detectTestDockerAgent and one runBwcTestScript() stage (`./test.sh bwc-test <manifest> --test-run-id <run id>
+# --paths opensearch=<artifact root URL>`) with uploadTestResults() to bwc-test/<version>/<build>/<platform>/<arch>/
+# <distribution>/test-results, all through _integ-test.yml (test-type bwc-test). Jenkins AGENT_LABEL becomes RUNS_ON;
+# empty uses the ADR 0001 pool of the build platform/architecture. BUILD_JOB_NAME replaces the upstreamBuilds lookup.
+# distribution-build-opensearch.yml calls it for the linux x64 tar build (Jenkins triggerBWCTests, wait: false).
+name: bwc-test-opensearch
+run-name: bwc-test-opensearch ${{ inputs.TEST_MANIFEST }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      TEST_MANIFEST:
+        description: '<Required> Test manifest under the manifests folder, e.g. 2.0.0/opensearch-2.0.0-test.yml.'
+        required: true
+        type: string
+      BUILD_MANIFEST_URL:
+        description: '<Required> The build manifest URL, e.g. https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/1.2.2/98/linux/x64/tar/builds/opensearch/manifest.yml.'
+        required: true
+        type: string
+      RUNS_ON:
+        description: '<Optional> JSON runner label array (Jenkins AGENT_LABEL); empty uses the pool of the build platform/architecture.'
+        required: false
+        default: ''
+        type: string
+  workflow_call:
+    inputs:
+      TEST_MANIFEST:
+        required: true
+        type: string
+      BUILD_MANIFEST_URL:
+        required: true
+        type: string
+      RUNS_ON:
+        required: false
+        default: ''
+        type: string
+      BUILD_JOB_NAME:
+        description: 'Job of the build under test (Jenkins currentBuild.upstreamBuilds[0].fullProjectName)'
+        required: false
+        default: 'distribution-build-opensearch'
+        type: string
+      ARTIFACTS_FROM_RUN:
+        description: 'Test the keep-distribution artifact of this run instead of the public artifact URL (dry runs)'
+        required: false
+        default: ''
+        type: string
+    secrets:
+      AWS_ROLE_TEST_RESULTS:
+        required: false
+      ARTIFACT_BUCKET_NAME:
+        required: false
+
+permissions: {}
+
+jobs:
+  bwc-test:
+    uses: ./.github/workflows/_integ-test.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      test-type: bwc-test
+      test-manifest: ${{ inputs.TEST_MANIFEST }}
+      build-manifest-url: ${{ inputs.BUILD_MANIFEST_URL }}
+      build-job-name: ${{ inputs.BUILD_JOB_NAME || 'distribution-build-opensearch' }}
+      job-name: bwc-test
+      download-artifacts: false
+      artifacts-from-run: ${{ inputs.ARTIFACTS_FROM_RUN }}
+      publish-results: false
+      timeout-minutes: 180
+      runs-on: ${{ inputs.RUNS_ON }}
+    secrets:
+      AWS_ROLE_TEST_RESULTS: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
