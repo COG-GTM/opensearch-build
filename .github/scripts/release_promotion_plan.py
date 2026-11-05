@@ -420,7 +420,7 @@ def run_repos(args: argparse.Namespace) -> Tuple[List[str], Dict[str, Any], int]
 def run_docker(args: argparse.Namespace) -> Tuple[List[str], Dict[str, Any], int]:
     copies = docker_plan(args.source_images, args.release_version, args.docker_hub_promote == "true", args.ecr_promote == "true",
                          args.tag_latest == "true", args.tag_major_version == "true", args.data_prepper_registry)
-    missing = 0
+    missing = differs = 0
     lines = [f"### docker-promotion: {args.source_images} -> {args.release_version}", "",
              "| # | Source | Destination | Source digest | Destination digest now |", "| ---: | --- | --- | --- | --- |"]
     for index, copy in enumerate(copies, 1):
@@ -432,11 +432,15 @@ def run_docker(args: argparse.Namespace) -> Tuple[List[str], Dict[str, Any], int
             destination_digest = registry_digest(destination)
             missing += 0 if destination_digest else 1
         copy.update({"source-digest": source_digest or "", "destination-digest": destination_digest or ""})
-        same = " (same)" if source_digest and source_digest == destination_digest else ""
+        same = ""
+        if source_digest and destination_digest:
+            same = " (same)" if source_digest == destination_digest else " (**differs**)"
+            differs += 0 if source_digest == destination_digest else 1
         lines.append(f"| {index} | `{source}` | `{destination}` | `{(source_digest or '-')[:19]}` | "
                      f"`{(destination_digest or ('-' if not args.verify else 'missing'))[:19]}`{same} |")
     if args.verify:
-        lines += ["", f"{len(copies) - missing}/{len(copies)} destination tags resolve today."]
+        lines += ["", f"{len(copies) - missing}/{len(copies)} destination tags resolve today; "
+                  f"{differs} point to a different image than the source."]
     return lines, {"copies": copies}, missing
 
 
