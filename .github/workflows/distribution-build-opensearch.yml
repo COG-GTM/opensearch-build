@@ -71,7 +71,7 @@ on:
         description: >-
           <Optional> Space-separated flags for the other Jenkins parameters, each starting from its Jenkins default;
           prefix a flag with no- to turn it off. Flags: update-github-issue (on), integ-test (on, INTEG_TEST_JOB_NAME),
-          min-snapshot (on), skip-artifact-check (off), sign-rpm (off), upload (on), release-candidate-upload
+          min-snapshot (on), skip-artifact-check (off), sign-rpm (on; rpm uploads require it), upload (on), release-candidate-upload
           (on when RC_NUMBER > 0), compare-jenkins (off). Values: test-platform=<linux,windows>,
           test-distribution=<tar,rpm,deb,zip>, parallel=<n> (4), build-docker=<build_docker |
           build_docker_with_build_number_tag | do_not_build_docker> (build_docker), architecture=<x64,arm64>.
@@ -153,16 +153,16 @@ jobs:
           set -euo pipefail
           if [ "${EVENT}" = pull_request ]; then
             # Evidence build (see the header): min snapshot + bundle of OpenSearch, linux x64 tar, nothing uploaded.
-            INPUT_MANIFEST=3.10.0/opensearch-3.10.0.yml
-            COMPONENT_NAME=OpenSearch
-            BUILD_PLATFORM=linux
-            BUILD_DISTRIBUTION=tar
-            RC_NUMBER=0
-            CONTINUE_ON_ERROR=true
-            UPDATE_LATEST_URL=false
-            TEST_MANIFEST=''
-            OPTIONS='architecture=x64 no-upload no-update-github-issue build-docker=do_not_build_docker compare-jenkins'
-            RUNS_ON='["ubuntu-24.04"]'
+            export INPUT_MANIFEST=3.10.0/opensearch-3.10.0.yml
+            export COMPONENT_NAME=OpenSearch
+            export BUILD_PLATFORM=linux
+            export BUILD_DISTRIBUTION=tar
+            export RC_NUMBER=0
+            export CONTINUE_ON_ERROR=true
+            export UPDATE_LATEST_URL=false
+            export TEST_MANIFEST=''
+            export OPTIONS='architecture=x64 no-upload no-update-github-issue build-docker=do_not_build_docker compare-jenkins'
+            export RUNS_ON='["ubuntu-24.04"]'
           fi
           bash .github/scripts/ensure-pyyaml.sh
           python3 - <<'PY' | tee -a "$GITHUB_OUTPUT"
@@ -197,7 +197,7 @@ jobs:
               runs_on = json.dumps(labels, separators=(",", ":"))
 
           flags = {"update-github-issue": True, "integ-test": True, "min-snapshot": True, "skip-artifact-check": False,
-                   "sign-rpm": False, "upload": True, "release-candidate-upload": int(rc) > 0, "compare-jenkins": False}
+                   "sign-rpm": True, "upload": True, "release-candidate-upload": int(rc) > 0, "compare-jenkins": False}
           values = {"test-platform": "", "test-distribution": "", "parallel": "4", "build-docker": "build_docker", "architecture": "x64 arm64"}
           for option in env["OPTIONS"].split():
               key, sep, value = option.partition("=")
@@ -258,6 +258,9 @@ jobs:
                       tests.append(dict(c, **{"build-manifest-url": url}))
 
           upload = flags["upload"]
+          # assembleManifest() signed every rpm; an unsigned rpm must not reach the artifact bucket
+          if upload and not flags["sign-rpm"] and any(c["distribution"] == "rpm" for c in cells):
+              fail("no-sign-rpm needs no-upload (or no rpm in BUILD_DISTRIBUTION): Jenkins never uploaded unsigned rpm packages.")
           can_upload = upload and env["HAS_ARTIFACT_ROLE"] == "true"
           if upload and not can_upload:
               print("::notice::S3 upload skipped: AWS_ROLE_ARTIFACTS / ARTIFACT_BUCKET_NAME are not configured, so the integ-test, docker and validation follow-ups are skipped too.", file=sys.stderr)
@@ -315,11 +318,9 @@ jobs:
       input-manifest: ${{ needs.verify-parameters.outputs.input-manifest }}
       targets: ${{ needs.verify-parameters.outputs.min-snapshot-targets }}
       runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
+      # No secrets block: the promotion and signing secrets are `release` environment secrets, which the called
+      # workflow's publish job reads in that environment.
       publish: ${{ github.event_name != 'pull_request' }}
-    secrets:
-      AWS_ROLE_PROMOTION: ${{ secrets.AWS_ROLE_PROMOTION }}
-      ARTIFACT_PRODUCTION_BUCKET_NAME: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
-      AWS_ROLE_SIGNING_BASE: ${{ secrets.AWS_ROLE_SIGNING_BASE }}
 
   build:
     needs: verify-parameters
@@ -346,7 +347,7 @@ jobs:
       upload: ${{ needs.verify-parameters.outputs.upload == 'true' }}
       update-latest-url: ${{ needs.verify-parameters.outputs.update-latest-url == 'true' }}
       release-candidate-upload: ${{ needs.verify-parameters.outputs.release-candidate-upload == 'true' }}
-      sign-rpm: ${{ needs.verify-parameters.outputs.sign-rpm == 'true' }}
+      sign-rpm: ${{ needs.verify-parameters.outputs.sign-rpm == 'true' && matrix.distribution == 'rpm' }}
       runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
     secrets:
       AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
@@ -539,8 +540,12 @@ jobs:
           build-logs-directory: build-logs
           rc-number: ${{ needs.verify-parameters.outputs.rc-number }}
           component-category: OpenSearch
-          # currentBuild.result: a cancelled matrix is ABORTED, never SUCCESS
-          overall-build-result: ${{ needs.build.result == 'failure' && 'FAILURE' || needs.build.result == 'success' && 'SUCCESS' || 'ABORTED' }}
+          # currentBuild.result: ABORTED for a cancelled matrix, UNSTABLE when components failed under CONTINUE_ON_ERROR (markStageUnstableIfPluginsFailedToBuild)
+          overall-build-result: >-
+            ${{ needs.build.result == 'failure' && 'FAILURE'
+            || needs.build.result == 'success' && steps.classify.outputs.failed != '' && 'UNSTABLE'
+            || needs.build.result == 'success' && 'SUCCESS'
+            || 'ABORTED' }}
           build-number: ${{ github.run_id }}
           build-start-time: ${{ needs.verify-parameters.outputs.build-start-time }}
           metrics-host-url: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
@@ -638,7 +643,8 @@ jobs:
               echo "=== ${RECORD##*/} vs Jenkins ${JENKINS_ROOT}"
               python3 .github/scripts/compare_build_layout.py --record "${RECORD}" --jenkins-root "${JENKINS_ROOT}" || STATUS=1
               echo
-            } 2>&1 | tee -a diff.txt
+            } > section.txt 2>&1
+            tee -a diff.txt < section.txt
           done
           if [ -f snapshot-keys/snapshot-keys.txt ]; then
             echo "=== snapshot keys vs https://artifacts.opensearch.org/snapshots/ (Jenkins publish-opensearch-min-snapshots)" | tee -a diff.txt
@@ -649,7 +655,8 @@ jobs:
                 echo "MISSING  ${KEY}"
                 STATUS=1
               fi
-            done < snapshot-keys/snapshot-keys.txt | tee -a diff.txt
+            done < snapshot-keys/snapshot-keys.txt > section.txt
+            tee -a diff.txt < section.txt
           fi
           { echo '```'; cat diff.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "${STATUS}"

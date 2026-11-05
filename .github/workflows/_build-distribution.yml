@@ -178,7 +178,7 @@ jobs:
       build-args: ${{ steps.images.outputs.build-args }}
       assemble-image: ${{ steps.images.outputs.assemble-image }}
       assemble-args: ${{ steps.images.outputs.assemble-args }}
-      java-version: ${{ steps.manifest.outputs.java-version }}
+      java-version: ${{ steps.darwin-java.outputs.java-version || steps.manifest.outputs.java-version }}
       filename: ${{ steps.manifest.outputs.filename }}
       manifest-path: ${{ steps.manifest.outputs.manifest-path }}
       build-manifest: ${{ steps.params.outputs.distribution }}/builds/${{ steps.manifest.outputs.filename }}/manifest.yml
@@ -244,6 +244,18 @@ jobs:
           checkout: 'false'
           platform: ${{ inputs.platform }}
           distribution: ${{ steps.params.outputs.distribution }}
+
+      - name: Resolve the macOS JDK
+        # publish-min-snapshots.jenkinsfile: the macOS stages switch to the Java version of the windows zip image
+        # (dockerAgentWindowsZip.javaVersion); input manifests carry no darwin image entry.
+        id: darwin-java
+        if: ${{ inputs.platform == 'darwin' }}
+        env:
+          MANIFEST_FILE: ${{ steps.manifest.outputs.manifest-file }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/manifest_paths.py ci-image "${MANIFEST_FILE}" --platform windows --distribution zip \
+            | sed -n 's/^java-version=/java-version=/p' | tee -a "$GITHUB_OUTPUT"
 
       - name: Resolve the CI-runner images
         id: images

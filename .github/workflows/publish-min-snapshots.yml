@@ -34,11 +34,21 @@ on:
         default: true
         type: boolean
     secrets:
+      # `release` environment secrets (ADR 0001): the publish job runs in that environment and reads them even
+      # when the caller passes nothing
       AWS_ROLE_PROMOTION:
         required: false
       ARTIFACT_PRODUCTION_BUCKET_NAME:
         required: false
       AWS_ROLE_SIGNING_BASE:
+        required: false
+      SIGNER_CLIENT_ROLE:
+        required: false
+      SIGNER_CLIENT_EXTERNAL_ID:
+        required: false
+      SIGNER_CLIENT_UNSIGNED_BUCKET:
+        required: false
+      SIGNER_CLIENT_SIGNED_BUCKET:
         required: false
   workflow_dispatch:
     inputs:
@@ -127,6 +137,9 @@ jobs:
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # The production bucket and signing roles are `release` environment secrets; pull requests and publish: false
+    # only list the keys, so they stay out of the environment (and its reviewer gate).
+    environment: ${{ (github.event_name != 'pull_request' && inputs.publish != false) && 'release' || '' }}
     permissions:
       contents: read
       id-token: write
@@ -158,7 +171,7 @@ jobs:
           PUBLISH: ${{ inputs.publish == false && 'false' || 'true' }}
           ROLE: ${{ secrets.AWS_ROLE_PROMOTION }}
           BUCKET: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
-          SIGNING_ROLE: ${{ secrets.AWS_ROLE_SIGNING_BASE }}
+          SIGNING: ${{ secrets.AWS_ROLE_SIGNING_BASE != '' && secrets.SIGNER_CLIENT_ROLE != '' && secrets.SIGNER_CLIENT_EXTERNAL_ID != '' && secrets.SIGNER_CLIENT_UNSIGNED_BUCKET != '' && secrets.SIGNER_CLIENT_SIGNED_BUCKET != '' }}
           EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
@@ -170,7 +183,7 @@ jobs:
           else
             echo "upload=true" >> "$GITHUB_OUTPUT"
           fi
-          if [ -n "${SIGNING_ROLE}" ]; then echo "sign=true" >> "$GITHUB_OUTPUT"; else echo "sign=false" >> "$GITHUB_OUTPUT"; fi
+          echo "sign=${SIGNING}" >> "$GITHUB_OUTPUT"
 
       - name: Find the core plugins
         # uploadMinSnapshotsToS3: core plugins are checksummed, signed and published for linux x64 tar only
@@ -193,6 +206,13 @@ jobs:
             echo "signing-email=opensearch@amazon.com" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Refuse to publish unsigned core plugins
+        # uploadMinSnapshotsToS3 always signed them before the upload
+        if: ${{ steps.plugins.outputs.present == 'true' && steps.creds.outputs.upload == 'true' && steps.creds.outputs.sign != 'true' }}
+        run: |
+          echo "::error::Core plugins would be published unsigned: AWS_ROLE_SIGNING_BASE / SIGNER_CLIENT_* are not configured in the release environment."
+          exit 1
+
       - name: Create .sha512 for the core plugins
         if: ${{ steps.plugins.outputs.present == 'true' }}
         uses: ./.github/actions/checksums
@@ -200,9 +220,14 @@ jobs:
           artifact-path: ${{ matrix.distribution }}/builds/opensearch/core-plugins
 
       - name: Sign the core plugins
-        # Without AWS_ROLE_SIGNING_BASE the signing step only prints the sign.sh command.
+        # Without the signing secrets (pull requests, listing-only runs) the step only prints the sign.sh command.
         if: ${{ steps.plugins.outputs.present == 'true' }}
         uses: ./.github/actions/sign-artifacts
+        env:
+          SIGNER_CLIENT_ROLE: ${{ secrets.SIGNER_CLIENT_ROLE }}
+          SIGNER_CLIENT_EXTERNAL_ID: ${{ secrets.SIGNER_CLIENT_EXTERNAL_ID }}
+          SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_UNSIGNED_BUCKET }}
+          SIGNER_CLIENT_SIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_SIGNED_BUCKET }}
         with:
           artifact-path: ${{ matrix.distribution }}/builds/opensearch/core-plugins
           sigtype: '.sig'
