@@ -480,6 +480,7 @@ jobs:
           JAVA_VERSION: ${{ needs.setup.outputs.java-version }}
           ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.artifact-root-url }}
           LOCAL_ARTIFACTS: ${{ needs.setup.outputs.local-artifacts }}
+          OPENSEARCH_ARTIFACTS_FROM_RUN: ${{ inputs.opensearch-artifacts-from-run }}
           OPENSEARCH_ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.opensearch-artifact-root-url }}
           UPLOAD_RESULTS: ${{ needs.setup.outputs.upload }}
           CI_GROUPS: ${{ inputs.ci-groups }}
@@ -503,13 +504,15 @@ jobs:
               ;;
             *)
               # runIntegTestScript.groovy / runIntegTestScriptForOSD.groovy (jenkins@12.0.1)
-              if [ "${LOCAL_ARTIFACTS}" != false ]; then
-                if [ "${NAME}" = OpenSearch ]; then PATHS=("opensearch=${ROOT}"); else PATHS=("opensearch=${ROOT}" "opensearch-dashboards=${ROOT}"); fi
-              elif [ "${NAME}" = OpenSearch ]; then
+              if [ "${NAME}" = OpenSearch ]; then
                 PATHS=("opensearch=${ROOT}")
               else
                 # runIntegTestScript fell back to the latest OpenSearch build; the given OpenSearch manifest wins when set.
                 OPENSEARCH_ROOT="${OPENSEARCH_ARTIFACT_ROOT_URL:-${PUBLIC_ARTIFACT_URL}/distribution-build-opensearch/${VERSION}/latest/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}}"
+                # The OpenSearch tree is in <distribution>/ only when it was downloaded next to the Dashboards build.
+                if [ "${LOCAL_ARTIFACTS}" = s3 ] || { [ "${LOCAL_ARTIFACTS}" = run ] && [ -n "${OPENSEARCH_ARTIFACTS_FROM_RUN}" ]; }; then
+                  OPENSEARCH_ROOT="${ROOT}"
+                fi
                 PATHS=("opensearch=${OPENSEARCH_ROOT}" "opensearch-dashboards=${ROOT}")
               fi
               TEST_COMPONENT="${COMPONENT}"
@@ -574,7 +577,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          name: test-results-${{ matrix.component }}
+          name: test-results-${{ needs.setup.outputs.name }}-${{ inputs.test-type }}-${{ needs.setup.outputs.platform }}-${{ needs.setup.outputs.architecture }}-${{ needs.setup.outputs.distribution }}-${{ matrix.component }}
           path: test-results
           if-no-files-found: ignore
 
@@ -608,6 +611,13 @@ jobs:
           name: ${{ inputs.artifacts-from-run }}
           path: run-artifacts
 
+      - name: Download the OpenSearch build from this run
+        if: ${{ inputs.artifacts-from-run != '' && inputs.opensearch-artifacts-from-run != '' && needs.setup.outputs.name != 'OpenSearch' }}
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: ${{ inputs.opensearch-artifacts-from-run }}
+          path: run-artifacts-opensearch
+
       - name: Download the build manifest
         uses: ./.github/actions/download-build-manifest
         with:
@@ -616,12 +626,26 @@ jobs:
           job-name: ${{ inputs.build-job-name }}
           public-artifact-url: ${{ inputs.public-artifact-url }}
 
+      - name: Move the build from this run into place
+        # report.sh loads the bundle manifest from --artifact-paths, so the local build stays in <distribution>/
+        if: ${{ inputs.artifacts-from-run != '' }}
+        env:
+          DISTRIBUTION: ${{ needs.setup.outputs.distribution }}
+        run: |
+          set -euo pipefail
+          rm -rf "${DISTRIBUTION}"
+          mv run-artifacts "${DISTRIBUTION}"
+          if [ -d run-artifacts-opensearch ]; then
+            cp -a run-artifacts-opensearch/. "${DISTRIBUTION}/"
+            rm -rf run-artifacts-opensearch
+          fi
+
       - name: Collect the test results of the run
         # Without the S3 upload the component ymls only exist as the matrix legs' artifacts; report.sh reads them locally.
         if: ${{ needs.setup.outputs.upload != 'true' }}
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
         with:
-          pattern: test-results-*
+          pattern: test-results-${{ needs.setup.outputs.name }}-${{ inputs.test-type }}-${{ needs.setup.outputs.platform }}-${{ needs.setup.outputs.architecture }}-${{ needs.setup.outputs.distribution }}-*
           path: test-results
           merge-multiple: true
 
@@ -629,7 +653,6 @@ jobs:
         # post { always } ran createUploadTestReportManifest inside the test docker agent
         if: ${{ needs.setup.outputs.platform == 'linux' }}
         run: |
-          rm -rf run-artifacts
           bash .github/scripts/start-ci-container.sh test-report "${IMAGE}" "${IMAGE_ARGS}"
 
       - name: Create the test report
@@ -651,14 +674,23 @@ jobs:
           ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.artifact-root-url }}
           OPENSEARCH_ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.opensearch-artifact-root-url }}
           UPLOAD_RESULTS: ${{ needs.setup.outputs.upload }}
+          ARTIFACTS_FROM_RUN: ${{ inputs.artifacts-from-run }}
+          OPENSEARCH_ARTIFACTS_FROM_RUN: ${{ inputs.opensearch-artifacts-from-run }}
         run: |
           set -euo pipefail
           # createUploadTestReportManifest.groovy (jenkins@12.0.1)
           ROOT="${VERSION}/${BUILD_ID}/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}"
+          LOCAL_ROOT="${GITHUB_WORKSPACE}/${DISTRIBUTION}"
+          DIST_ROOT="${ARTIFACT_ROOT_URL}"
+          [ -n "${ARTIFACTS_FROM_RUN}" ] && DIST_ROOT="${LOCAL_ROOT}"
+          OPENSEARCH_URL="${ARTIFACT_ROOT_URL}"
           if [ "${NAME}" = OpenSearch ]; then
-            PATHS=("opensearch=${ARTIFACT_ROOT_URL}")
+            PATHS=("opensearch=${DIST_ROOT}")
           else
-            PATHS=("opensearch=${OPENSEARCH_ARTIFACT_ROOT_URL}" "opensearch-dashboards=${ARTIFACT_ROOT_URL}")
+            OPENSEARCH_URL="${OPENSEARCH_ARTIFACT_ROOT_URL:-${PUBLIC_ARTIFACT_URL}/distribution-build-opensearch/${VERSION}/latest/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}}"
+            OPENSEARCH_ROOT="${OPENSEARCH_URL}"
+            [ -n "${ARTIFACTS_FROM_RUN}" ] && [ -n "${OPENSEARCH_ARTIFACTS_FROM_RUN}" ] && OPENSEARCH_ROOT="${LOCAL_ROOT}"
+            PATHS=("opensearch=${OPENSEARCH_ROOT}" "opensearch-dashboards=${DIST_ROOT}")
           fi
           PUBLIC_BASE_PATH="${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${ROOT}"
           BASE_PATH="${PUBLIC_BASE_PATH}"
@@ -681,6 +713,12 @@ jobs:
             # Keep the report exactly as it would have been uploaded: the local base path read back by report.sh
             # becomes the public test-results location Jenkins wrote into test-report.yml.
             sudo chown "$(id -u):$(id -g)" test-report.yml
+            if [ -n "${ARTIFACTS_FROM_RUN}" ]; then
+              # Local builds are reported under their published artifact URLs.
+              sed -i -e "s#${LOCAL_ROOT}/\([a-z]*\)/opensearch-dashboards/#${ARTIFACT_ROOT_URL}/\1/opensearch-dashboards/#g" \
+                -e "s#${LOCAL_ROOT}/\([a-z]*\)/opensearch/#${OPENSEARCH_URL}/\1/opensearch/#g" \
+                -e "s#${LOCAL_ROOT}#${ARTIFACT_ROOT_URL}#g" test-report.yml
+            fi
             sed -i "s#${GITHUB_WORKSPACE}#${PUBLIC_BASE_PATH}#g" test-report.yml
           fi
           UPLOAD_PATH="${JOB_NAME}/${ROOT}/test-results/${TEST_RUN_ID}/${TEST_TYPE}/test-report.yml"
@@ -717,7 +755,7 @@ jobs:
       - name: Keep the test report in the run
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          name: ${{ inputs.test-type }}-report
+          name: test-report-${{ needs.setup.outputs.name }}-${{ inputs.test-type }}-${{ needs.setup.outputs.platform }}-${{ needs.setup.outputs.architecture }}-${{ needs.setup.outputs.distribution }}
           path: test-report.yml
           if-no-files-found: warn
 
