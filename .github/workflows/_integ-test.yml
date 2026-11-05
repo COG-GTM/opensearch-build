@@ -316,6 +316,8 @@ jobs:
           JAVA_VERSION: ${{ needs.setup.outputs.java-version }}
           ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.artifact-root-url }}
           LOCAL_ARTIFACTS: ${{ inputs.download-artifacts }}
+          OPENSEARCH_ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.opensearch-artifact-root-url }}
+          UPLOAD_RESULTS: ${{ inputs.upload-results }}
           JOB_NAME: ${{ inputs.job-name }}
           PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
           TEST_RUN_ID: ${{ github.run_id }}
@@ -329,9 +331,13 @@ jobs:
           elif [ "${NAME}" = OpenSearch ]; then
             PATHS=("opensearch=${ARTIFACT_ROOT_URL}")
           else
-            PATHS=("opensearch=${PUBLIC_ARTIFACT_URL}/distribution-build-opensearch/${VERSION}/latest/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}" "opensearch-dashboards=${ARTIFACT_ROOT_URL}")
+            # runIntegTestScript fell back to the latest OpenSearch build; the given OpenSearch manifest wins when set.
+            OPENSEARCH_ROOT="${OPENSEARCH_ARTIFACT_ROOT_URL:-${PUBLIC_ARTIFACT_URL}/distribution-build-opensearch/${VERSION}/latest/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}}"
+            PATHS=("opensearch=${OPENSEARCH_ROOT}" "opensearch-dashboards=${ARTIFACT_ROOT_URL}")
           fi
           BASE_PATH="${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${VERSION}/${BUILD_ID}/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}"
+          # Without the S3 upload the component ymls must reference the local test-results, which test-report reads back.
+          [ "${UPLOAD_RESULTS}" = true ] || BASE_PATH="${GITHUB_WORKSPACE}"
           TEST=(./test.sh integ-test "${TEST_MANIFEST}" --component "${COMPONENT}" --test-run-id "${TEST_RUN_ID}" --paths "${PATHS[@]}" --base-path "${BASE_PATH}")
           echo "Run command: ${TEST[*]}"
           if [ "${PLATFORM}" = windows ]; then
