@@ -61,8 +61,9 @@ work and the release roles trust nothing but the `release` environment, which re
    account under the names in `var.github_app` (defaults `/gha-runners/opensearch-build/github-app/*`).
    This is not the release-bot App behind `GH_APP_ID` / `GH_APP_PRIVATE_KEY`.
 2. **AMI parameters**: SSM `String` parameters (data type `aws:ec2:image`) named as in
-   `var.runner_ami_ssm_parameters`, holding the Jenkins agent AMI IDs. The packer workflow (s3.5) keeps
-   them current; the plan fails early if one is missing.
+   `var.runner_ami_ssm_parameters`, holding the Jenkins agent AMI IDs. `packer-build.yml` (s3.5) builds
+   them and reports the IDs; see `deployment/packer/README.md` for updating the parameters. The plan fails
+   early if one is missing.
 3. **State backend**: an S3 bucket + DynamoDB lock table in the runner account.
 4. **Cross-account access**: a role Terraform can assume in each account of `var.account_role_arns`,
    and, if the GitHub OIDC provider already exists in an account, `create_oidc_provider.<key> = false`.
