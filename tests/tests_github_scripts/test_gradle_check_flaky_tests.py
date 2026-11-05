@@ -125,3 +125,10 @@ class TestMetricsCluster(unittest.TestCase):
         self.assertEqual(args, ("https://cluster.example/idx/_search",))
         self.assertIsNotNone(kwargs["auth"])
         self.assertEqual(cluster.source, "metrics cluster (SigV4)")
+
+    def test_from_args_prefers_explicit_dashboards_url(self) -> None:
+        with patch.dict(os.environ, {}, clear=True), patch("sys.stderr"):
+            self.assertEqual(metrics_cluster.from_args("https://cluster.example", "https://proxy.example").dashboards_url, "https://proxy.example")
+            self.assertEqual(metrics_cluster.from_args("", "").dashboards_url, metrics_cluster.PUBLIC_DASHBOARDS_URL)
+            with pytest.raises(RuntimeError):
+                metrics_cluster.from_args("https://cluster.example", "")

@@ -127,10 +127,12 @@ jobs:
       - name: Select metrics source
         id: source
         env:
+          EVENT_NAME: ${{ github.event_name }}
           DRY_RUN: ${{ needs.manifests.outputs.dry-run }}
           HAS_ENDPOINT: ${{ secrets.METRICS_CLUSTER_ENDPOINT != '' && secrets.AWS_ROLE_METRICS != '' }}
         run: |
-          if [ "$HAS_ENDPOINT" = "true" ]; then
+          # pull requests cannot assume AWS_ROLE_METRICS (its OIDC trust is main / environment ci)
+          if [ "$HAS_ENDPOINT" = "true" ] && [ "$EVENT_NAME" != "pull_request" ]; then
             echo "source=cluster" >> "$GITHUB_OUTPUT"
           elif [ "$DRY_RUN" = "true" ]; then
             echo "::notice::METRICS_CLUSTER_ENDPOINT / AWS_ROLE_METRICS not set; the dry run reads the public metrics Dashboards proxy."
@@ -161,7 +163,7 @@ jobs:
           INPUT_MANIFEST: ${{ matrix.input-manifest }}
           DISTRIBUTION_NUMBER: ${{ inputs.DISTRIBUTION_NUMBER }}
           SOURCE: ${{ steps.source.outputs.source }}
-          METRICS_CLUSTER_ENDPOINT: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+          METRICS_CLUSTER_ENDPOINT: ${{ steps.source.outputs.source == 'cluster' && secrets.METRICS_CLUSTER_ENDPOINT || '' }}
         run: |
           args=(--input-manifest "manifests/$INPUT_MANIFEST" --distribution-number "$DISTRIBUTION_NUMBER" --report "$RUNNER_TEMP/integ-test-results.json")
           if [ "$SOURCE" = "public" ]; then args+=(--dashboards-url https://metrics.opensearch.org/_dashboards); fi

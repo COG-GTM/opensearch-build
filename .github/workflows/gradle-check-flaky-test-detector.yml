@@ -69,7 +69,8 @@ jobs:
             *) dry_run=true ;;
           esac
           echo "dry-run=$dry_run" >> "$GITHUB_OUTPUT"
-          if [ "$HAS_ENDPOINT" = "true" ]; then
+          # pull requests cannot assume AWS_ROLE_METRICS (its OIDC trust is main / environment ci)
+          if [ "$HAS_ENDPOINT" = "true" ] && [ "$EVENT_NAME" != "pull_request" ]; then
             echo "source=cluster" >> "$GITHUB_OUTPUT"
           elif [ "$dry_run" = "true" ]; then
             echo "::notice::METRICS_CLUSTER_ENDPOINT / AWS_ROLE_METRICS not set; the dry run reads the public metrics Dashboards proxy."
@@ -98,7 +99,7 @@ jobs:
         env:
           TIME_FRAME: ${{ matrix.time-frame }}
           SOURCE: ${{ steps.mode.outputs.source }}
-          METRICS_CLUSTER_ENDPOINT: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+          METRICS_CLUSTER_ENDPOINT: ${{ steps.mode.outputs.source == 'cluster' && secrets.METRICS_CLUSTER_ENDPOINT || '' }}
         run: |
           args=(--time-frame "$TIME_FRAME" --issues-file "$RUNNER_TEMP/flaky-tests.json")
           if [ "$SOURCE" = "public" ]; then args+=(--dashboards-url https://metrics.opensearch.org/_dashboards); fi

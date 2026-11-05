@@ -67,7 +67,11 @@ class MetricsCluster:
 
 
 def from_args(endpoint: str, dashboards_url: str) -> MetricsCluster:
-    cluster = MetricsCluster(endpoint=endpoint) if endpoint else MetricsCluster(dashboards_url=dashboards_url or PUBLIC_DASHBOARDS_URL)
+    """An explicit dashboards_url wins over the endpoint so dry runs never need AWS credentials."""
+    if dashboards_url or not endpoint:
+        cluster = MetricsCluster(dashboards_url=dashboards_url or PUBLIC_DASHBOARDS_URL)
+    else:
+        cluster = MetricsCluster(endpoint=endpoint)
     print(f"Reading metrics from the {cluster.source}", file=sys.stderr)
     return cluster
 
