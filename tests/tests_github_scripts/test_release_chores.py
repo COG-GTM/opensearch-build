@@ -295,3 +295,35 @@ def test_notes_pr_dry_run(tmp_path: Any, capsys: Any) -> None:
 def test_main_reports_errors(capsys: Any) -> None:
     assert release_chores.main(["doc-prs", "--action", "check"]) == 1
     assert "::error::Version parameter is required." in capsys.readouterr().out
+
+
+def test_release_owners_metrics_failure_does_not_assign() -> None:
+    def broken(query: Dict[str, Any]) -> Dict[str, Any]:
+        raise RuntimeError("timeout")
+
+    gh = FakeGh()
+    chore, _ = chores(["release-owners", "--action", "assign", "--manifest", OS_MANIFEST], gh, FakeMetrics({release_chores.RELEASE_METRICS_INDEX: broken}))
+    with pytest.raises(release_chores.ChoreError, match="Unable to read the release owners"):
+        chore.run("release-owners")
+    assert gh.calls == []
+
+
+def test_release_issues_metrics_failure_does_not_dispatch() -> None:
+    gh = FakeGh()
+    chore, _ = chores(["release-issues", "--action", "create", "--manifest", OS_MANIFEST], gh, FakeMetrics({release_chores.RELEASE_METRICS_INDEX: {"hits": {"hits": []}}}))
+    with pytest.raises(release_chores.ChoreError, match="not dispatching"):
+        chore.run("release-issues")
+    assert gh.calls == []
+
+
+def test_pr_base_for_tag_refs() -> None:
+    gh = FakeGh({"api repos/o/r/branches/3.8": "3.8"})
+    assert release_chores.pr_base(release_chores.GitHub(False, gh), "o/r", "tags/3.8.0.0", "3.8.0") == "3.8"
+    assert release_chores.pr_base(release_chores.GitHub(False, FakeGh()), "o/r", "main", "3.8.0") == "main"
+
+    def no_branch(args: List[str]) -> str:
+        if "branches" in args[1]:
+            raise release_chores.subprocess.CalledProcessError(1, "gh")
+        return "main"
+
+    assert release_chores.pr_base(release_chores.GitHub(False, no_branch), "o/r", "tags/3.8.0.0", "3.8.0") == "main"

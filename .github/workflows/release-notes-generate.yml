@@ -209,7 +209,7 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: release-notes-${{ matrix.component }}
-          path: release-notes/*${{ matrix.repository }}.release-notes-*
+          path: release-notes/*.release-notes-*
           if-no-files-found: ignore
       - name: Mint GitHub App token
         id: app-token

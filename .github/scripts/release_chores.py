@@ -345,6 +345,8 @@ class Chores:
         for manifest in manifests:
             for component in manifest.get("components", []):
                 owners = metrics.release_owners(component["name"])
+                if owners is None:
+                    raise ChoreError(f"Unable to read the release owners of {component['name']} from metrics; not guessing")
                 if not owners:
                     missing.append(component["name"])
                     if self.args.action != "check":
@@ -429,7 +431,13 @@ class Chores:
     def release_issues(self) -> None:
         manifests = self._manifests()
         metrics = self.metrics_factory(str(manifests[0]["build"]["version"]), None)
-        missing = [c["name"] for m in manifests for c in m.get("components", []) if not metrics.release_issue_exists(c["name"])]
+        missing = []
+        for component in [c for m in manifests for c in m.get("components", [])]:
+            exists = metrics.release_issue_exists(component["name"])
+            if exists is None:
+                raise ChoreError(f"Unable to read the release issue status of {component['name']} from metrics; not dispatching")
+            if not exists:
+                missing.append(component["name"])
         echo(f"Components missing release issues: {missing}")
         if self.args.action == "create" and missing:
             echo("Triggering GitHub workflows for creating issues:")
@@ -646,6 +654,17 @@ def push_url(repository: str) -> str:
     return f"https://x-access-token:{os.environ.get('GH_TOKEN', '')}@github.com/{repository}.git"
 
 
+def pr_base(github: GitHub, upstream: str, ref: str, version: str) -> str:
+    """PR base branch: the ref itself, or for a tag the <major>.<minor> release branch, else the default branch."""
+    if not ref.startswith("tags/"):
+        return ref.replace("refs/heads/", "")
+    release_branch = ".".join(version.split(".")[:2])
+    try:
+        return github.read("api", f"repos/{upstream}/branches/{release_branch}", "--jq", ".name") or release_branch
+    except subprocess.CalledProcessError:
+        return github.read("api", f"repos/{upstream}", "--jq", ".default_branch")
+
+
 def notes_pr(args: argparse.Namespace, github: GitHub) -> None:
     """Pull request half of release-notes-generate: one '[AUTO] Add release notes' PR per component repository."""
     manifest = load_manifest(args.manifest[0])
@@ -691,7 +710,7 @@ def notes_pr(args: argparse.Namespace, github: GitHub) -> None:
         git(checkout, "-c", f"user.email={args.git_email}", "-c", f"user.name={args.git_name}", "commit", "-sm", f"Add release notes for {version}", dry_run=args.dry_run, description="commit")
         git(checkout, "push", push_url(upstream), f"HEAD:refs/heads/{branch}", "--force", dry_run=args.dry_run, description=f"push {branch} to {upstream}")
         existing = github.read("api", f"repos/{upstream}/pulls?head={UPSTREAM_OWNER}:{branch}&state=open", "--jq", ".[0].number")
-        base = ref[len("tags/"):] if ref.startswith("tags/") else ref
+        base = pr_base(github, upstream, ref, version)
         if existing and existing != "null":
             github.write(f"update PR #{existing} in {upstream} with new release notes", "pr", "edit", existing, "--repo", upstream, "--body", body)
         else:
