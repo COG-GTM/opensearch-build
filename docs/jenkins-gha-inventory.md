@@ -203,6 +203,119 @@ Column notes: **Triggers** lists `parameterizedCron (n)` with the number of cron
 
 bwc-test (both) and the test jobs launched by distribution builds take the label as the `AGENT_LABEL` parameter. Runner choices (self-hosted x64/arm64/Windows/macOS, benchmark class, single-host systemd) are decided in s1.3.
 
+## Shared-library steps → GitHub Actions building blocks (s1.2)
+
+Every `opensearch-build-libraries` `vars/` step that a **port** pipeline calls directly, read at the ref that pipeline pins (`jenkins@12.0.0` for most, `12.0.1` for integ-test, `13.5.0` for release-schedule, `lf-jenkins` for the `-lf` files). 55 steps: the 54 in the inventory's *Library steps* column plus `postCleanup`. Steps that only run inside other steps (`assembleUpload`, `assembleManifest`, `uploadArtifacts`, `buildYumRepo`, `retrievePreviousBuild`, `createGithubIssue`, `closeGithubIssue`, `gradleCheckFlakyTestGitHubIssue`, `loadCustomScript`) go with their caller's target.
+
+Cross-check: scanning each port pipeline at its pinned ref for calls to any `vars/*.groovy` name (comments stripped) returns exactly these 55 names, so the inventory column is complete.
+
+### Categories
+
+* **composite**: composite action under `.github/actions/<name>/`: stateless shell plus a little logic, no job boundary. AWS access goes through `aws-actions/configure-aws-credentials` (OIDC role per account, chosen in s1.4) instead of `withAWS`; `op://` references become repository or environment secrets with the same names (s1.4).
+* **reusable**: reusable workflow `.github/workflows/_<name>.yml` (`on: workflow_call`): owns a job boundary (runner label, container, matrix, `environment`).
+* **repo**: plain Python/bash already in this repo (`build.sh`, `assemble.sh`, `test.sh`, `report.sh`, `validation.sh`, `src/run_*.py`); the GHA step calls it directly, the Groovy wrapper only built the command line.
+* **redesign**: no faithful GHA equivalent; the mechanism column is what replaces it.
+
+### Step table
+
+| Step | Pin | Called by (port) | What it does | Category | GHA target |
+| --- | --- | --- | --- | --- | --- |
+| `addRcDetailsComment` | 12.0.0 | release-chores | Query metrics cluster for RC build/test status, `gh issue comment` on the release issue | composite | `.github/actions/release-chore` (`chore: rc-details`): Python query + `gh issue comment` with the GitHub App token |
+| `archiveAssembleUpload` | 12.0.0 | distribution-build (OS, OSD) | `unstash` builds, `assemble.sh`, upload to S3 (`assembleUpload`) | reusable | `_build-assemble.yml` assemble job: `actions/download-artifact` → `./assemble.sh` → `s3-sync` |
+| `buildArchive` | 12.0.0 | distribution-build (OS, OSD) | `build.sh` then `stash` the builds for a later assemble | reusable | `_build-assemble.yml` build job: `./build.sh` → `actions/upload-artifact` (stash/unstash become artifacts between jobs) |
+| `buildAssembleUpload` | 12.0.0 | distribution-build (OS, OSD), feature-build | `build.sh` + `assemble.sh` + S3 upload in one agent | reusable | `_build-assemble.yml` (one job per platform × distribution × arch matrix cell) |
+| `buildDockerImage` | 12.0.0 | distribution-build (OS, OSD) | `build job: docker-build` then `docker-copy`, `wait: true`, `propagate: true` | redesign | `workflow_call` of `docker-build.yml` then `docker-copy.yml` chained with `needs`; tarball URLs passed as inputs |
+| `buildManifest` | 12.0.0 | publish-min-snapshots (also inside build steps) | Resolve `previousBuildId` from `index.json` for incremental builds, run `./build.sh` | repo | `./build.sh` (`src/run_build.py`); the incremental `latest` lookup is a `curl … \| jq .latest` step |
+| `buildMessage` | 12.0.0 | distribution-build (OS, OSD) | Grep the Jenkins console log (`currentBuild.rawBuild`) for a string | redesign | Steps write what later steps need to `$GITHUB_OUTPUT` / files uploaded with `actions/upload-artifact`; no log scraping |
+| `buildRC` | 12.0.0 | release-chores | Read latest RC from metrics, `build job: distribution-build-*` with RC+1 (parallel for both) | redesign | `gh workflow run distribution-build-<product>.yml -f rc_number=…` with the GitHub App token (both products in one step), then `gh run watch` on both runs and fail the step afterwards if either concluded non-success; RC lookup in the `release-chore` action |
+| `buildUploadManifestSHA` | 12.0.0 | check-for-build | `getManifestSHA` then upload the lock file to the SHAs path in S3 | composite | `.github/actions/manifest-sha` (`upload: true`) |
+| `checkCodeCoverage` | 12.0.0 | release-chores | Coverage per component from metrics → release-issue comment | composite | `release-chore` (`chore: code-coverage`) |
+| `checkDocumentationIssues` | 12.0.0 | release-chores | `gh issue list/view/comment` on documentation-website for the version label | composite | `release-chore` (`chore: doc-issues`) |
+| `checkDocumentationPullRequests` | 12.0.0 | release-chores | `gh pr list` on documentation-website | composite | `release-chore` (`chore: doc-prs`) |
+| `checkIntegTestResultsOverview` | 12.0.0 | release-chores | Integ-test status per component from metrics → comment | composite | `release-chore` (`chore: integ-overview`) |
+| `checkReleaseIssues` | 12.0.0 | release-chores | `gh workflow run os-release-issues.yml` / `osd-release-issues.yml` + metrics read | composite | `release-chore` (`chore: release-issues`); both targets are already GHA workflows in this repo |
+| `checkReleaseNotes` | 12.0.0 | release-chores | Parse release-notes table, comment on release issue | composite | `release-chore` (`chore: release-notes`) |
+| `checkRequestAssignReleaseOwners` | 12.0.0 | release-chores | Comment and `gh issue edit --add-assignee` per component release issue | composite | `release-chore` (`chore: release-owners`) |
+| `copyContainer` | lf-jenkins | docker-copy | `docker login` (DockerHub/ECR public) + `crane cp` (optionally `--all-tags`) | composite | `.github/actions/container-copy`: `docker/login-action` + `crane cp` |
+| `createReleaseTag` | 12.0.0 | release-tag | For each bundle-manifest component: `git ls-remote --tags`, `git tag`, `git push` | composite | `.github/actions/create-release-tag` with the GitHub App token for push |
+| `createSha512Checksums` | 12.0.0 | promote-artifacts | `sha512sum` every file under a path, write `.sha512` | composite | `.github/actions/checksums` |
+| `createSignatureFiles` | 12.0.0 | promote-artifacts | Closure that calls `signArtifacts` | composite | `.github/actions/sign-artifacts` |
+| `createUploadTestReportManifest` | 12.0.1, lf-jenkins | integ-test (OS, OSD), smoke-test | `./report.sh` → `test-report.yml`, upload to S3 | repo | `./report.sh` (`src/run_test_report.py`) + `s3-sync` |
+| `detectDockerAgent` | 12.0.0 | check-for-build, distribution-build (OS, OSD), feature-build, publish-min-snapshots | Pick CI image/args/JDK from input manifest `ci.images` | composite | `.github/actions/resolve-ci-image` (outputs `image`, `args`, `java-version`) in a setup job; consumers use `container: ${{ needs.setup.outputs.image }}` |
+| `detectTestDockerAgent` | 12.0.0, 12.0.1, lf-jenkins | bwc-test (OS, OSD), integ-test (OS, OSD), smoke-test | Same, from the test manifest | composite | `resolve-ci-image` (`manifest-type: test`) |
+| `downloadBuildManifest` | 12.0.0, 12.0.1, lf-jenkins | bwc/integ/smoke tests, benchmark-test (3), release-branch | `curl --retry 5` a build manifest URL to a path | composite | `.github/actions/download-build-manifest` |
+| `downloadFromS3` | 12.0.1, lf-jenkins | integ-test (OS, OSD), publish-to-maven | `withAWS` role + `s3Download` | composite | `.github/actions/s3-sync` (`direction: download`) |
+| `getCompareBenchmarkIds` | 12.0.0 | benchmark-pull-request | Query benchmark datastore for baseline/contender execution IDs | composite | `.github/actions/benchmark-compare-ids` (curl `_search`, datastore creds by secret name) |
+| `getLogsForStage` | 12.0.0 | distribution-build (OS, OSD), feature-build | Walk the Jenkins flow graph for a stage's log lines (failed components) | redesign | Build job writes failed components to a file and `$GITHUB_OUTPUT`; downstream job reads it via `needs.<job>.outputs` / artifact |
+| `getManifestSHA` | 12.0.0 | check-for-build | `build.sh --lock`, sha1 of the lock, `s3DoesObjectExist` on the SHAs path | composite | `.github/actions/manifest-sha` (outputs `sha`, `lock`, `path`, `exists`) |
+| `gradleCheckFlakyTestDetector` | 12.0.0 | gradle-check-flaky-test-issue-creation | Query `gradle-check` index, create/edit `[AUTOCUT] Gradle Check Flaky Test Report` issues | redesign | Autocut: `schedule` (`0 */6 * * *`) workflow; Python query step writes issue bodies; `gh issue list -S` / `create` / `edit` with the GitHub App token |
+| `patchDockerImage` | lf-jenkins | docker-re-release | Rebuild latest released image (`buildDockerImage`), then `build job: docker-promotion` | redesign | `workflow_call` chain `docker-build.yml` → `docker-copy.yml` → `promote-docker-ecr.yml` with `needs`; the 4 parameterizedCron entries become `schedule` + matrix (`PRODUCT`, `TAG`) |
+| `postCleanup` | all pins | almost every pipeline (`post { always }`) | `cleanWs` | repo | Nothing on ephemeral runners; on self-hosted runners an `if: always()` step `rm -rf "${GITHUB_WORKSPACE:?}"/*` |
+| `printArtifactDownloadUrlsForStaging` | 12.0.0 | sign-standalone-artifacts | Echo `ci.opensearch.org/ci/dbc/...` URLs | repo | `echo` lines to `$GITHUB_STEP_SUMMARY` |
+| `promoteArtifacts` | 12.0.0 | promote-artifacts | Download from staging bucket, sign, checksum, upload to production `releases/` | reusable | `promote-artifacts.yml` with `on: workflow_call` + `workflow_dispatch`, `environment: release` (production role), using `s3-sync` + `sign-artifacts` + `checksums` |
+| `promoteContainer` | lf-jenkins | promote-docker-ecr | Up to 6 `build job: docker-copy` (DockerHub/ECR × version/major/latest) | redesign | `workflow_call` of `docker-copy.yml` with a matrix of (registry, tag) built from the inputs |
+| `promoteRepos` | 12.0.0 | promote-repos | Sync yum/apt repos from production bucket, re-sign with GPG, upload | reusable | `promote-repos.yml` (`workflow_call` + `workflow_dispatch`, `environment: release`) using `sign-artifacts` |
+| `publishDistributionBuildResults` | 12.0.0 | distribution-build (OS, OSD) | Bulk-index per-component build results (uses `currentBuild.number/startTime`) into the metrics cluster | composite | `.github/actions/publish-metrics` (`kind: build`); build number → `github.run_id`/`run_attempt`, start time from the run |
+| `publishIntegTestResults` | 12.0.1 | integ-test (OS, OSD) | Bulk-index integ results + failures from `test-report.yml` | composite | `publish-metrics` (`kind: integ`) |
+| `publishNotification` | 12.0.0 | bwc-test (OSD), benchmark-test (3) | POST a message to the `op://…/webhook/<id>` URL | composite | `.github/actions/notify-webhook` (webhook URL from a secret by name) |
+| `publishSmokeTestResults` | lf-jenkins | smoke-test | Bulk-index smoke results | composite | `publish-metrics` (`kind: smoke`) |
+| `publishToMaven` | lf-jenkins | publish-to-maven | Sign, then the library's `stage-maven-release.sh` to Central Portal | composite | `.github/actions/maven-publish`: `sign-artifacts` + the library script vendored at the pinned ref (a copy already sits at `scripts/legacy/publish/stage-maven-release.sh`; diff before reuse) |
+| `registerReleaseSchedule` | 13.5.0 | release-schedule | Write release schedule docs to the metrics cluster | composite | `publish-metrics` (`kind: release-schedule`) |
+| `runBenchmarkTestScript` | 12.0.0 | benchmark-* (6) | Download config from S3, build `./test.sh benchmark-test …`, run under perf account role | repo | `./test.sh benchmark-test` (`src/run_benchmark_test.py`) after `s3-sync` + `configure-aws-credentials` (12 h role session) |
+| `runBwcTestScript` | 12.0.0 | bwc-test (OS, OSD) | `./test.sh bwc-test` with `--paths` from build manifest | repo | `./test.sh bwc-test` (`src/run_bwc_test.py`) |
+| `runIntegTestScript` | 12.0.1 | integ-test (OS) | `./test.sh integ-test` (Windows: scoop JDK switch) | repo | `./test.sh integ-test` (`src/run_integ_test.py`); Windows JDK via `actions/setup-java` |
+| `runIntegTestScriptForOSD` | 12.0.1 | integ-test (OSD) | Download OS artifacts, then `runIntegTestScript` | repo | `s3-sync` + `./test.sh integ-test` |
+| `runSmokeTestScript` | lf-jenkins | smoke-test | `./test.sh smoke-test` (optional `su` to uid 1000) | repo | `./test.sh smoke-test` (`src/run_smoke_test.py`); non-root via container `options: --user 1000` |
+| `scanDockerImage` | lf-jenkins | docker-scan | `trivy image` table + JSON | composite | `.github/actions/trivy-scan` (pinned trivy), results via `actions/upload-artifact` |
+| `signArtifacts` | 12.0.0 | sign-standalone-artifacts (also inside promote/maven/min-snapshot steps) | Assume signing role, import GPG key from Secrets Manager, sign (`.sig`/`.asc`/`.rpm`) | composite | `.github/actions/sign-artifacts` (wraps `./sign.sh` / `src/run_sign.py` for generic sigs, GPG path for RPM); signing role only in `environment: release` |
+| `updateBuildFailureIssues` | 12.0.0 | distribution-build (OS, OSD) | Per component: open/update or close `[AUTOCUT] Distribution Build Failed` issues | redesign | Autocut: final job `if: always()` with `needs: [build jobs]`, failed list from job outputs; `gh issue list -S` / `create` / `comment` / `close` with the GitHub App token |
+| `updateIntegTestFailureIssues` | 12.0.0 | integ-test-notification | Same for `[AUTOCUT] Integ Test Failed` issues from metrics | redesign | Autocut: same `gh issue` job, called from the integ-test workflows via `workflow_call` instead of `build job: integ-test-notification` |
+| `uploadIndexFile` | 12.0.0 | distribution-build (OS, OSD), feature-build | Write `{"latest": BUILD_NUMBER}` index.json to S3 | composite | `s3-sync` with a generated `index.json` (`latest` = run number) |
+| `uploadMinSnapshotsToS3` | 12.0.0 | publish-min-snapshots | Checksum + sign min artifacts, copy to `*-latest.*`, upload to production `snapshots/` | composite | `.github/actions/publish-min-snapshots` composing `checksums` + `sign-artifacts` + `s3-sync` |
+| `uploadTestResults` | 12.0.0, 12.0.1, lf-jenkins | bwc/integ/smoke tests | `s3Upload test-results` to the build's test-results path | composite | `s3-sync` (`direction: upload`) |
+| `uploadToS3` | 12.0.0 | sign-standalone-artifacts (also inside upload steps) | `withAWS opensearch-bundle` + `s3Upload` | composite | `.github/actions/s3-sync` |
+| `validateArtifacts` | lf-jenkins | validate-artifacts | Build `./validation.sh` args (Windows via `bash -c`) | repo | `./validation.sh` (`src/run_validation.py`) |
+
+Totals: composite 31, reusable 5, repo 10, redesign 9.
+
+### Composite actions and reusable workflows this produces
+
+| Building block | Steps it replaces |
+| --- | --- |
+| `.github/actions/s3-sync` | `uploadToS3`, `downloadFromS3`, `uploadTestResults`, `uploadIndexFile`, S3 parts of `createUploadTestReportManifest` / `runIntegTestScriptForOSD` / `runBenchmarkTestScript` |
+| `.github/actions/resolve-ci-image` | `detectDockerAgent`, `detectTestDockerAgent` |
+| `.github/actions/manifest-sha` | `getManifestSHA`, `buildUploadManifestSHA` |
+| `.github/actions/download-build-manifest` | `downloadBuildManifest` |
+| `.github/actions/sign-artifacts`, `.github/actions/checksums` | `signArtifacts`, `createSignatureFiles`, `createSha512Checksums` |
+| `.github/actions/publish-min-snapshots` | `uploadMinSnapshotsToS3` |
+| `.github/actions/maven-publish` | `publishToMaven` |
+| `.github/actions/container-copy`, `.github/actions/trivy-scan` | `copyContainer`, `scanDockerImage` |
+| `.github/actions/create-release-tag` | `createReleaseTag` |
+| `.github/actions/release-chore` | `addRcDetailsComment`, `check*` (7 steps), RC lookup of `buildRC` |
+| `.github/actions/publish-metrics` | `publishDistributionBuildResults`, `publishIntegTestResults`, `publishSmokeTestResults`, `registerReleaseSchedule` |
+| `.github/actions/notify-webhook` | `publishNotification` |
+| `.github/actions/benchmark-compare-ids` | `getCompareBenchmarkIds` |
+| `.github/workflows/_build-assemble.yml` | `buildArchive`, `buildAssembleUpload`, `archiveAssembleUpload` |
+| `promote-artifacts.yml`, `promote-repos.yml` (also `workflow_call`) | `promoteArtifacts`, `promoteRepos` |
+
+The two existing actions (`setup-opensearch-dashboards`, `start-opensearch`) are unrelated to the library and stay as they are.
+
+### Redesign items: Jenkins mechanism → GHA mechanism
+
+Library steps above plus the same constructs used directly in the port pipelines.
+
+| Jenkins construct | Where | GHA mechanism |
+| --- | --- | --- |
+| `build job:` fan-out with `wait: true` (`propagate: true`) | distribution-build → integ/bwc/smoke tests, `distribution-validation`, `publish-opensearch-min-snapshots`; release-promotion (~23 calls); release-tag → release-manifest-commit-lock; integ-test → validation, integ-test-notification; benchmark-pull-request → benchmark-compare; `buildDockerImage`, `patchDockerImage`, `promoteContainer` | Callee gets `on: workflow_call`; caller uses `uses: ./.github/workflows/<callee>.yml` jobs chained with `needs` (failure propagates by default; `if: always()` where Jenkins used `propagate: false`). Fan-out over components/platforms is a `strategy.matrix`. Nesting stays within GitHub's 4-level limit: the deepest planned chain is distribution-build → integ-test → validate-artifacts (3 levels) |
+| `build job:` across trigger boundaries | check-for-build → `TARGET_JOB_NAME` (`wait: true`); release-chores → release-notes-generate / release-notes-tracker (`wait: true`, `propagate: false`); `buildRC` (waits); release-promotion → publish-to-maven (`wait: false`) | `gh workflow run <file>.yml -f …` (`workflow_dispatch`) with the GitHub App token, so the dispatched run gets its own triggers, concurrency and history. Where Jenkins waited, the caller passes a unique `correlation_id` input (shown in the callee's `run-name`), polls `gh run list --workflow <file>.yml --json databaseId,displayTitle` with backoff until that run appears (fail after a timeout), and blocks on `gh run watch <id>`: with `--exit-status` for check-for-build (the `manifest-sha` upload step runs only after the watched build succeeds, as in Jenkins); for `buildRC` see its row; without `--exit-status` for the release-notes jobs (`propagate: false`). publish-to-maven is fire-and-forget |
+| `lock(resource: "CheckForBuild-${INPUT_MANIFEST}-${TARGET_JOB_NAME}", skipIfLocked: true)` | check-for-build | `concurrency: { group: check-for-build-${{ inputs.input_manifest }}-${{ inputs.target_job }}, cancel-in-progress: false }`. GHA queues one pending run instead of skipping; harmless because the running job holds the group until the watched distribution build finishes and its SHA is uploaded, so the queued run's `manifest-sha` `exists` check makes it a no-op (if that build failed, the queued run retries it, as the next Jenkins cron tick would) |
+| `throttleJobProperty(maxConcurrentTotal: 20)` | benchmark-pull-request, benchmark-compare | Runner-pool size of the benchmark runner group (s1.3); optional `concurrency` group per PR (`benchmark-${{ inputs.pull_request_number }}`) to drop superseded runs |
+| `parameterizedCron` (N entries with different params) | check-for-build (3), benchmark-test (97/58/16), benchmark-test-endpoint (21), benchmark-pull-request (11), publish-min-snapshots (4), docker-re-release (4), feature-build (1), gradle flaky detector | `on: schedule` with one `cron:` per distinct expression; a checked-in YAML of input sets per schedule (`.github/schedules/<workflow>.yml`) read in a setup job, filtered on `github.event.schedule`, emitted as the `strategy.matrix` for the real job. `workflow_dispatch` keeps manual runs with the same inputs |
+| `currentBuild.result = 'ABORTED'` / `UNSTABLE` / `catchError` | most test and build pipelines; `getLogsForStage`, `buildMessage` | No ABORTED/UNSTABLE in GHA: "nothing to do" exits 0 with a `::notice::` and a `$GITHUB_STEP_SUMMARY` line; unstable component failures use `continue-on-error: true` + a job output listing failed components, consumed by the Autocut job; overall failure via an explicit last step `exit 1` when the list is non-empty and `CONTINUE_ON_ERROR` is false |
+| `currentBuild.description` | bwc, integ, smoke, packer, distribution-build, benchmark-pull-request | `run-name:` built from inputs |
+| Autocut issue creation (`createGithubIssue` / `closeGithubIssue` / `gradleCheckFlakyTestGitHubIssue`) | `updateBuildFailureIssues`, `updateIntegTestFailureIssues`, `gradleCheckFlakyTestDetector` | `gh issue list -S "<title> in:title"` → `create` / `edit` / `comment` / `close`, authenticated with a GitHub App installation token (`actions/create-github-app-token`) scoped to `issues: write` on the component repos; replaces the `ci-bot-token` PAT (secret names in s1.4) |
+| `GenericTrigger` webhook | benchmark-pull-request | `repository_dispatch` (or `issue_comment` on the OpenSearch PR) carrying the same payload fields as inputs |
+
 ## Reconciliation with the earlier doc branches
 
 | Item | `jenkins-to-actions-plan.md` | `jenkins-to-github-actions-migration.md` | This inventory (verified on `main`) |
