@@ -12,6 +12,9 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   detect-issue:
     if: >-
@@ -20,7 +23,7 @@ jobs:
       (github.event_name == 'issues' &&
        github.event.issue.user.type != 'Bot' &&
        github.repository == 'opensearch-project/opensearch-build')
-    uses: opensearch-project/opensearch-build/.github/workflows/issue-dedupe-detect.yml@main
+    uses: ./.github/workflows/issue-dedupe-detect.yml
     permissions:
       contents: read
       issues: write
@@ -33,7 +36,7 @@ jobs:
 
   auto-close-issue:
     if: github.event_name == 'schedule' && github.repository == 'opensearch-project/opensearch-build'
-    uses: opensearch-project/opensearch-build/.github/workflows/issue-dedupe-autoclose.yml@main
+    uses: ./.github/workflows/issue-dedupe-autoclose.yml
     permissions:
       issues: write
     with:

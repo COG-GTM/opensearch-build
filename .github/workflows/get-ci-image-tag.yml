@@ -33,6 +33,9 @@ on:
         description: The ci image start commands to run after initialization
         value: ${{ jobs.Get-CI-Image-Tag.outputs.output-ci-image-start-command }}
 
+permissions:
+  contents: read
+
 jobs:
   Get-CI-Image-Tag:
     runs-on: ubuntu-latest
@@ -46,18 +49,19 @@ jobs:
         with:
           crane-release: v0.15.2
       - name: Checkout opensearch-build repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          persist-credentials: false
           repository: 'opensearch-project/opensearch-build'
           ref: ${{ inputs.build_ref }}
           path: 'opensearch-build'
       - name: Get ci image version from opensearch-build repository scripts
         id: step-ci-image-setups
+        env:
+          PRODUCT: ${{ inputs.product }}
+          PLATFORM: ${{ inputs.platform }}
+          TYPE: ${{ inputs.type }}
         run: |
-          PRODUCT=${{ inputs.product }}
-          PLATFORM=${{ inputs.platform }}
-          TYPE=${{ inputs.type }}
-
           if [[ "$PLATFORM" = "al2" ]]; then
               CI_IMAGE_CMD="cp -a /node_al2/* /node && /node/bin/node -v && cp -a /node_al2/* /node24 && /node24/bin/node -v && ls -l /usr/share/dotnet && rm -rf /usr/share/dotnet/*"
               echo "ci-image-start-command=$CI_IMAGE_CMD" >> $GITHUB_OUTPUT

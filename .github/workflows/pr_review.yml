@@ -4,9 +4,12 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened]
 
+permissions:
+  contents: read
+
 jobs:
   Code-Diff-Analyzer:
-    uses: opensearch-project/opensearch-build/.github/workflows/code-diff-analyzer.yml@main
+    uses: ./.github/workflows/code-diff-analyzer.yml
     if: github.repository == 'opensearch-project/opensearch-build'
     permissions:
       id-token: write  # github oidc to assume aws roles
@@ -18,7 +21,7 @@ jobs:
       update_pr_comment_with_analyzer_report: true
 
   Code-Diff-Reviewer:
-    uses: opensearch-project/opensearch-build/.github/workflows/code-diff-reviewer.yml@main
+    uses: ./.github/workflows/code-diff-reviewer.yml
     needs: Code-Diff-Analyzer
     if: github.repository == 'opensearch-project/opensearch-build'
     permissions:

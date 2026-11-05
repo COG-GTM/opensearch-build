@@ -1,0 +1,11 @@
+---
+# Config for actionlint (run by .github/workflows/workflow-lint.yml).
+self-hosted-runner:
+  # GitHub-hosted label that actionlint < 1.7.8 does not know yet
+  labels:
+    - macos-15-intel
+paths:
+  .github/workflows/osd-increment-plugin-versions.yml:
+    ignore:
+      # matrix.entry.path is never set in this matrix; kept for parity with os-increment-plugin-versions.yml
+      - 'property "path" is not defined in object type'

@@ -22,6 +22,12 @@ on:
         required: true
         description: 'List of components repositories'
         type: string
+    secrets:
+      OPENSEARCH_CI_BOT_TOKEN:
+        required: true
+
+permissions:
+  contents: read
 
 jobs:
   build-repo-issue-check:
@@ -31,7 +37,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Build repo
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Check if build repo release issue exists
         id: check_if_build_repo_issue_exists
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
@@ -47,12 +55,10 @@ jobs:
       - name: Build repo issue number
         id: get_build_repo_issue_number
         if: steps.check_if_build_repo_issue_exists.outputs.issues != '[]'
+        env:
+          ISSUES_JSON: ${{ steps.check_if_build_repo_issue_exists.outputs.issues }}
         run: |
-          issues=$(cat <<EOF
-          ${{ steps.check_if_build_repo_issue_exists.outputs.issues }}
-          EOF
-          )
-          echo "issue_number=$(echo $issues | jq -r '.[0].number')" >> $GITHUB_OUTPUT
+          echo "issue_number=$(echo "$ISSUES_JSON" | jq -r '.[0].number')" >> "$GITHUB_OUTPUT"
 
 
   component-release-issue:
@@ -78,17 +84,20 @@ jobs:
             });
             core.setOutput('issues', JSON.stringify(result.data.items));
       - name: Checkout Build repo
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Replace Placeholders
         if: steps.check_if_plugin_repo_issue_exists.outputs.issues == '[]'
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_ISSUE_NUMBER: ${{ needs.build-repo-issue-check.outputs.build_repo_issue_number }}
         run: |
           # Read the file contents and replace the placeholders
           file_path=".github/ISSUE_TEMPLATE/component_release_template.md"
-          RELEASE_VERSION="${{ inputs.version }}"
-          RELEASE_BRANCH=$(echo ${{ inputs.version }} | cut -d. -f1-2)
-          RELEASE_ISSUE_NUMBER=${{needs.build-repo-issue-check.outputs.build_repo_issue_number}}
+          RELEASE_BRANCH=$(echo "$RELEASE_VERSION" | cut -d. -f1-2)
           RELEASE_ISSUE="https://github.com/opensearch-project/opensearch-build/issues/${RELEASE_ISSUE_NUMBER}"
-          RELEASE_VERSION_X=$(echo "${{ inputs.version }}" | awk -F'.' '{print $1}').x
+          RELEASE_VERSION_X=$(echo "$RELEASE_VERSION" | awk -F'.' '{print $1}').x
           sed -e "s|{{RELEASE_VERSION}}|${RELEASE_VERSION}|g" -e "s|{{RELEASE_ISSUE}}|${RELEASE_ISSUE}|g" -e "s|{{RELEASE_BRANCH}}|${RELEASE_BRANCH}|g" -e "s|{{RELEASE_VERSION_X}}|${RELEASE_VERSION_X}|g" "$file_path" > "$file_path.tmp" && mv "$file_path.tmp" "$file_path"
       - name: Create component release issue from file
         if: steps.check_if_plugin_repo_issue_exists.outputs.issues == '[]'

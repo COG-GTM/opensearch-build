@@ -37,6 +37,9 @@ on:
         description: HEAD commit sha value to output (commit id)
         value: ${{ jobs.Code-Diff-Analyzer.outputs.OUTPUT_HEAD_COMMIT_SHA }}
 
+permissions:
+  contents: read
+
 jobs:
   Code-Diff-Analyzer:
     runs-on: ubuntu-latest
@@ -61,19 +64,29 @@ jobs:
       OUTPUT_HEAD_COMMIT_SHA: ${{ steps.step-final-status.outputs.HEAD_COMMIT_SHA }}
     steps:
       - name: Retrieve ref sha
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          EVENT_AFTER: ${{ github.event.after }}
+          SKIP_ON_PUSH: ${{ inputs.skip_diff_analyzer_on_push }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER_LOGIN: ${{ github.event.pull_request.user.login }}
+          PR_NUMBER: ${{ github.event.number }}
+          SKIP_LABEL: ${{ inputs.skip_diff_analyzer_with_label_name }}
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            base_sha="${{ github.event.before }}"
-            head_sha="${{ github.event.after }}"
-            if [ "${{ inputs.skip_diff_analyzer_on_push }}" = "true" ]; then
+          if [ "$EVENT_NAME" = "push" ]; then
+            base_sha="$EVENT_BEFORE"
+            head_sha="$EVENT_AFTER"
+            if [ "$SKIP_ON_PUSH" = "true" ]; then
               echo "Diff analyzer skipped due to inputs.skip_diff_analyzer_on_push is set to 'true'"
               echo "diff_analyzer=9" >> $GITHUB_ENV
             fi
-          elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            base_sha=${{ github.event.pull_request.base.sha }}
-            head_sha=${{ github.event.pull_request.head.sha }}
+          elif [ "$EVENT_NAME" = "pull_request_target" ]; then
+            base_sha=$PR_BASE_SHA
+            head_sha=$PR_HEAD_SHA
 
-            PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+            PR_AUTHOR="$PR_USER_LOGIN"
             if [ "$PR_AUTHOR" != "dependabot[bot]" ] && \
                [ "$PR_AUTHOR" != "opensearch-ci-bot" ] && \
                [ "$PR_AUTHOR" != "mend-for-github-com[bot]" ]; then
@@ -81,15 +94,15 @@ jobs:
 
               PR_LABELS=$(curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
                 -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.number }}/labels" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
                 | jq -r '.[].name')
               echo "labels: $PR_LABELS"
-              echo "Verifying skip label: ${{ inputs.skip_diff_analyzer_with_label_name }}"
+              echo "Verifying skip label: $SKIP_LABEL"
               if [ -n "$PR_LABELS" ]; then
                 for label in $PR_LABELS
                 do
-                  if [[ "$label" = "${{ inputs.skip_diff_analyzer_with_label_name }}" ]]; then
-                    echo "Diff analyzer skipped due to label ${{ inputs.skip_diff_analyzer_with_label_name }}."
+                  if [[ "$label" = "$SKIP_LABEL" ]]; then
+                    echo "Diff analyzer skipped due to label $SKIP_LABEL."
                     echo "diff_analyzer=9" >> $GITHUB_ENV
                     break
                   fi
@@ -100,7 +113,7 @@ jobs:
               echo "diff_analyzer=9" >> $GITHUB_ENV
             fi
           else
-            echo "wrong github event: ${{ github.event_name }}, must be 'push' or 'pull_request_target'"
+            echo "wrong github event: $EVENT_NAME, must be 'push' or 'pull_request_target'"
             echo "diff_analyzer=5" >> $GITHUB_ENV
             echo "diff_report='wrong github event'" >> $GITHUB_ENV
             exit 1
@@ -130,7 +143,7 @@ jobs:
           cat $DIFF_CONTENT_PATH
           echo "-------------------------------------------------------"
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         if: ${{ env.diff_analyzer != '5' && env.diff_analyzer != '9' }}
         with:
           node-version: 24
@@ -143,7 +156,7 @@ jobs:
 
       - name: Configure AWS credentials
         if: ${{ env.diff_analyzer != '5' && env.diff_analyzer != '9' }}
-        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
         with:
           role-to-assume: ${{ secrets.BEDROCK_ACCESS_ROLE }}
           aws-region: us-east-1
@@ -240,6 +253,7 @@ jobs:
           DIFF_ISSUE_HIGH=$(echo $diff_report_json | jq -r .counts.high)
           DIFF_ISSUE_MEDIUM=$(echo $diff_report_json | jq -r .counts.medium)
           DIFF_ISSUE_LOW=$(echo $diff_report_json | jq -r .counts.low)
+          # shellcheck disable=SC2034
           DIFF_TRUNCATED=$(echo $diff_report_json | jq -r .truncated)
           echo "Issue Count: Total($DIFF_ISSUE_TOTAL), Critical($DIFF_ISSUE_CRITICAL), High($DIFF_ISSUE_HIGH), Medium($DIFF_ISSUE_MEDIUM), Low($DIFF_ISSUE_LOW)"
           echo "-------------------------------------------------------"
@@ -285,23 +299,25 @@ jobs:
       # yamllint enable
 
       - name: Check final status
+        env:
+          HARD_FAIL_LEVEL: ${{ inputs.hard_fail_level }}
         id: step-final-status
         run: |
-          echo "DIFF_ANALYZER_LEVELS=${{ env.diff_analyzer }}" >> $GITHUB_OUTPUT
-          echo "HEAD_COMMIT_SHA=${{ env.HEAD_SHA }}"  >> $GITHUB_OUTPUT
+          echo "DIFF_ANALYZER_LEVELS=$diff_analyzer" >> $GITHUB_OUTPUT
+          echo "HEAD_COMMIT_SHA=$HEAD_SHA"  >> $GITHUB_OUTPUT
 
-          if [ -z "${{ env.diff_analyzer }}" ] || [ "${{ env.diff_analyzer }}" = "5" ]; then
+          if [ -z "$diff_analyzer" ] || [ "$diff_analyzer" = "5" ]; then
             echo "Previous steps failed, no diff status"
-          elif [ "${{ env.diff_analyzer }}" = "0" ]; then
+          elif [ "$diff_analyzer" = "0" ]; then
             echo "Diff analyzer passed"
-          elif [ "${{ env.diff_analyzer }}" = "9" ]; then
+          elif [ "$diff_analyzer" = "9" ]; then
             echo "Diff analyzer skipped"
           else
             echo "Diff analyzer has found issues in the code changes per AI Analysis"
           fi
 
-          if [ "${{ env.diff_analyzer }}" != '9' ] && [ "${{ env.diff_analyzer }}" -ge "${{ inputs.hard_fail_level }}" ]; then
-            echo "Hard fail diff analyzer at level ${{ inputs.hard_fail_level }}"
+          if [ "$diff_analyzer" != '9' ] && [ "$diff_analyzer" -ge "$HARD_FAIL_LEVEL" ]; then
+            echo "Hard fail diff analyzer at level $HARD_FAIL_LEVEL"
             exit 1
           fi
 

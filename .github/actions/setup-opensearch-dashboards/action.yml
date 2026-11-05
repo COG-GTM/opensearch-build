@@ -62,8 +62,9 @@ runs:
       shell: bash
 
     - name: Check out OpenSearch Dashboards
-      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       with:
+        persist-credentials: false
         path: OpenSearch-Dashboards
         repository: opensearch-project/OpenSearch-Dashboards
         ref: main
@@ -71,28 +72,32 @@ runs:
 
     - name: Check out plugin from current repository
       if: ${{ inputs.plugin_repo == '' && inputs.plugin_branch == '' }}
-      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       with:
+        persist-credentials: false
         path: ${{ steps.determine-plugin-directory.outputs.plugin-directory }}
 
     - name: Check out plugin branch from current repository
       if: ${{ inputs.plugin_repo == '' && inputs.plugin_branch != '' }}
-      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       with:
+        persist-credentials: false
         path: ${{ steps.determine-plugin-directory.outputs.plugin-directory }}
         ref: ${{ inputs.plugin_branch }}
 
     - name: Check out plugin from external repository
       if: ${{ inputs.plugin_repo != '' && inputs.plugin_branch == '' }}
-      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       with:
+        persist-credentials: false
         path: ${{ steps.determine-plugin-directory.outputs.plugin-directory }}
         repository: ${{ inputs.plugin_repo }}
 
     - name: Check out plugin branch from external repository
       if: ${{ inputs.plugin_repo != '' && inputs.plugin_branch != '' }}
-      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       with:
+        persist-credentials: false
         path: ${{ steps.determine-plugin-directory.outputs.plugin-directory }}
         repository: ${{ inputs.plugin_repo }}
         ref: ${{ inputs.plugin_branch }}
@@ -120,7 +125,7 @@ runs:
       shell: bash
 
     - name: Set up Node.js
-      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
       with:
         node-version: ${{ steps.tool-versions.outputs.node_version }}
         registry-url: 'https://registry.npmjs.org'
