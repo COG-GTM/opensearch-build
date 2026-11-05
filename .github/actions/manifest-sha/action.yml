@@ -28,6 +28,12 @@ inputs:
     description: 'ARTIFACT_BUCKET_NAME; empty uses the Actions cache'
     required: false
     default: ''
+  dry-run:
+    description: >-
+      'true' for a build that uploads / publishes nothing (no-upload, PUBLISH=false): its SHA is checked and recorded
+      only in the Actions cache under manifest-sha-dry-run/, never at the S3 key the schedule reads.
+    required: false
+    default: 'false'
   aws-region:
     description: 'AWS region'
     required: false
@@ -49,6 +55,9 @@ outputs:
   store:
     description: 's3 or actions-cache'
     value: ${{ steps.store.outputs.store }}
+  s3-key:
+    description: 'getManifestSHA S3 key in the artifact bucket (same as path)'
+    value: ${{ steps.sha.outputs.path }}
 
 runs:
   using: 'composite'
@@ -108,13 +117,26 @@ runs:
       env:
         ROLE: ${{ inputs.role-to-assume }}
         BUCKET: ${{ inputs.bucket }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        SHA_PATH: ${{ steps.sha.outputs.path }}
       run: |
         set -euo pipefail
-        if [ -n "${ROLE}" ] && [ -n "${BUCKET}" ]; then
+        # Same key as getManifestSHA / buildUploadManifestSHA (jenkins@12.0.0) in the artifact bucket
+        echo "S3 key: s3://\${ARTIFACT_BUCKET_NAME}/${SHA_PATH}"
+        if [ "${DRY_RUN}" = true ]; then
+          echo "::notice::Dry-run build (nothing uploaded or published): its SHA lives only in the Actions cache under manifest-sha-dry-run/${SHA_PATH}, never at the S3 key the schedule reads."
+          echo "store=actions-cache" >> "$GITHUB_OUTPUT"
+          echo "cache-key=manifest-sha-dry-run/${SHA_PATH}" >> "$GITHUB_OUTPUT"
+        elif [ -n "${ROLE}" ]; then
+          if [ -z "${BUCKET}" ]; then
+            echo "::error::AWS_ROLE_ARTIFACTS is set but ARTIFACT_BUCKET_NAME is not; the manifest SHA must go to s3://\${ARTIFACT_BUCKET_NAME}/${SHA_PATH}."
+            exit 1
+          fi
           echo "store=s3" >> "$GITHUB_OUTPUT"
         else
-          echo "::notice::Manifest SHAs are kept in the GitHub Actions cache: AWS_ROLE_ARTIFACTS / ARTIFACT_BUCKET_NAME are not configured, so the artifact bucket's <job>/<version>/shas/ cannot be read or written."
+          echo "::notice::Manifest SHAs are kept in the GitHub Actions cache (manifest-sha/${SHA_PATH}): AWS_ROLE_ARTIFACTS is not configured, so s3://\${ARTIFACT_BUCKET_NAME}/${SHA_PATH} cannot be read or written."
           echo "store=actions-cache" >> "$GITHUB_OUTPUT"
+          echo "cache-key=manifest-sha/${SHA_PATH}" >> "$GITHUB_OUTPUT"
         fi
 
     - name: Assume the artifacts role
@@ -151,7 +173,7 @@ runs:
       if: ${{ inputs.mode == 'check' && steps.store.outputs.store == 'actions-cache' }}
       uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
       with:
-        key: manifest-sha/${{ steps.sha.outputs.path }}
+        key: ${{ steps.store.outputs.cache-key }}
         path: ${{ steps.sha.outputs.lock }}
         lookup-only: true
 
@@ -170,7 +192,7 @@ runs:
         EXISTS=false
         if [ "${S3_EXISTS}" = true ] || [ "${CACHE_HIT}" = true ]; then EXISTS=true; fi
         echo "Manifest SHA: ${SHA}"
-        echo "Manifest SHA path: ${SHA_PATH} (${STORE})"
+        echo "Manifest SHA path: ${SHA_PATH} (store: ${STORE})"
         echo "Manifest SHA exists: ${EXISTS}"
         echo "exists=${EXISTS}" >> "$GITHUB_OUTPUT"
 
@@ -190,5 +212,5 @@ runs:
       if: ${{ inputs.mode == 'record' && steps.store.outputs.store == 'actions-cache' }}
       uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
       with:
-        key: manifest-sha/${{ steps.sha.outputs.path }}
+        key: ${{ steps.store.outputs.cache-key }}
         path: ${{ steps.sha.outputs.lock }}

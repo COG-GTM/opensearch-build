@@ -319,6 +319,9 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      # only for the callee's `scheduled` job (schedule / CHECK_FOR_CHANGES runs), which never runs from here; GitHub
+      # still requires the caller to grant every permission a called job asks for
+      actions: write
     with:
       input-manifest: ${{ needs.verify-parameters.outputs.input-manifest }}
       targets: ${{ needs.verify-parameters.outputs.min-snapshot-targets }}

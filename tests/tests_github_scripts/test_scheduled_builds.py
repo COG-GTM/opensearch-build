@@ -121,7 +121,7 @@ class TestResolve(unittest.TestCase):
         self.assertEqual(row["manifest-path"], "manifests/3.9.0/opensearch-3.9.0.yml")
         self.assertEqual(row["job-name"], "distribution-build-opensearch")
         self.assertEqual(row["target"], "distribution-build-opensearch.yml")
-        self.assertEqual(row["title"], "distribution-build-opensearch 3.9.0/opensearch-3.9.0.yml")
+        self.assertEqual(row["publishes"], "false")
         self.assertEqual(json.loads(row["inputs"]), {
             "INPUT_MANIFEST": "3.9.0/opensearch-3.9.0.yml",
             "TEST_MANIFEST": "3.9.0/opensearch-3.9.0-test.yml",
@@ -137,6 +137,7 @@ class TestResolve(unittest.TestCase):
                 "BUILD_PLATFORM": "linux", "TEST_PLATFORM": "linux", "TEST_DISTRIBUTION": "tar", "UPDATE_GITHUB_ISSUE": "false",
                 "BUILD_DISTRIBUTION": "", "TEST_MANIFEST": "", "BUILD_ARGS": ""}
         row = scheduled_builds.resolve("check-for-build", "workflow_dispatch", "", data)["matrix"]["include"][0]
+        self.assertEqual(row["publishes"], "true")
         self.assertEqual(json.loads(row["inputs"]), {
             "INPUT_MANIFEST": "3.9.0/opensearch-dashboards-3.9.0.yml",
             "BUILD_PLATFORM": "linux",
@@ -172,12 +173,19 @@ class TestResolve(unittest.TestCase):
         self.assertEqual(row["target"], "publish-min-snapshots.yml")
         self.assertEqual(json.loads(row["inputs"]), {"INPUT_MANIFEST": "3.9.0/opensearch-3.9.0.yml", "TARGETS": "linux-x64-tar",
                                                      "PUBLISH": "False", "CHECK_FOR_CHANGES": "false"})
+        self.assertEqual(row["publishes"], "false")
+
+    def test_scheduled_rows_publish(self) -> None:
+        for workflow, cron in (("check-for-build", "17 1 * * *"), ("publish-min-snapshots", "37 */4 * * *")):
+            for row in scheduled_builds.resolve(workflow, "schedule", cron, {})["matrix"]["include"]:
+                with self.subTest(workflow=workflow, manifest=row["input-manifest"]):
+                    self.assertEqual(row["publishes"], "true")
 
     def test_feature_build_row(self) -> None:
         row = scheduled_builds.resolve("feature-build-opensearch", "schedule", "47 */4 * * *", {})["matrix"]["include"][0]
         self.assertEqual(row["manifest-path"], "feature-manifests/feature-datafusion/opensearch-3.9.0.yml")
         self.assertEqual(row["job-name"], "feature-build-opensearch")
-        self.assertEqual(row["title"], "feature-build-opensearch feature-datafusion/opensearch-3.9.0.yml")
+        self.assertEqual(row["publishes"], "true")
 
     def test_unknown_parameter(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown publish-min-snapshots parameter 'NOPE'"):
@@ -195,6 +203,28 @@ class TestManifestSha(unittest.TestCase):
                 sha = hashlib.sha1(f.read()).hexdigest()
             self.assertEqual(scheduled_builds.manifest_sha(lock, "distribution-build-opensearch"), {
                 "sha": sha, "version": "3.9.0", "path": f"distribution-build-opensearch/3.9.0/shas/{sha}.yml"})
+
+    def test_s3_key_matches_jenkins(self) -> None:
+        # getManifestSHA: "${inputManifestObj.getSHAsRoot(jobName)}/${sha1(lock)}.yml", getSHAsRoot = [jobName, build.version, 'shas'].join('/')
+        sha = "14293cf0dbbfbac94d982cf0dda0e7811bc62cfa"
+        self.assertEqual(scheduled_builds.sha_path("distribution-build-opensearch", "3.8.1", sha),
+                         "distribution-build-opensearch/3.8.1/shas/14293cf0dbbfbac94d982cf0dda0e7811bc62cfa.yml")
+        self.assertEqual(scheduled_builds.sha_path("publish-opensearch-min-snapshots", "3.8.1", sha),
+                         f"publish-opensearch-min-snapshots/3.8.1/shas/{sha}.yml")
+        for bad in (("distribution-build-opensearch", "3.8.1", "abc"), ("../x", "3.8.1", sha), ("job", "3.8.1/../..", sha)):
+            with self.assertRaises(ValueError):
+                scheduled_builds.sha_path(*bad)
+
+    def test_s3_key_of_a_3_8_1_lock(self) -> None:
+        manifest = {"schema-version": "1.2", "build": {"name": "OpenSearch", "version": "3.8.1"},
+                    "components": [{"name": "OpenSearch", "repository": "https://github.com/opensearch-project/OpenSearch.git", "ref": "c" * 40}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = os.path.join(tmp, "opensearch-3.8.1.yml.lock")
+            with open(lock, "w", newline="\n") as f:
+                yaml.safe_dump(manifest, f)
+            result = scheduled_builds.manifest_sha(lock, "distribution-build-opensearch")
+        self.assertRegex(result["path"], r"^distribution-build-opensearch/3\.8\.1/shas/[0-9a-f]{40}\.yml$")
+        self.assertEqual(result["path"], f"distribution-build-opensearch/3.8.1/shas/{result['sha']}.yml")
 
     def test_main_writes_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

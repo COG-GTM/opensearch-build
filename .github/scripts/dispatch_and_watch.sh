@@ -7,46 +7,42 @@
 # compatible open source license.
 
 # `build job: <job>, parameters: [...], wait: true` across a trigger boundary (docs/jenkins-gha-inventory.md):
-# dispatch <workflow> on <ref> with the JSON <inputs>, find the run by its run-name (<title>), then wait for it and
-# fail unless it concludes with success. Needs GH_TOKEN with actions:write and GITHUB_REPOSITORY.
+# dispatch <workflow> on <ref> with the JSON <inputs> through the workflow-dispatch API with return_run_details, so
+# the response names the exact run it created, then wait for that run and fail unless it concludes with success.
+# Needs GH_TOKEN with actions:write and GITHUB_REPOSITORY.
 #
-#   dispatch_and_watch.sh <workflow file> <ref> <title> <inputs JSON>
+#   dispatch_and_watch.sh <workflow file> <ref> <inputs JSON>
 set -euo pipefail
 
-WORKFLOW="$1" REF="$2" TITLE="$3" INPUTS="$4"
+WORKFLOW="$1" REF="$2" INPUTS="$3"
 POLL_SECONDS="${POLL_SECONDS:-60}"
-export TITLE
 
-START=$(date -u -d '-10 seconds' +%Y-%m-%dT%H:%M:%SZ)
 echo "Dispatching ${WORKFLOW} on ${REF}: ${INPUTS}"
-printf '%s' "${INPUTS}" | gh workflow run "${WORKFLOW}" --repo "${GITHUB_REPOSITORY}" --ref "${REF}" --json
-
-RUN_ID=""
-for _ in $(seq 1 30); do
-  sleep 10
-  RUN_ID=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW}/runs" \
-    -f event=workflow_dispatch -f branch="${REF}" -f created=">=${START}" -f per_page=100 \
-    --jq '[.workflow_runs[] | select(.display_title == env.TITLE and (.id | tostring) != env.GITHUB_RUN_ID)] | sort_by(.created_at) | .[0].id // empty')
-  [ -n "${RUN_ID}" ] && break
-done
-if [ -z "${RUN_ID}" ]; then
-  echo "::error::No '${TITLE}' run of ${WORKFLOW} appeared within 5 minutes of the dispatch."
+BODY=$(REF="${REF}" INPUTS="${INPUTS}" python3 -c 'import json, os
+print(json.dumps({"ref": os.environ["REF"], "inputs": json.loads(os.environ["INPUTS"]), "return_run_details": True}))')
+RESPONSE=$(printf '%s' "${BODY}" | gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW}/dispatches" --input -)
+RUN_ID=$(printf '%s' "${RESPONSE}" | python3 -c 'import json, sys
+print(json.load(sys.stdin).get("workflow_run_id") or "")' 2>/dev/null || true)
+if ! [[ "${RUN_ID}" =~ ^[0-9]+$ ]]; then
+  echo "::error::The dispatch of ${WORKFLOW} did not return a workflow run id: ${RESPONSE}"
   exit 1
 fi
 URL="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-echo "::notice::Triggered ${TITLE}: ${URL}"
-[ -n "${GITHUB_OUTPUT:-}" ] && echo "run-url=${URL}" >> "${GITHUB_OUTPUT}"
+echo "::notice::Triggered ${WORKFLOW}: ${URL}"
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "run-url=${URL}" >> "${GITHUB_OUTPUT}"
+fi
 
 LAST=""
 while true; do
   STATE=$(gh run view "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" --json status,conclusion --jq '.status + " " + .conclusion')
   if [ "${STATE}" != "${LAST}" ]; then
-    echo "$(date -u +%H:%M:%S) ${TITLE}: ${STATE}"
+    echo "$(date -u +%H:%M:%S) ${WORKFLOW} run ${RUN_ID}: ${STATE}"
     LAST="${STATE}"
   fi
   case "${STATE}" in
     "completed success") echo "Build succeeded: ${URL}"; exit 0 ;;
-    completed*) echo "::error::${TITLE} finished with '${STATE#completed }': ${URL}"; exit 1 ;;
+    completed*) echo "::error::${WORKFLOW} run ${RUN_ID} finished with '${STATE#completed }': ${URL}"; exit 1 ;;
   esac
   sleep "${POLL_SECONDS}"
 done

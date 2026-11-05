@@ -157,6 +157,14 @@ def check_for_build_inputs(params: Dict[str, str]) -> Dict[str, str]:
     return inputs
 
 
+def publishes(target: str, inputs: Dict[str, str]) -> bool:
+    if target == "distribution-build-opensearch":
+        return "no-upload" not in inputs.get("OPTIONS", "").split()
+    if target == "publish-min-snapshots":
+        return to_bool(inputs.get("PUBLISH"), True)
+    return True
+
+
 def row(workflow: str, params: Dict[str, str], index: int) -> Dict[str, Any]:
     manifests_dir = WORKFLOWS[workflow]["manifests-dir"]
     if workflow == "check-for-build":
@@ -175,9 +183,11 @@ def row(workflow: str, params: Dict[str, str], index: int) -> Dict[str, Any]:
         "manifest-path": f"{manifests_dir}/{params['INPUT_MANIFEST']}",
         "job-name": job_name,
         "target": f"{target}.yml",
-        # run-name of the target workflow for a dispatched run, used to find the run after `gh workflow run`
-        "title": f"{target} {params['INPUT_MANIFEST']}",
         "inputs": json.dumps(inputs, separators=(",", ":"), sort_keys=True),
+        # Only a build that uploads or publishes may record the SHA the schedule checks (getManifestSHA path); a
+        # no-upload / PUBLISH=false build records under a separate dry-run namespace so it never suppresses the
+        # scheduled build.
+        "publishes": "true" if publishes(target, inputs) else "false",
     }
 
 
@@ -204,13 +214,20 @@ def resolve(workflow: str, event: str, schedule: str, data: Dict[str, Any], live
     return {"matrix": {"include": rows}, "live": live, "mode": mode}
 
 
+def sha_path(job_name: str, version: str, sha: str) -> str:
+    """S3 key of getManifestSHA / buildUploadManifestSHA: InputManifest.getSHAsRoot(jobName) + "/<sha>.yml"."""
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", job_name) or not re.fullmatch(r"[A-Za-z0-9._-]+", version) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ValueError(f"invalid manifest SHA path parts: '{job_name}', '{version}', '{sha}'")
+    return "/".join([job_name, version, "shas", f"{sha}.yml"])
+
+
 def manifest_sha(lock_file: str, job_name: str) -> Dict[str, str]:
-    """getManifestSHA(): sha1 of the lock file, path <job>/<build.version>/shas/<sha>.yml (InputManifest.getSHAsRoot)."""
+    """getManifestSHA(): sha1 of the lock file and its S3 key <job>/<build.version>/shas/<sha>.yml."""
     with open(lock_file, "rb") as f:
         content = f.read()
     sha = hashlib.sha1(content).hexdigest()
     version = str(yaml.safe_load(content)["build"]["version"])
-    return {"sha": sha, "version": version, "path": f"{job_name}/{version}/shas/{sha}.yml"}
+    return {"sha": sha, "version": version, "path": sha_path(job_name, version, sha)}
 
 
 def is_active(manifest: Dict[str, Any]) -> bool:

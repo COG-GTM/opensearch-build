@@ -9,8 +9,10 @@
 #                                          instead of skipping, and the queued run's SHA check then finds the SHA the
 #                                          running build recorded (or retries a build that failed)
 #   getManifestSHA                      -> .github/actions/manifest-sha (check)
-#   build job: <target>, wait: true     -> .github/scripts/dispatch_and_watch.sh (`gh workflow run` + wait)
-#   buildUploadManifestSHA              -> .github/actions/manifest-sha (record), after the build succeeded
+#   build job: <target>, wait: true     -> .github/scripts/dispatch_and_watch.sh (dispatch API returning the run id,
+#                                          then wait for that run)
+#   buildUploadManifestSHA              -> .github/actions/manifest-sha (record), after the build succeeded; builds that
+#                                          upload nothing (no-upload, PUBLISH=false) record only a dry-run marker
 #
 # Scheduled runs only check the SHAs until the repository variable SCHEDULED_BUILDS_LIVE is 'true' (the build
 # workflows still default to the ADR 0001 runner pools and the artifact role). workflow_dispatch runs always build a
@@ -96,6 +98,7 @@ jobs:
           mode: check
           role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
           bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          dry-run: ${{ matrix.publishes != 'true' }}
 
       - name: Decide
         id: decide
@@ -127,7 +130,7 @@ jobs:
           fi
           {
             echo "### ${TARGET%.yml} \`${MANIFEST_PATH}\`"
-            echo "- SHA: \`${SHA_PATH}\` (${STORE})"
+            echo "- SHA: \`${SHA_PATH}\` (${STORE}); S3 key \`s3://\${ARTIFACT_BUCKET_NAME}/${SHA_PATH}\`"
             echo "- exists: ${EXISTS}, live: ${LIVE}"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -137,9 +140,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TARGET: ${{ matrix.target }}
           REF: ${{ github.ref_name }}
-          TITLE: ${{ matrix.title }}
           INPUTS: ${{ matrix.inputs }}
-        run: bash .github/scripts/dispatch_and_watch.sh "${TARGET}" "${REF}" "${TITLE}" "${INPUTS}"
+        run: bash .github/scripts/dispatch_and_watch.sh "${TARGET}" "${REF}" "${INPUTS}"
 
       - name: Record the manifest SHA
         if: ${{ steps.decide.outputs.build == 'true' }}
@@ -150,3 +152,4 @@ jobs:
           mode: record
           role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
           bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          dry-run: ${{ matrix.publishes != 'true' }}
