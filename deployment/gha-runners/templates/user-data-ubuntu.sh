@@ -8,7 +8,9 @@
 # compatible open source license.
 
 # Ubuntu variant of the multi-runner module's templates/user-data.sh (which assumes AL2023: dnf, ec2-user).
-# Rendered by the module with the same template variables.
+# Rendered by the module with the same template variables, without install_runner.
+# The agent is baked into the AMI (deployment/packer); post_install carries templates/baked-runner.*.tftpl,
+# which checks its version and fails the instance instead of downloading a runner.
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -69,8 +71,6 @@ if ! dpkg -s amazon-cloudwatch-agent >/dev/null 2>&1; then
 fi
 
 user_name=ubuntu
-
-${install_runner}
 
 ${post_install}
 

@@ -1,0 +1,39 @@
+## Baked GitHub Actions runner agent (deployment/packer/gha-runner/runner-version.json).
+# Rendered by runners.tf into the pool's userdata_post_install. Replaces the module's install_runner:
+# nothing is downloaded at boot. A missing or older agent stops the instance before the runner registers.
+
+$minRunnerVersion = [version]'${min_runner_version}'
+$runnerListener = 'C:\actions-runner\bin\Runner.Listener.exe'
+
+function Stop-StaleRunnerAgent([string]$Reason) {
+  Write-Host "FATAL: stale runner AMI: $Reason (pool requires actions/runner >= $minRunnerVersion)."
+  Write-Host 'FATAL: rebuild the pool AMI with .github/workflows/packer-build.yml; this instance terminates without registering.'
+  Write-EventLog -LogName Application -Source 'EC2Launch' -EntryType Error -EventId 1 -Message "stale runner AMI: $Reason" -ErrorAction SilentlyContinue
+  $imdsToken = Invoke-RestMethod -Method PUT -Uri 'http://169.254.169.254/latest/api/token' -Headers @{ 'X-aws-ec2-metadata-token-ttl-seconds' = '300' }
+  $imdsHeaders = @{ 'X-aws-ec2-metadata-token' = $imdsToken }
+  $instanceId = Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/instance-id' -Headers $imdsHeaders
+  $region = Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/placement/region' -Headers $imdsHeaders
+  $ssmConfigPath = Invoke-RestMethod -Uri 'http://169.254.169.254/latest/meta-data/tags/instance/ghr:ssm_config_path' -Headers $imdsHeaders -ErrorAction SilentlyContinue
+  # Ship this log to the pool's CloudWatch log group before the instance goes away.
+  $cloudwatchCtl = 'C:\Program Files\Amazon\AmazonCloudWatchAgent\amazon-cloudwatch-agent-ctl.ps1'
+  if ((Test-Path $cloudwatchCtl) -and $ssmConfigPath) {
+    & $cloudwatchCtl -a fetch-config -m ec2 -s -c "ssm:$ssmConfigPath/cloudwatch_agent_config_runner"
+    Start-Sleep -Seconds 30
+  }
+  aws ec2 terminate-instances --instance-ids "$instanceId" --region "$region"
+  if ($LASTEXITCODE -ne 0) { Stop-Computer -Force }
+  Stop-Transcript
+  exit 1
+}
+
+if (-not (Test-Path $runnerListener)) {
+  Stop-StaleRunnerAgent "no runner agent at $runnerListener"
+}
+$bakedRunnerVersionText = (& $runnerListener --version 2>$null | Out-String).Trim()
+if ($bakedRunnerVersionText -notmatch '^\d+\.\d+\.\d+$') {
+  Stop-StaleRunnerAgent "unreadable runner agent version '$bakedRunnerVersionText'"
+}
+if ([version]$bakedRunnerVersionText -lt $minRunnerVersion) {
+  Stop-StaleRunnerAgent "baked actions/runner $bakedRunnerVersionText"
+}
+Write-Host "Using baked actions/runner $bakedRunnerVersionText from C:\actions-runner (>= $minRunnerVersion)"

@@ -1,0 +1,50 @@
+# shellcheck shell=bash
+## Baked GitHub Actions runner agent (deployment/packer/gha-runner/runner-version.json).
+# Rendered by runners.tf into the pool's userdata_post_install. Replaces the module's install_runner:
+# nothing is downloaded at boot. A missing or older agent stops the instance before the runner registers.
+
+runner_dir=/opt/actions-runner
+min_runner_version="${min_runner_version}"
+
+version_lt() {
+  awk -v a="$1" -v b="$2" 'BEGIN { split(a, x, "."); split(b, y, "."); for (i = 1; i <= 3; i++) { if (x[i] + 0 < y[i] + 0) exit 0; if (x[i] + 0 > y[i] + 0) exit 1 } exit 1 }'
+}
+
+fail_stale_agent() {
+  echo "FATAL: stale runner AMI: $1 (pool requires actions/runner >= $min_runner_version)." >&2
+  echo "FATAL: rebuild the pool AMI with .github/workflows/packer-build.yml; this instance terminates without registering." >&2
+  logger -p user.err -t gha-runner-agent-check "stale runner AMI: $1, requires >= $min_runner_version" || true
+  imds_token=$(curl -s -f -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300" || true)
+  imds() { curl -s -f -H "X-aws-ec2-metadata-token: $imds_token" "http://169.254.169.254/latest/$1" || true; }
+  instance_id=$(imds meta-data/instance-id)
+  region=$(imds meta-data/placement/region)
+  ssm_config_path=$(imds meta-data/tags/instance/ghr:ssm_config_path)
+  # Ship this log to the pool's CloudWatch log group before the instance goes away.
+  if command -v amazon-cloudwatch-agent-ctl >/dev/null 2>&1 && [ -n "$ssm_config_path" ]; then
+    amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c "ssm:$ssm_config_path/cloudwatch_agent_config_runner" || true
+    sleep 30
+  fi
+  aws ec2 terminate-instances --instance-ids "$instance_id" --region "$region" || shutdown -h now
+  exit 1
+}
+
+if [ ! -x "$runner_dir/bin/Runner.Listener" ]; then
+  fail_stale_agent "no runner agent in $runner_dir"
+fi
+baked_runner_version=$("$runner_dir/bin/Runner.Listener" --version 2>/dev/null | tr -d '[:space:]' || true)
+if ! echo "$baked_runner_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  fail_stale_agent "unreadable runner agent version '$baked_runner_version'"
+fi
+if version_lt "$baked_runner_version" "$min_runner_version"; then
+  fail_stale_agent "baked actions/runner $baked_runner_version"
+fi
+echo "Using baked actions/runner $baked_runner_version from $runner_dir (>= $min_runner_version)"
+
+if [ "$(uname -s)" = "Darwin" ]; then
+  mkdir -p /Users/runner/hostedtoolcache
+  chown -R "$user_name":staff "$runner_dir" /Users/runner/hostedtoolcache
+  chmod 755 /Users/runner
+else
+  mkdir -p /opt/hostedtoolcache
+  chown -R "$user_name":"$user_name" "$runner_dir" /opt/hostedtoolcache
+fi

@@ -16,22 +16,19 @@ pools in [`deployment/gha-runners`](../gha-runners).
 ## What `render_template.py` adds
 
 * The Jenkins variable substitution (`build-vpc`, `build-subnet`, `build-secgrp`, `build-region`, `aws_ami_region`).
-* With `INSTALL_GHA_RUNNER` (default on): the GitHub Actions runner agent, pinned to `RUNNER_VERSION` and its
-  release SHA-256, unpacked to `/opt/actions-runner` (Linux/macOS, [`install-gha-runner.sh`](gha-runner/install-gha-runner.sh))
+* With `INSTALL_GHA_RUNNER` (default on): the GitHub Actions runner agent, pinned to the version and
+  release SHA-256 in `gha-runner/runner-version.json`, unpacked to `/opt/actions-runner` (Linux/macOS, [`install-gha-runner.sh`](gha-runner/install-gha-runner.sh))
   or `C:\actions-runner` (Windows, [`install-gha-runner.ps1`](gha-runner/install-gha-runner.ps1)), inserted before the
   template's final reboot / sysprep step. Nothing is registered: the runner module's boot script fetches a JIT config.
   The Jenkins setup is untouched, so the AMIs still work as Jenkins agents until cutover.
 
-  With the current `deployment/gha-runners` settings (module user data on, runner binaries syncer on), the
-  module's boot-time `install_runner` extracts the syncer's runner over `/opt/actions-runner`, so jobs run that
-  version and boot still downloads it; the baked copy only pre-installs the agent and its dependencies. Making the
-  baked agent the one that runs (pool `enable_userdata = false`, `enable_runner_binaries_syncer = false`, and the
-  module's `start-runner.sh` baked as a boot script, as in the module's prebuilt-AMI examples) is a change to the
-  runner infrastructure, not to this workflow.
+  `deployment/gha-runners` boots its pools from this baked agent (no runner binaries syncer, no boot-time
+  `install_runner`) and terminates an instance whose agent is older than the pinned version.
 * A `manifest` post-processor so the run summary and the `packer-manifest` artifact list the AMI IDs.
 
-To bump the agent, update `RUNNER_VERSION` and `RUNNER_SHA256` from the
-[actions/runner release notes](https://github.com/actions/runner/releases).
+To bump the agent, update `version` and `sha256` in [`gha-runner/runner-version.json`](gha-runner/runner-version.json)
+from the [actions/runner release notes](https://github.com/actions/runner/releases). The same file is the minimum
+agent version the runner pools accept, so rebuild the AMIs before applying `deployment/gha-runners`.
 
 ## Runs
 
