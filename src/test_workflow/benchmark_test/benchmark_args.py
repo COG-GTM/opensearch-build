@@ -162,6 +162,9 @@ class BenchmarkArgs:
         execute_test_parser.add_argument("--ccr-enabled", dest="ccr_enabled", action="store_true",
                                          help="Run cross-cluster-replication test by spinning up a leader and a follower cluster "
                                               "and applying CCR settings on the follower.", default=False)
+        execute_test_parser.add_argument("--test-mode", dest="test_mode", action="store_true",
+                                         help="Run the workload in opensearch-benchmark test mode (1k-document corpus, one iteration per task); "
+                                              "checks the pipeline end to end, results are not comparable", default=False)
 
         # command to run comparison
         compare_parser = subparsers.add_parser("compare", parents=[parent_parser],
@@ -210,6 +213,7 @@ class BenchmarkArgs:
             self.enable_instance_storage = args.enable_instance_storage
             self.preserve_cluster = args.preserve_cluster
             self.ccr_enabled = args.ccr_enabled
+            self.test_mode = args.test_mode
             self.enable_remote_store = args.enable_remote_store
             self.data_instance_type = args.data_instance_type if args.data_instance_type else None
             self.workload = args.workload

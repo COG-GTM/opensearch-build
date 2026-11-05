@@ -1,0 +1,290 @@
+---
+# One Jenkins `runBenchmarkTestScript(command: 'execute-test')` call: download the benchmark config from S3, put the
+# metrics datastore credentials into benchmark.ini, then run `./test.sh benchmark-test execute-test`, which deploys an
+# ephemeral cluster with opensearch-cluster-cdk (stack suffix `inputs.suffix`) or targets CLUSTER_ENDPOINT, and runs
+# opensearch-benchmark against it. Called once per matrix row by benchmark-test.yml, benchmark-test-endpoint.yml and
+# benchmark-pull-request.yml.
+#
+# local-cluster: true is for dry runs on GitHub-hosted runners (no perf account, no S3 config, no datastore): it
+# starts the DISTRIBUTION_URL tarball on the runner and benchmarks it through --cluster-endpoint with
+# opensearch-benchmark's default in-memory datastore.
+name: _benchmark-run
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: 'Matrix row name, used for the job and result artifact names'
+        required: true
+        type: string
+      params:
+        description: 'JSON object of Jenkins parameters for this run (benchmark_test.py resolve)'
+        required: true
+        type: string
+      suffix:
+        description: 'Stack / container suffix (Jenkins "${BUILD_NUMBER}" or "${BUILD_NUMBER}-secure")'
+        required: true
+        type: string
+      insecure:
+        description: 'Pass --without-security'
+        required: true
+        type: boolean
+      user-tag:
+        description: 'Final --user-tag value'
+        required: false
+        default: ''
+        type: string
+      runs-on:
+        description: 'JSON label array (ADR 0001 benchmark pools)'
+        required: true
+        type: string
+      timeout-minutes:
+        description: 'Job timeout (Jenkins pipeline timeout)'
+        required: false
+        default: 1440
+        type: number
+      local-cluster:
+        description: 'Start DISTRIBUTION_URL on the runner instead of deploying with CDK (dry runs)'
+        required: false
+        default: false
+        type: boolean
+      credentials-key:
+        description: >-
+          Key in the BENCHMARK_ENDPOINT_CREDENTIALS secret (JSON object of key -> username:password) for a secured
+          CLUSTER_ENDPOINT (benchmark-test-endpoint CREDENTIALS_KEY; replaces the Jenkins USERNAME / PASSWORD parameters)
+        required: false
+        default: ''
+        type: string
+    outputs:
+      result-artifact:
+        description: 'Name of the artifact holding final_result_<suffix>.md and the test execution files'
+        value: ${{ jobs.benchmark.outputs.result-artifact }}
+    secrets:
+      # `benchmark` environment secrets (ADR 0001); the job runs in that environment, so callers pass nothing
+      AWS_ROLE_BENCHMARK:
+        required: false
+      AWS_ROLE_TEST_RESULTS:
+        required: false
+      ARTIFACT_BUCKET_NAME:
+        required: false
+      BENCHMARK_METRICS_DATASTORE_USER:
+        required: false
+      BENCHMARK_METRICS_DATASTORE_PASSWORD:
+        required: false
+      BENCHMARK_ENDPOINT_CREDENTIALS:
+        required: false
+
+permissions: {}
+
+jobs:
+  benchmark:
+    name: ${{ inputs.name }}
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # Pull requests and local-cluster dry runs stay out of the environment: its OIDC trust and secrets are for
+    # scheduled / dispatched runs on main only.
+    environment: ${{ (!inputs.local-cluster && github.event_name != 'pull_request') && 'benchmark' || '' }}
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      result-artifact: ${{ steps.results.outputs.artifact }}
+    env:
+      PARAMS: ${{ inputs.params }}
+      SUFFIX: ${{ inputs.suffix }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python and pipenv
+        # The AL2023 benchmark AMI ships python3/pipenv/docker like the Jenkins agent; hosted runners need pipenv.
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.9'
+
+      - name: Install pipenv
+        if: ${{ runner.environment == 'github-hosted' }}
+        run: python -m pip install --upgrade pipenv==2023.6.12 wheel
+
+      - name: Read parameters
+        id: params
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee -a "$GITHUB_OUTPUT"
+          import json, os
+          p = json.loads(os.environ["PARAMS"])
+          for key in ("BUNDLE_MANIFEST_URL", "DISTRIBUTION_URL", "DISTRIBUTION_VERSION", "CLUSTER_ENDPOINT", "SIGV4",
+                      "BUILD_ID", "ARCHITECTURE", "TEST_WORKLOAD"):
+              print(f"{key.lower().replace('_', '-')}={p.get(key, '')}")
+          PY
+
+      - name: Download the bundle manifest
+        # downloadBuildManifest(url: BUNDLE_MANIFEST_URL, path: BUNDLE_MANIFEST)
+        if: ${{ steps.params.outputs.bundle-manifest-url != '' }}
+        uses: ./.github/actions/download-build-manifest
+        with:
+          url: ${{ steps.params.outputs.bundle-manifest-url }}
+          path: bundle-manifest.yml
+
+      - name: Start the distribution on the runner
+        id: local
+        if: ${{ inputs.local-cluster }}
+        env:
+          DISTRIBUTION_URL: ${{ steps.params.outputs.distribution-url }}
+          INSECURE: ${{ inputs.insecure }}
+        run: |
+          set -euo pipefail
+          [ "$INSECURE" = "true" ] || { echo "::error::local-cluster only runs without security"; exit 1; }
+          [[ "$DISTRIBUTION_URL" == https://* ]] || { echo "::error::local-cluster needs an https DISTRIBUTION_URL"; exit 1; }
+          # BenchmarkTestCluster talks to http://<endpoint>:80 for insecure clusters
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80 vm.max_map_count=262144
+          mkdir -p "$RUNNER_TEMP/opensearch"
+          curl -sSfL --retry 5 "$DISTRIBUTION_URL" | tar xz -C "$RUNNER_TEMP/opensearch" --strip-components=1
+          cd "$RUNNER_TEMP/opensearch"
+          {
+            echo "network.host: 0.0.0.0"
+            echo "http.port: 80"
+            echo "discovery.type: single-node"
+            if [ -d plugins/opensearch-security ]; then echo "plugins.security.disabled: true"; fi
+          } >> config/opensearch.yml
+          OPENSEARCH_JAVA_OPTS="-Xms4g -Xmx4g" ./bin/opensearch -d -p opensearch.pid
+          # the benchmark runs in a container, so it needs the runner's address rather than localhost
+          host="$(hostname -I | awk '{print $1}')"
+          for _ in $(seq 1 60); do curl -sf "http://${host}:80" >/dev/null && break; sleep 5; done
+          curl -sSf "http://${host}:80"
+          echo "endpoint=${host}" >> "$GITHUB_OUTPUT"
+
+      - name: Check the benchmark configuration
+        # runBenchmarkTestScript: s3Download config.yml (CDK runs only) and benchmark.ini / benchmark_sigv4.ini from
+        # BENCHMARK_TEST_CONFIG_LOCATION (a Jenkins global env var, now a repository variable) in the artifact bucket,
+        # as opensearch-test (AWS_ROLE_TEST_RESULTS)
+        if: ${{ !inputs.local-cluster }}
+        env:
+          AWS_ROLE: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+          BUCKET: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          CONFIG_LOCATION: ${{ vars.BENCHMARK_TEST_CONFIG_LOCATION }}
+        run: |
+          set -euo pipefail
+          for name in AWS_ROLE BUCKET CONFIG_LOCATION; do
+            [ -n "${!name}" ] || { echo "::error::$name is not configured (benchmark environment, ADR 0001)"; exit 1; }
+          done
+
+      - name: Assume the test-results role
+        if: ${{ !inputs.local-cluster }}
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+          role-duration-seconds: 900
+          aws-region: us-east-1
+
+      - name: Copy config.yml and benchmark.ini
+        if: ${{ !inputs.local-cluster }}
+        env:
+          BUCKET: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          CONFIG_LOCATION: ${{ vars.BENCHMARK_TEST_CONFIG_LOCATION }}
+          CLUSTER_ENDPOINT: ${{ steps.params.outputs.cluster-endpoint }}
+          SIGV4: ${{ steps.params.outputs.sigv4 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CLUSTER_ENDPOINT" ]; then
+            aws s3 cp --only-show-errors "s3://${BUCKET}/${CONFIG_LOCATION}/config.yml" config.yml
+          fi
+          ini=benchmark.ini
+          [ "$SIGV4" = "true" ] && ini=benchmark_sigv4.ini
+          aws s3 cp --only-show-errors "s3://${BUCKET}/${CONFIG_LOCATION}/${ini}" benchmark.ini
+
+      - name: Add the metrics datastore credentials
+        # editBenchmarkConfig()
+        if: ${{ !inputs.local-cluster }}
+        env:
+          DATASTORE_USER: ${{ secrets.BENCHMARK_METRICS_DATASTORE_USER }}
+          DATASTORE_PASSWORD: ${{ secrets.BENCHMARK_METRICS_DATASTORE_PASSWORD }}
+        run: python3 .github/scripts/benchmark_test.py edit-config benchmark.ini
+
+      - name: Assume the benchmark role
+        # opensearch-full-access-nightlies in the perf account; 12 h is the IAM maximum (ADR 0001 role table)
+        if: ${{ !inputs.local-cluster }}
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_BENCHMARK }}
+          role-duration-seconds: 43200
+          aws-region: us-east-1
+
+      - name: Read the endpoint credentials
+        if: ${{ inputs.credentials-key != '' }}
+        env:
+          BENCHMARK_ENDPOINT_CREDENTIALS: ${{ secrets.BENCHMARK_ENDPOINT_CREDENTIALS }}
+          CREDENTIALS_KEY: ${{ inputs.credentials-key }}
+        run: python3 .github/scripts/benchmark_test.py credentials --key "$CREDENTIALS_KEY"
+
+      - name: Run benchmark-test
+        env:
+          INSECURE: ${{ inputs.insecure }}
+          USER_TAG: ${{ inputs.user-tag }}
+          LOCAL_ENDPOINT: ${{ steps.local.outputs.endpoint }}
+          LOCAL_CLUSTER: ${{ inputs.local-cluster }}
+        run: |
+          set -euo pipefail
+          args=(run --params "$PARAMS" --suffix "$SUFFIX" --insecure "$INSECURE" --user-tag "$USER_TAG")
+          if [ "$LOCAL_CLUSTER" = "true" ]; then
+            args+=(--endpoint "$LOCAL_ENDPOINT")
+          else
+            args+=(--config "$GITHUB_WORKSPACE/config.yml" --benchmark-config "$GITHUB_WORKSPACE/benchmark.ini")
+          fi
+          [ -f bundle-manifest.yml ] && args+=(--bundle-manifest bundle-manifest.yml)
+          python3 .github/scripts/benchmark_test.py "${args[@]}"
+
+      - name: Collect the results
+        id: results
+        if: ${{ always() }}
+        env:
+          NAME: ${{ inputs.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p benchmark-results
+          # BenchmarkTestSuiteExecute.convert() writes these; benchmark-pull-request reads final_result_<suffix>.md
+          for f in "/tmp/final_result_${SUFFIX}.md" "/tmp/test_execution_${SUFFIX}.json" "test_execution_${SUFFIX}.csv"; do
+            [ -f "$f" ] && cp "$f" benchmark-results/
+          done
+          ls -l benchmark-results
+          if [ -f "benchmark-results/final_result_${SUFFIX}.md" ]; then
+            { echo "### ${NAME}"; echo; cat "benchmark-results/final_result_${SUFFIX}.md"; } >> "$GITHUB_STEP_SUMMARY"
+            cat "benchmark-results/final_result_${SUFFIX}.md"
+          fi
+          echo "artifact=benchmark-${SUFFIX}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the results
+        # Jenkins archiveArtifacts 'test_execution*.csv' (benchmark-test-endpoint); kept for every run here
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: benchmark-${{ inputs.suffix }}
+          path: benchmark-results/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Delete the CloudFormation stack of a cancelled run
+        # the Jenkins `aborted` post block: cfnDelete opensearch-infra-stack-<suffix>[-<build id>-<arch>]
+        if: ${{ cancelled() && !inputs.local-cluster && steps.params.outputs.cluster-endpoint == '' }}
+        env:
+          BUILD_ID: ${{ steps.params.outputs.build-id }}
+          ARCHITECTURE: ${{ steps.params.outputs.architecture }}
+        run: |
+          set -uo pipefail
+          for stack in $(python3 .github/scripts/benchmark_test.py stacks --suffix "$SUFFIX" --build-id "$BUILD_ID" --architecture "$ARCHITECTURE"); do
+            if aws cloudformation describe-stacks --stack-name "$stack" >/dev/null 2>&1; then
+              echo "Deleting stack '$stack'"
+              aws cloudformation delete-stack --stack-name "$stack"
+              aws cloudformation wait stack-delete-complete --stack-name "$stack"
+            else
+              echo "Stack '$stack' does not exist, nothing to remove"
+            fi
+          done
+
+      - name: Stop the local distribution
+        if: ${{ always() && inputs.local-cluster }}
+        run: |
+          pid_file="$RUNNER_TEMP/opensearch/opensearch.pid"
+          if [ -f "$pid_file" ]; then kill "$(cat "$pid_file")" || true; fi

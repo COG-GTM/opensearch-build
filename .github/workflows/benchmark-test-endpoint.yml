@@ -1,0 +1,117 @@
+---
+# GitHub Actions port of jenkins/opensearch/benchmark-test-endpoint.jenkinsfile: run opensearch-benchmark against an
+# existing cluster (Amazon OpenSearch Service domains with SigV4, or a basic-auth endpoint). Schedules come from
+# .github/schedules/benchmark-test-endpoint.yml.
+#
+# The Jenkins USERNAME / PASSWORD parameters are not inputs (inputs are visible in the run UI, ADR 0001): a secured
+# non-SigV4 endpoint sets CREDENTIALS_KEY, a key of the `benchmark` environment secret BENCHMARK_ENDPOINT_CREDENTIALS
+# (JSON object of key -> "username:password"). None of the 21 Jenkins schedules passes credentials.
+# Jenkins allowed 10 days; self-hosted jobs are capped at 5 days (7200 minutes), ADR 0001 decision 6.
+name: benchmark-test-endpoint
+
+run-name: >-
+  ${{ github.event_name == 'schedule' && format('benchmark-test-endpoint scheduled {0}', github.event.schedule)
+  || format('benchmark-test-endpoint {0}', inputs.TEST_WORKLOAD) }}
+
+on:
+  schedule:
+    - cron: '37 10 * * *'
+    - cron: '37 11 * * *'
+    - cron: '37 16 * * *'
+    - cron: '37 */8 * * *'
+    - cron: '37 */12 * * *'
+  workflow_dispatch:
+    inputs:
+      CLUSTER_ENDPOINT:
+        description: '<Required> Endpoint of the cluster to benchmark (no scheme, no port).'
+        required: true
+        type: string
+      SECURITY_ENABLED:
+        description: '<Optional> The cluster is secured.'
+        required: false
+        default: false
+        type: boolean
+      SIGV4:
+        description: '<Optional> Use AWS Signature Version 4 authentication.'
+        required: false
+        default: false
+        type: boolean
+      REGION:
+        description: '<Optional> AWS region for signing.'
+        required: false
+        default: us-east-1
+        type: string
+      SERVICE:
+        description: '<Optional> AWS service for SigV4: es or aoss; empty for none.'
+        required: false
+        default: ''
+        type: string
+      TEST_WORKLOAD:
+        description: '<Optional> The workload name from OpenSearch Benchmark Workloads.'
+        required: false
+        default: nyc_taxis
+        type: string
+      USER_TAGS:
+        description: '<Optional> Metadata tags for each metric record, without spaces.'
+        required: false
+        type: string
+      WORKLOAD_PARAMS:
+        description: '<Optional> JSON variables injected into the workload.'
+        required: false
+        type: string
+      CREDENTIALS_KEY:
+        description: '<Optional> Key of the endpoint username:password in the BENCHMARK_ENDPOINT_CREDENTIALS secret.'
+        required: false
+        type: string
+      OPTIONS:
+        description: >-
+          <Optional> Other Jenkins parameters as KEY=VALUE separated by ';' (TEST_PROCEDURE, EXCLUDE_TASKS,
+          INCLUDE_TASKS, CAPTURE_NODE_STAT, CAPTURE_SEGMENT_REPLICATION_STAT, TELEMETRY_PARAMS).
+        required: false
+        type: string
+
+permissions: {}
+
+jobs:
+  setup:
+    name: validate-and-set-parameters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Resolve the builds
+        id: resolve
+        env:
+          MODE: ${{ github.event_name == 'schedule' && 'schedule' || 'inputs' }}
+          DATA: ${{ toJSON(inputs) }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/benchmark_test.py resolve --workflow benchmark-test-endpoint --mode "$MODE" \
+            --data "$DATA" --schedule "$SCHEDULE" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+  benchmark:
+    name: benchmark-test-with-cluster
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    uses: ./.github/workflows/_benchmark-run.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      name: ${{ matrix.name }}
+      params: ${{ matrix.params }}
+      suffix: ${{ matrix.suffix }}
+      insecure: ${{ matrix.insecure }}
+      user-tag: ${{ matrix.user-tag }}
+      runs-on: ${{ matrix.runs-on }}
+      timeout-minutes: 7200
+      credentials-key: ${{ fromJSON(matrix.params).CREDENTIALS_KEY || '' }}

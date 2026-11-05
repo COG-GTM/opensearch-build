@@ -1,0 +1,281 @@
+---
+# GitHub Actions port of jenkins/opensearch/benchmark-pull-request.jenkinsfile. Jenkins' GenericTrigger webhook (sent
+# when someone comments on an OpenSearch pull request) becomes a `repository_dispatch` of event type
+# `benchmark-pull-request` whose client_payload carries the same fields the trigger extracted (pull_request_number,
+# repository, baseline_cluster_config and the job parameters); docs/benchmark-pull-request-dispatch.md has the sender
+# workflow. The nightly baselines (parameterizedCron) come from .github/schedules/benchmark-pull-request.yml.
+#
+# After a dispatched run the results go back to the pull request as the same "Benchmark Results" comment and, with a
+# baseline_cluster_config, benchmark-compare.yml is dispatched with the latest baseline/contender test-execution-ids.
+# A client_payload with "dry_run": true renders the comment and the compare queries in the log without posting or
+# dispatching anything.
+name: benchmark-pull-request
+
+run-name: >-
+  ${{ github.event_name == 'repository_dispatch'
+  && format('Benchmark initiated by PR:{0} on {1}', github.event.client_payload.pull_request_number, github.event.client_payload.repository)
+  || (github.event_name == 'schedule' && format('benchmark-pull-request scheduled {0}', github.event.schedule)
+  || format('benchmark-pull-request {0} {1}', inputs.DISTRIBUTION_URL, inputs.DISTRIBUTION_VERSION)) }}
+
+on:
+  repository_dispatch:
+    types: [benchmark-pull-request]
+  schedule:
+    - cron: '47 16 * * *'
+    - cron: '47 17 * * *'
+  workflow_dispatch:
+    inputs:
+      DISTRIBUTION_URL:
+        description: '<Required> Publicly available download URL of the OpenSearch tarball (x64 only).'
+        required: true
+        type: string
+      DISTRIBUTION_VERSION:
+        description: '<Required> The distribution version of the OpenSearch artifact.'
+        required: true
+        type: string
+      TEST_WORKLOAD:
+        description: '<Optional> The workload name from OpenSearch Benchmark Workloads.'
+        required: false
+        default: nyc_taxis
+        type: string
+      SECURITY_ENABLED:
+        description: '<Optional> Mention if the cluster is secured or insecured.'
+        required: false
+        default: false
+        type: boolean
+      SINGLE_NODE_CLUSTER:
+        description: '<Optional> Benchmark test on a single node cluster.'
+        required: false
+        default: true
+        type: boolean
+      MIN_DISTRIBUTION:
+        description: '<Optional> Use OpenSearch min distribution.'
+        required: false
+        default: false
+        type: boolean
+      USER_TAGS:
+        description: '<Optional> Metadata tags for each metric record, without spaces.'
+        required: false
+        type: string
+      WORKLOAD_PARAMS:
+        description: '<Optional> JSON variables injected into the workload.'
+        required: false
+        type: string
+      TEST_PROCEDURE:
+        description: '<Optional> Test procedure to use.'
+        required: false
+        type: string
+      OPTIONS:
+        description: >-
+          <Optional> Other Jenkins parameters as KEY=VALUE separated by ';' (PLUGIN_URL, MANAGER_NODE_COUNT,
+          DATA_INSTANCE_TYPE, ADDITIONAL_CONFIG, HEAP_SIZE_IN_GB, CAPTURE_NODE_STAT, ...).
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      client-payload:
+        description: 'JSON repository_dispatch client_payload to process (dry runs from this repository)'
+        required: true
+        type: string
+      runs-on:
+        description: 'JSON label array overriding the benchmark pool, e.g. ["ubuntu-24.04"]'
+        required: false
+        default: ''
+        type: string
+      local-cluster:
+        description: 'Benchmark the DISTRIBUTION_URL tarball started on the runner instead of a CDK stack'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  setup:
+    name: validate-and-set-parameters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      pull-request-number: ${{ steps.resolve.outputs.pull-request-number }}
+      repository: ${{ steps.resolve.outputs.repository }}
+      baseline-cluster-config: ${{ steps.resolve.outputs.baseline-cluster-config }}
+      dry-run: ${{ steps.resolve.outputs.dry-run }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Resolve the build
+        id: resolve
+        env:
+          MODE: >-
+            ${{ (inputs.client-payload || github.event_name == 'repository_dispatch') && 'payload'
+            || (github.event_name == 'schedule' && 'schedule' || 'inputs') }}
+          DATA: >-
+            ${{ inputs.client-payload
+            || (github.event_name == 'repository_dispatch' && toJSON(github.event.client_payload) || toJSON(inputs)) }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/benchmark_test.py resolve --workflow benchmark-pull-request --mode "$MODE" \
+            --data "$DATA" --schedule "$SCHEDULE" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+  benchmark:
+    name: benchmark-pull-request
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    uses: ./.github/workflows/_benchmark-run.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      name: ${{ matrix.name }}
+      params: ${{ matrix.params }}
+      suffix: ${{ matrix.suffix }}
+      insecure: ${{ matrix.insecure }}
+      user-tag: ${{ matrix.user-tag }}
+      runs-on: ${{ inputs.runs-on || matrix.runs-on }}
+      timeout-minutes: 1440
+      local-cluster: ${{ inputs.local-cluster == true }}
+
+  comment:
+    # post { success / failure } with GenericCause: comment on the pull request that asked for the run
+    name: comment-on-pull-request
+    needs: [setup, benchmark]
+    if: >-
+      ${{ always() && needs.setup.outputs.pull-request-number != '' && needs.setup.outputs.repository != ''
+      && (needs.benchmark.result == 'success' || needs.benchmark.result == 'failure') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      PULL_REQUEST_NUMBER: ${{ needs.setup.outputs.pull-request-number }}
+      TARGET_REPOSITORY: ${{ needs.setup.outputs.repository }}
+      DRY_RUN: ${{ needs.setup.outputs.dry-run }}
+      SUFFIX: ${{ fromJSON(needs.setup.outputs.matrix).include[0].suffix }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download the benchmark results
+        if: ${{ needs.benchmark.result == 'success' }}
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: benchmark-${{ fromJSON(needs.setup.outputs.matrix).include[0].suffix }}
+          path: benchmark-results
+
+      - name: Render the comment
+        env:
+          RESULT: ${{ needs.benchmark.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          results=""
+          [ "$RESULT" = "success" ] && results="benchmark-results/final_result_${SUFFIX}.md"
+          python3 .github/scripts/benchmark_test.py comment --title 'Benchmark Results' --run-url "$RUN_URL" \
+            --results "$results" --output comment.md
+          {
+            echo "### Comment for ${TARGET_REPOSITORY}#${PULL_REQUEST_NUMBER}$([ "$DRY_RUN" = "true" ] && echo ' (dry run, not posted)')"
+            echo
+            cat comment.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the rendered comment
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: pull-request-comment-${{ github.run_id }}
+          path: comment.md
+          retention-days: 30
+
+      - name: Split the repository
+        id: target
+        if: ${{ needs.setup.outputs.dry-run != 'true' }}
+        run: |
+          echo "owner=${TARGET_REPOSITORY%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${TARGET_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint a GitHub App token for the pull request repository
+        # replaces op:github-bot/ci-bot-token (ADR 0001: GitHub App, narrowest permission)
+        id: app-token
+        if: ${{ steps.target.outcome == 'success' }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target.outputs.owner }}
+          repositories: ${{ steps.target.outputs.name }}
+          permission-pull-requests: write
+
+      - name: Post the comment
+        if: ${{ steps.app-token.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: gh pr comment "$PULL_REQUEST_NUMBER" --repo "$TARGET_REPOSITORY" --body-file comment.md
+
+  compare:
+    # getCompareBenchmarkIds() then `build job: 'benchmark-compare', wait: false, propagate: false`
+    name: trigger-benchmark-compare
+    needs: [setup, benchmark]
+    if: >-
+      ${{ needs.benchmark.result == 'success' && needs.setup.outputs.pull-request-number != ''
+      && needs.setup.outputs.repository != '' && needs.setup.outputs.baseline-cluster-config != '' }}
+    # the metrics datastore NLB is reachable from the benchmark VPC
+    runs-on: ${{ fromJSON(inputs.runs-on || '["self-hosted", "linux", "x64", "al2023-x64-m5-2xlarge-benchmark-test"]') }}
+    timeout-minutes: 15
+    environment: ${{ (needs.setup.outputs.dry-run != 'true' && github.event_name != 'pull_request') && 'benchmark' || '' }}
+    permissions:
+      contents: read
+      actions: write
+    env:
+      PULL_REQUEST_NUMBER: ${{ needs.setup.outputs.pull-request-number }}
+      TARGET_REPOSITORY: ${{ needs.setup.outputs.repository }}
+      BASELINE_CLUSTER_CONFIG: ${{ needs.setup.outputs.baseline-cluster-config }}
+      DRY_RUN: ${{ needs.setup.outputs.dry-run }}
+      PARAMS: ${{ fromJSON(needs.setup.outputs.matrix).include[0].params }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Find the baseline and contender test executions
+        id: ids
+        env:
+          DATASTORE_ENDPOINT: ${{ secrets.BENCHMARK_METRICS_DATASTORE_NLB_ENDPOINT }}
+          DATASTORE_USER: ${{ secrets.BENCHMARK_METRICS_DATASTORE_USER }}
+          DATASTORE_PASSWORD: ${{ secrets.BENCHMARK_METRICS_DATASTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json, os; print(json.loads(os.environ["PARAMS"])["DISTRIBUTION_VERSION"])')"
+          workload="$(python3 -c 'import json, os; print(json.loads(os.environ["PARAMS"]).get("TEST_WORKLOAD", "nyc_taxis"))')"
+          args=(compare-ids --baseline-cluster-config "$BASELINE_CLUSTER_CONFIG" --distribution-version "${version}-SNAPSHOT"
+            --workload "$workload" --pull-request-number "$PULL_REQUEST_NUMBER")
+          [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
+          python3 .github/scripts/benchmark_test.py "${args[@]}"
+
+      - name: Dispatch benchmark-compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE: ${{ steps.ids.outputs.baseline }}
+          CONTENDER: ${{ steps.ids.outputs.contender }}
+          REF: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          cmd=(gh workflow run benchmark-compare.yml --repo "$GITHUB_REPOSITORY" --ref "$REF"
+            -f "BASELINE_TEST_EXECUTION_ID=${BASELINE}" -f "CONTENDER_TEST_EXECUTION_ID=${CONTENDER}"
+            -f "PULL_REQUEST_NUMBER=${PULL_REQUEST_NUMBER}" -f "REPOSITORY=${TARGET_REPOSITORY}")
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run, would run: ${cmd[*]}"
+            exit 0
+          fi
+          if [ -z "$BASELINE" ] || [ -z "$CONTENDER" ]; then
+            # Jenkins passed the string "null" on and benchmark-compare failed; skip with a notice instead
+            echo "::notice::No baseline or contender test execution found; benchmark-compare not triggered"
+            exit 0
+          fi
+          "${cmd[@]}"

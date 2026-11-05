@@ -118,6 +118,7 @@ Names only; values are copied from the 1Password item in the **Replaces** column
 | `BENCHMARK_METRICS_DATASTORE_USER` | env `benchmark` | `benchmark-metrics/benchmark-metrics-datastore-user` | benchmarks |
 | `BENCHMARK_METRICS_DATASTORE_PASSWORD` | env `benchmark` | `benchmark-metrics/benchmark-metrics-datastore-password` | benchmarks |
 | `BENCHMARK_METRICS_DATASTORE_NLB_ENDPOINT` | env `benchmark` | `benchmark-metrics/benchmark-metrics-datastore-nlb-endpoint` | `benchmark-pull-request` |
+| `BENCHMARK_ENDPOINT_CREDENTIALS` | env `benchmark` | `benchmark-test-endpoint` `USERNAME` / `PASSWORD` parameters | `benchmark-test-endpoint` (JSON object of `CREDENTIALS_KEY` -> `username:password`; empty until a schedule needs basic auth) |
 | `AWS_ROLE_PROMOTION` | env `release` | `aws-iam-roles/jenkins-artifact-promotion-role` + `aws-accounts/jenkins-aws-production-account` | see role table |
 | `AWS_ROLE_RPM_SIGNING` | env `release` | `jenkins-prod-rpm-signing-assume-role` + `rpm-signing/jenkins-rpm-signing-account-number` | `promote-repos`, `sign-standalone-artifacts` |
 | `AWS_ROLE_SIGNING_BASE` | env `release` | agent instance profile | `promote-repos`, `sign-standalone-artifacts` |
@@ -156,7 +157,7 @@ Environment variable names inside steps keep the names the scripts already read 
 
 Jenkins credentials with no GHA secret: the account-number entries (`aws-accounts/*`, `rpm-signing/jenkins-rpm-signing-account-number`; folded into role ARNs), `aws-iam-roles/jenkins-artifact-promotion-role` (folded into `AWS_ROLE_PROMOTION`), the GenericTrigger tokens (replaced by GitHub-authenticated dispatch), and everything referenced only by retired `jenkins/legacy/` files (`gradle-check/*`, `jenkins-sonatype-creds`, `maven-snapshots-*`, `mend-scan/wss-token`, `jenkins-data-prepper-*`).
 
-`benchmark-test-endpoint` takes the target cluster's `USERNAME` / `PASSWORD` as Jenkins parameters. In GHA the password must not be a `workflow_dispatch` input (inputs are shown in the run UI); scheduled configs reference a `benchmark`-environment secret named in the schedule config, and s4.5 lists those names when it ports the schedules.
+`benchmark-test-endpoint` takes the target cluster's `USERNAME` / `PASSWORD` as Jenkins parameters. In GHA the password must not be a `workflow_dispatch` input (inputs are shown in the run UI); scheduled configs reference a `benchmark`-environment secret named in the schedule config, and s4.5 lists those names when it ports the schedules. s4.5: none of the 21 schedules passes credentials (20 use SigV4, one is insecure), so `BENCHMARK_ENDPOINT_CREDENTIALS` starts empty; a schedule entry or dispatch selects an entry with `CREDENTIALS_KEY`. The S3 prefix of `config.yml` / `benchmark.ini` (Jenkins global env `BENCHMARK_TEST_CONFIG_LOCATION`) is the repository variable of the same name.
 
 ## Consequences
 

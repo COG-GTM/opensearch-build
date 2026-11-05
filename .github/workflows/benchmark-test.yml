@@ -1,0 +1,197 @@
+---
+# GitHub Actions port of jenkins/opensearch/benchmark-test.jenkinsfile, benchmark-test-vectorsearch.jenkinsfile
+# (Jenkins job `benchmark-test-ai-ml`) and benchmark-test-datafusion.jenkinsfile. The three pipelines run the same
+# runBenchmarkTestScript flow, so they share this workflow; their parameterizedCron entries live in
+# .github/schedules/benchmark-test.yml with a `suite` per entry (the suite picks the runner pool and job name).
+#
+# Each Jenkins build becomes a matrix row (two when the bundle manifest has the security plugin: Jenkins'
+# test-with-security / test-without-security stages). Every row deploys its own CDK stack
+# (opensearch-infra-stack-<run id>-<entry>[-secure]) on the benchmark runner pool and runs under AWS_ROLE_BENCHMARK.
+name: benchmark-test
+
+run-name: >-
+  ${{ github.event_name == 'schedule' && format('benchmark-test scheduled {0}', github.event.schedule)
+  || format('benchmark-test {0} {1}', inputs.SUITE || 'benchmark-test', inputs.BUNDLE_MANIFEST_URL || inputs.DISTRIBUTION_URL) }}
+
+on:
+  schedule:
+    # one cron per distinct parameterizedCron expression in .github/schedules/benchmark-test.yml
+    - cron: '7 0 * * *'
+    - cron: '7 1 * * *'
+    - cron: '7 2 * * *'
+    - cron: '7 3 * * *'
+    - cron: '7 4 * * *'
+    - cron: '7 5 * * *'
+    - cron: '7 6 * * *'
+    - cron: '7 7 * * *'
+    - cron: '7 8 * * *'
+    - cron: '7 9 * * *'
+    - cron: '7 10 * * *'
+    - cron: '7 11 * * *'
+    - cron: '17 0 * * *'
+    - cron: '17 1 * * *'
+    - cron: '17 2 * * *'
+    - cron: '17 3 * * *'
+    - cron: '17 4 * * *'
+    - cron: '17 5 * * *'
+    - cron: '17 6 * * *'
+    - cron: '17 7 * * *'
+    - cron: '17 8 * * *'
+    - cron: '17 9 * * *'
+    - cron: '27 */6 * * *'
+    - cron: '27 */8 * * *'
+  workflow_dispatch:
+    inputs:
+      SUITE:
+        description: 'Jenkins pipeline to mirror: runner pool, job name and allowed parameters.'
+        required: true
+        default: benchmark-test
+        type: choice
+        options:
+          - benchmark-test
+          - benchmark-test-vectorsearch
+          - benchmark-test-datafusion
+      BUNDLE_MANIFEST_URL:
+        description: '<Conditionally-Required> Publicly available URL of the distribution bundle manifest.'
+        required: false
+        type: string
+      DISTRIBUTION_URL:
+        description: '<Conditionally-Required> Publicly available URL of the OpenSearch artifact tarball.'
+        required: false
+        type: string
+      DISTRIBUTION_VERSION:
+        description: '<Conditionally-Required> Distribution version, only with DISTRIBUTION_URL.'
+        required: false
+        type: string
+      TEST_WORKLOAD:
+        description: '<Required> The workload name from OpenSearch Benchmark Workloads.'
+        required: true
+        default: nyc_taxis
+        type: string
+      SINGLE_NODE_CLUSTER:
+        description: '<Optional> Benchmark test on a single node cluster.'
+        required: false
+        default: true
+        type: boolean
+      USER_TAGS:
+        description: '<Optional> Metadata tags for each metric record, e.g. run-type:adhoc,segrep:enabled,arch:x64.'
+        required: false
+        type: string
+      WORKLOAD_PARAMS:
+        description: '<Optional> JSON variables injected into the workload, e.g. {"number_of_replicas":"1"}.'
+        required: false
+        type: string
+      TEST_PROCEDURE:
+        description: '<Optional> Test procedure to use, e.g. append-no-conflicts,significant-text.'
+        required: false
+        type: string
+      OPTIONS:
+        description: >-
+          <Optional> Other Jenkins parameters as KEY=VALUE separated by ';' (PLUGIN_URL, MIN_DISTRIBUTION,
+          MANAGER_NODE_COUNT, DATA_NODE_COUNT, DATA_INSTANCE_TYPE, ADDITIONAL_CONFIG, CAPTURE_NODE_STAT, ...).
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      params:
+        description: 'JSON object of Jenkins parameters for one build'
+        required: true
+        type: string
+      suite:
+        description: 'benchmark-test, benchmark-test-vectorsearch or benchmark-test-datafusion'
+        required: false
+        default: benchmark-test
+        type: string
+      runs-on:
+        description: 'JSON label array overriding the benchmark pool, e.g. ["ubuntu-24.04"] for a dry run'
+        required: false
+        default: ''
+        type: string
+      local-cluster:
+        description: 'Benchmark the DISTRIBUTION_URL tarball started on the runner instead of a CDK stack (dry runs)'
+        required: false
+        default: false
+        type: boolean
+      notify:
+        description: 'Post the success/failure webhook message'
+        required: false
+        default: true
+        type: boolean
+
+permissions: {}
+
+jobs:
+  setup:
+    name: validate-and-set-parameters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Resolve the builds
+        id: resolve
+        env:
+          MODE: ${{ github.event_name == 'schedule' && 'schedule' || 'inputs' }}
+          DATA: ${{ inputs.params || toJSON(inputs) }}
+          SUITE: ${{ inputs.suite || inputs.SUITE }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/benchmark_test.py resolve --workflow benchmark-test --mode "$MODE" --data "$DATA" \
+            --suite "$SUITE" --schedule "$SCHEDULE" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+  benchmark:
+    needs: setup
+    strategy:
+      # the Jenkins test-with-security / test-without-security stages ran in `parallel { }`; separate builds never
+      # cancelled each other
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    uses: ./.github/workflows/_benchmark-run.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      name: ${{ matrix.name }}
+      params: ${{ matrix.params }}
+      suffix: ${{ matrix.suffix }}
+      insecure: ${{ matrix.insecure }}
+      user-tag: ${{ matrix.user-tag }}
+      runs-on: ${{ inputs.runs-on || matrix.runs-on }}
+      timeout-minutes: 1440
+      local-cluster: ${{ inputs.local-cluster == true }}
+
+  notify:
+    # publishNotification(credentialsId: 'jenkins-integ-test-webhook') in the success / failure post blocks; Jenkins
+    # sent nothing for aborted builds
+    needs: [setup, benchmark]
+    if: >-
+      ${{ always() && needs.setup.result == 'success' && inputs.notify != false
+      && (needs.benchmark.result == 'success' || needs.benchmark.result == 'failure') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: ${{ github.event_name != 'pull_request' && 'benchmark' || '' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Post the webhook message
+        env:
+          WEBHOOK_URL: ${{ secrets.INTEG_TEST_WEBHOOK_URL }}
+          RESULT: ${{ needs.benchmark.result }}
+          MATRIX: ${{ needs.setup.outputs.matrix }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          extra="$(python3 -c 'import json, os; print("\n".join("Benchmark tests for " + r["name"] for r in json.loads(os.environ["MATRIX"])["include"]))')"
+          if [ "$RESULT" = "success" ]; then icon=':white_check_mark:'; message='Benchmark Tests Successful'
+          else icon=':warning:'; message='Benchmark Tests Failed'; fi
+          python3 .github/scripts/benchmark_test.py webhook --icon "$icon" --job-name benchmark-test \
+            --run-number "$GITHUB_RUN_NUMBER" --message "$message" --run-url "$RUN_URL" --extra "$extra"
