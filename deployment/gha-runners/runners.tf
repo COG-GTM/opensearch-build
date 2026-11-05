@@ -36,7 +36,7 @@ locals {
   mac_pools = { for k, p in local.runner_pools : k => p if p.os == "osx" }
 
   mac_hosts = merge([
-    for pool, azs in var.mac_dedicated_host_azs : {
+    for pool, azs in merge({ for k in keys(local.mac_pools) : k => ["${var.aws_region}a"] }, var.mac_dedicated_host_azs) : {
       for i, az in azs : "${pool}-${i}" => {
         pool              = pool
         availability_zone = az
@@ -56,7 +56,9 @@ locals {
     for k, p in local.runner_pools : p.id => {
       matcherConfig = {
         labelMatchers = [p.labels]
-        exactMatch    = true
+        # Job labels must equal the pool's label set (not a subset), so e.g. [self-hosted, linux, x64] matches nothing.
+        exactMatch              = true
+        bidirectionalLabelMatch = true
       }
       fifo = true
       runner_config = {
@@ -64,6 +66,7 @@ locals {
         runner_architecture = p.arch
         runner_name_prefix  = "${p.id}-"
         runner_run_as       = p.os == "windows" ? null : try(p.run_as, "ec2-user")
+        userdata_template   = p.os == "linux" && try(p.run_as, "ec2-user") == "ubuntu" ? "${path.module}/templates/user-data-ubuntu.sh" : null
 
         # The pool label is the only extra label; GitHub adds self-hosted/<os>/<arch>.
         runner_extra_labels = [for l in p.labels : l if !contains(["self-hosted", "linux", "windows", "macos", "x64", "arm64"], l)]
@@ -106,10 +109,12 @@ locals {
         runner_iam_role_managed_policy_arns = ["arn:${data.aws_partition.runner.partition}:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"]
 
         runner_metadata_options = {
-          instance_metadata_tags      = "disabled"
-          http_endpoint               = "enabled"
-          http_tokens                 = "required"
-          http_put_response_hop_limit = p.os == "linux" ? 2 : 1
+          # Tags carry no secrets; the macOS start script reads its config only from IMDS tags.
+          instance_metadata_tags = "enabled"
+          http_endpoint          = "enabled"
+          http_tokens            = "required"
+          # 1 hop: job containers on the Docker bridge cannot reach IMDS / the instance profile.
+          http_put_response_hop_limit = 1
         }
 
         runner_ec2_tags = {

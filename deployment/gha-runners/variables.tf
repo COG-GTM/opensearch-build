@@ -165,12 +165,9 @@ variable "runner_max_count_overrides" {
 }
 
 variable "mac_dedicated_host_azs" {
-  description = "Availability zones to allocate one EC2 Mac dedicated host in, per macOS pool. Empty list = no hosts (pool cannot launch)."
+  description = "Availability zones to allocate one EC2 Mac dedicated host in, per macOS pool (key = pool name). Pools not listed get [\"<aws_region>a\"]; an empty list = no hosts (pool cannot launch)."
   type        = map(list(string))
-  default = {
-    "macos14-x64-mac1"   = ["us-east-1a"]
-    "macos14-arm64-mac2" = ["us-east-1a"]
-  }
+  default     = {}
 }
 
 variable "runner_lambda_zip_dir" {

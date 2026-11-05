@@ -21,14 +21,16 @@ every role name is new (`gha-opensearch-build-*`), so Jenkins keeps working unti
 
 * **Ephemeral, one job per instance.** `enable_ephemeral_runners` + JIT config: an instance registers
   for one job and is terminated afterwards; nothing (workspace, Docker cache, credentials) survives.
-* **Scale from zero.** No warm pool or idle config. A queued `workflow_job` whose labels exactly match a
-  pool (`exactMatch = true`) starts one instance, up to the pool's `max_runners`.
+* **Scale from zero.** No warm pool or idle config. A queued `workflow_job` whose label set equals a
+  pool's (`exactMatch` + `bidirectionalLabelMatch`) starts one instance, up to the pool's `max_runners`.
 * **Repository-scoped.** Org runners in the `opensearch-build` runner group (selected repository only),
   and the webhook drops events from any other repository (`repository_white_list`). Fork PRs never
   reach these runners: PR checks stay on GitHub-hosted runners (ADR 0001).
 * **Instance profile is boot-time only:** SSM (JIT config, Session Manager), CloudWatch agent, ECR
   read-only. Workflows get AWS access only through the OIDC roles below.
-* On-demand capacity (no spot interruptions mid-build), IMDSv2 required, encrypted gp3 root volumes.
+* On-demand capacity (no spot interruptions mid-build), IMDSv2 required with hop limit 1 (job containers
+  cannot reach the instance profile), encrypted gp3 root volumes. The Ubuntu pool boots with
+  `templates/user-data-ubuntu.sh` (the module default assumes AL2023).
   Benchmark pools use `benchmark_vpc_id` / `benchmark_subnet_ids` when set.
 
 ### OIDC roles
@@ -96,7 +98,7 @@ action approved on the ticket by a maintainer.
    `release_reviewers`, and any `runner_max_count_overrides`.
 2. Initialise against the shared state:
    ```bash
-   terraform init -backend-config="bucket=<state-bucket>" -backend-config="key=gha-runners/opensearch-build.tfstate" \
+   terraform init -reconfigure -backend-config="bucket=<state-bucket>" -backend-config="key=gha-runners/opensearch-build.tfstate" \
      -backend-config="region=us-east-1" -backend-config="dynamodb_table=<lock-table>"
    ```
 3. `terraform plan -var-file=prod.tfvars -out=prod.tfplan`, attach the plan output to the ticket, and get

@@ -17,10 +17,11 @@ data "github_repository" "this" {
 resource "github_actions_runner_group" "this" {
   count = var.manage_github ? 1 : 0
 
-  name                       = var.runner_group_name
-  visibility                 = "selected"
-  selected_repository_ids    = [data.github_repository.this[0].repo_id]
-  allows_public_repositories = false
+  name                    = var.runner_group_name
+  visibility              = "selected"
+  selected_repository_ids = [data.github_repository.this[0].repo_id]
+  # The repository is public; access is limited to it by selected_repository_ids, and fork PRs never target these labels (ADR 0001).
+  allows_public_repositories = true
 }
 
 locals {
