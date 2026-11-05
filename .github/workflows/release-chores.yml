@@ -1,37 +1,21 @@
 ---
+# GitHub Actions port of jenkins/release-workflows/release-chores.jenkinsfile (Jenkins job distribution-release-chores).
+# RELEASE_CHORE picks the chore and ACTION its mode, as in Jenkins. Every library step the Jenkins stages called runs
+# through the release-chore composite action (.github/scripts/release_chores.py); checkReleaseNotes create / compile
+# call release-notes-generate.yml (once per product, one after the other) and release-notes-check.yml (compile)
+# through workflow_call instead of `build job:`. Jenkins used propagate: false for those two, so its run stayed green
+# when they failed; a failed called workflow fails this run.
+# Metrics reads assume AWS_ROLE_METRICS through OIDC; writes to component repositories and documentation-website use the
+# GitHub App token, workflow dispatches in this repository (checkReleaseIssues create, buildRC) use github.token.
+# DRY_RUN runs every read for real and prints the comments, assignments, dispatches and PRs instead of making them.
 name: release-chores
-
-# Port of jenkins/release-workflows/release-chores.jenkinsfile (Jenkins job: distribution-release-chores).
-# The Jenkins job is a manually triggered multiplexer: RELEASE_CHORE selects a chore, ACTION selects
-# the mode for that chore, and each chore stage calls a function from the external shared library
-# opensearch-build-libraries (library(identifier: 'jenkins@12.0.0')). Those library functions are not
-# available to GitHub Actions, so every chore except the release-notes check is a documented gap below.
-#
-# Jenkins has no cron/webhook trigger for this job, so there is no schedule: block to port. The
-# workflow_call block below is the equivalent "other jobs may invoke this" trigger and is kept
-# commented out so nothing automated runs against production while both CI systems are live.
-# enable at cutover; Jenkins job distribution-release-chores still runs this
-# workflow_call:
-#   inputs:
-#     chore:
-#       required: true
-#       type: string
-#     action:
-#       required: false
-#       type: string
-#       default: check
-#     release_version:
-#       required: true
-#       type: string
-#     git_log_date:
-#       required: false
-#       type: string
+run-name: release-chores ${{ inputs.RELEASE_CHORE }}/${{ inputs.ACTION }}/${{ inputs.RELEASE_VERSION }}${{ inputs.DRY_RUN && ' (dry run)' || '' }}
 
 on:
   workflow_dispatch:
     inputs:
-      chore:
-        description: 'Release chore to carry out'
+      RELEASE_CHORE:
+        description: '<Required> Release chore to carry out'
         required: true
         type: choice
         options:
@@ -44,266 +28,255 @@ on:
           - addRcDetailsComment
           - checkDocumentationPullRequests
           - checkIntegTestResultsOverview
-      action:
-        # GitHub Actions has no equivalent of the Jenkins Active Choices reactive parameter, so this is a
-        # free-form string. The valid values per chore are validated by the validate-inputs job below:
-        #   checkReleaseOwners             check | request | assign
-        #   checkDocumentation             check | notify
-        #   checkCodeCoverage              check | notify
-        #   checkReleaseNotes              check | create | compile | notify
-        #   checkReleaseIssues             check | create
-        #   checkDocumentationPullRequests check
-        #   checkIntegTestResultsOverview  check
-        #   addRcDetailsComment            add
-        #   buildRC                        both | opensearch | opensearch-dashboards
-        description: 'Release chore action, must be valid for the selected chore'
-        required: true
-        default: check
-        type: string
-      release_version:
-        description: 'Release version to be used for the release chore, example 3.9.0'
-        required: true
-        type: string
-      git_log_date:
-        description: 'Date to check commits for release notes, format yyyy-mm-dd, required for checkReleaseNotes'
+      ACTION:
+        # Jenkins used an Active Choices reactive parameter; the allowed values per chore are checked in Parameters Check:
+        #   checkReleaseOwners check|request|assign, checkDocumentation check|notify, checkCodeCoverage check|notify,
+        #   checkReleaseNotes check|create|compile|notify, checkReleaseIssues check|create, checkDocumentationPullRequests check,
+        #   checkIntegTestResultsOverview check, addRcDetailsComment add, buildRC both|opensearch|opensearch-dashboards
+        description: '<Optional> Release chore action, must be valid for the selected chore. Defaults to the first choice of the chore'
         required: false
+        default: ''
         type: string
+      RELEASE_VERSION:
+        description: '<Required> Release version to be used for the release chore'
+        required: true
+        type: string
+      GIT_LOG_DATE:
+        description: '<Conditionally-Required> Date to check commits for release notes in format yyyy-mm-dd, example 2022-07-26.'
+        required: false
+        default: ''
+        type: string
+      DRY_RUN:
+        description: 'Run the reads, print the GitHub writes instead of making them'
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      RELEASE_CHORE:
+        required: true
+        type: string
+      ACTION:
+        required: false
+        default: ''
+        type: string
+      RELEASE_VERSION:
+        required: true
+        type: string
+      GIT_LOG_DATE:
+        required: false
+        default: ''
+        type: string
+      DRY_RUN:
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      AWS_ROLE_METRICS:
+        required: false
+      METRICS_CLUSTER_ENDPOINT:
+        required: false
+      BEDROCK_ACCESS_ROLE:
+        required: false
+      GH_APP_ID:
+        required: false
+      GH_APP_PRIVATE_KEY:
+        required: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  validate-inputs:
-    # Jenkins stage 'Parameters Check'. Replaces the Active Choices reactive ACTION parameter with an
-    # explicit fail-fast validation that prints the allowed values for the selected chore.
-    # runs-on replaces Jenkins agent label Jenkins-Agent-AL2023-X64-M54xlarge-Docker-Host; this job is
-    # pure shell and does not need the large self-hosted host.
-    runs-on: ubuntu-latest
+  parameters:
+    name: Parameters Check
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      chore: ${{ steps.validate.outputs.chore }}
+      action: ${{ steps.validate.outputs.action }}
+      metrics: ${{ steps.validate.outputs.metrics }}
+      upstream-writes: ${{ steps.validate.outputs.upstream-writes }}
+      app-repositories: ${{ steps.validate.outputs.app-repositories }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Validate chore, action and version
+        id: validate
         env:
-          CHORE: ${{ inputs.chore }}
-          ACTION: ${{ inputs.action }}
-          RELEASE_VERSION: ${{ inputs.release_version }}
-          GIT_LOG_DATE: ${{ inputs.git_log_date }}
+          CHORE: ${{ inputs.RELEASE_CHORE }}
+          ACTION: ${{ inputs.ACTION }}
+          RELEASE_VERSION: ${{ inputs.RELEASE_VERSION }}
+          GIT_LOG_DATE: ${{ inputs.GIT_LOG_DATE }}
         run: |
           set -euo pipefail
-
+          fail() { echo "::error::$1"; exit 1; }
+          # chore → release-chore name, allowed actions (first is the Jenkins default), metrics reads
           case "$CHORE" in
-            checkReleaseOwners)             ALLOWED="check request assign" ;;
-            checkDocumentation)             ALLOWED="check notify" ;;
-            checkCodeCoverage)              ALLOWED="check notify" ;;
-            checkReleaseNotes)              ALLOWED="check create compile notify" ;;
-            checkReleaseIssues)             ALLOWED="check create" ;;
-            checkDocumentationPullRequests) ALLOWED="check" ;;
-            checkIntegTestResultsOverview)  ALLOWED="check" ;;
-            addRcDetailsComment)            ALLOWED="add" ;;
-            buildRC)                        ALLOWED="both opensearch opensearch-dashboards" ;;
-            *) echo "Unknown chore '$CHORE'"; exit 1 ;;
+            checkReleaseOwners)             SCRIPT=release-owners; ALLOWED="check request assign"; METRICS=true ;;
+            checkDocumentation)             SCRIPT=doc-issues;     ALLOWED="check notify";         METRICS=false ;;
+            checkCodeCoverage)              SCRIPT=code-coverage;  ALLOWED="check notify";         METRICS=true ;;
+            checkReleaseNotes)              SCRIPT=release-notes;  ALLOWED="check create compile notify"; METRICS=true ;;
+            checkReleaseIssues)             SCRIPT=release-issues; ALLOWED="check create";         METRICS=true ;;
+            checkDocumentationPullRequests) SCRIPT=doc-prs;        ALLOWED="check";                METRICS=false ;;
+            checkIntegTestResultsOverview)  SCRIPT=integ-overview; ALLOWED="check";                METRICS=true ;;
+            addRcDetailsComment)            SCRIPT=rc-details;     ALLOWED="add";                  METRICS=true ;;
+            buildRC)                        SCRIPT=build-rc;       ALLOWED="both opensearch opensearch-dashboards"; METRICS=true ;;
+            *) fail "Unknown chore '$CHORE'" ;;
           esac
-
-          if [[ -z "$RELEASE_VERSION" ]]; then
-            echo "release_version cannot be empty!"
-            exit 1
+          [[ -n "$RELEASE_VERSION" ]] || fail 'RELEASE_VERSION parameter cannot be empty!'
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || fail "RELEASE_VERSION '$RELEASE_VERSION' is not a version"
+          [[ -n "$ACTION" ]] || ACTION="${ALLOWED%% *}"
+          [[ " $ALLOWED " == *" $ACTION "* ]] || fail "Invalid action '$ACTION' for chore '$CHORE'. Allowed actions: $ALLOWED"
+          if [[ "$CHORE" == checkReleaseNotes && "$ACTION" != compile && -z "$GIT_LOG_DATE" ]]; then
+            fail 'GIT_LOG_DATE parameter cannot be empty for checkReleaseNotes'
           fi
-
-          MATCHED=0
-          for allowed_action in $ALLOWED; do
-            if [[ "$ACTION" == "$allowed_action" ]]; then
-              MATCHED=1
-              break
-            fi
-          done
-          if [[ "$MATCHED" -ne 1 ]]; then
-            echo "Invalid action '$ACTION' for chore '$CHORE'. Allowed actions: $ALLOWED"
-            exit 1
-          fi
-
-          # Jenkins requires GIT_LOG_DATE for the check, notify and create actions, but not for compile.
-          if [[ "$CHORE" == "checkReleaseNotes" && "$ACTION" != "compile" && -z "$GIT_LOG_DATE" ]]; then
-            echo "git_log_date cannot be empty for checkReleaseNotes"
-            exit 1
-          fi
-
-          # Enforces the documented zero-padded yyyy-mm-dd input format, which `date -d` alone does not.
           if [[ -n "$GIT_LOG_DATE" ]]; then
-            if ! [[ "$GIT_LOG_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || \
-               [[ "$(date -d "$GIT_LOG_DATE" +%Y-%m-%d 2> /dev/null)" != "$GIT_LOG_DATE" ]]; then
-              echo "git_log_date '$GIT_LOG_DATE' is not a valid yyyy-mm-dd date"
-              exit 1
-            fi
+            [[ "$GIT_LOG_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && "$(date -d "$GIT_LOG_DATE" +%Y-%m-%d 2>/dev/null)" == "$GIT_LOG_DATE" ]] \
+              || fail "GIT_LOG_DATE '$GIT_LOG_DATE' is not a valid yyyy-mm-dd date"
           fi
-
-          for manifest in "manifests/${RELEASE_VERSION}/opensearch-${RELEASE_VERSION}.yml" \
-                          "manifests/${RELEASE_VERSION}/opensearch-dashboards-${RELEASE_VERSION}.yml"; do
-            if [[ ! -f "$manifest" ]]; then
-              echo "Missing input manifest $manifest"
-              exit 1
-            fi
+          for manifest in "manifests/$RELEASE_VERSION/opensearch-$RELEASE_VERSION.yml" "manifests/$RELEASE_VERSION/opensearch-dashboards-$RELEASE_VERSION.yml"; do
+            [[ -f "$manifest" ]] || fail "Missing input manifest $manifest"
           done
-
-          # Jenkins sets currentBuild.description to the same string.
+          [[ "$CHORE/$ACTION" == checkReleaseNotes/check ]] && METRICS=false
+          # comments / assignments on opensearch-project repositories need the GitHub App token
+          case "$SCRIPT/$ACTION" in
+            release-owners/request|release-owners/assign|doc-issues/notify|code-coverage/notify|release-notes/notify|rc-details/add) UPSTREAM=true ;;
+            *) UPSTREAM=false ;;
+          esac
+          # GitHub App token scope: the repositories this chore comments on
+          case "$SCRIPT" in
+            doc-issues) REPOS=documentation-website ;;
+            rc-details) REPOS=opensearch-build ;;
+            *) REPOS=$(grep -h 'repository:' "manifests/$RELEASE_VERSION/opensearch-$RELEASE_VERSION.yml" "manifests/$RELEASE_VERSION/opensearch-dashboards-$RELEASE_VERSION.yml" \
+                 | sed -E 's#.*/([^/]+)$#\1#; s#\.git$##' | sort -u | paste -sd, -) ;;
+          esac
+          {
+            echo "app-repositories=$REPOS"
+            echo "chore=$SCRIPT"
+            echo "action=$ACTION"
+            echo "metrics=$METRICS"
+            echo "upstream-writes=$UPSTREAM"
+          } >> "$GITHUB_OUTPUT"
           echo "### $CHORE/$ACTION/$RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
 
-  release-notes-check:
-    # Jenkins stage 'checkReleaseNotes', actions 'check' and 'notify'. The release_notes.sh invocation is
-    # real repository tooling and runs here for real; the checkReleaseNotes() library call that consumes
-    # table.md and notifies is a gap, see the TODO(migration) step.
-    needs: validate-inputs
-    if: inputs.chore == 'checkReleaseNotes' && (inputs.action == 'check' || inputs.action == 'notify')
-    runs-on: ubuntu-latest
+  chore:
+    name: ${{ inputs.RELEASE_CHORE }}
+    needs: parameters
+    if: ${{ !(inputs.RELEASE_CHORE == 'checkReleaseNotes' && (needs.parameters.outputs.action == 'create' || needs.parameters.outputs.action == 'compile')) }}
+    # Jenkins agent label Jenkins-Agent-AL2023-X64-M54xlarge-Docker-Host; dry runs stay on a hosted runner.
+    runs-on: ${{ fromJSON(inputs.DRY_RUN && '["ubuntu-24.04"]' || '["self-hosted","linux","x64","al2023-x64-m5-4xlarge-docker-host"]') }}
+    container:
+      image: public.ecr.aws/opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-build-v1
+      options: --user root
     timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      actions: write
+    env:
+      HAS_METRICS_ROLE: ${{ secrets.AWS_ROLE_METRICS != '' }}
+      HAS_APP: ${{ secrets.GH_APP_ID != '' && secrets.GH_APP_PRIVATE_KEY != '' }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          python-version: 3.9
-      - name: Install Pipenv
-        run: |
-          python -m pip install --upgrade pipenv wheel
+          persist-credentials: false
       - name: Check release notes
+        if: needs.parameters.outputs.chore == 'release-notes'
         env:
-          # Read by src/release_notes_workflow/release_notes.py. The Jenkins job inherits a GitHub bot
-          # credential from the controller; provision OPENSEARCH_RELEASE_BOT_TOKEN before enabling, the
-          # default GITHUB_TOKEN is only a fallback and cannot read other repositories.
-          GITHUB_TOKEN: ${{ secrets.OPENSEARCH_RELEASE_BOT_TOKEN || github.token }}
-          RELEASE_VERSION: ${{ inputs.release_version }}
-          GIT_LOG_DATE: ${{ inputs.git_log_date }}
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.RELEASE_VERSION }}
+          GIT_LOG_DATE: ${{ inputs.GIT_LOG_DATE }}
         run: |
-          set +e
-          ./release_notes.sh check \
-            "manifests/${RELEASE_VERSION}/opensearch-${RELEASE_VERSION}.yml" \
-            "manifests/${RELEASE_VERSION}/opensearch-dashboards-${RELEASE_VERSION}.yml" \
-            --date "${GIT_LOG_DATE}" --output "${GITHUB_WORKSPACE}/table.md"
-      - name: Upload release notes table
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
-        with:
-          name: release-notes-table-${{ inputs.release_version }}
-          path: ./table.md
-          if-no-files-found: warn
-      - name: Publish release notes table to the job summary
-        if: always()
+          ./release_notes.sh check "manifests/$RELEASE_VERSION/opensearch-$RELEASE_VERSION.yml" \
+            "manifests/$RELEASE_VERSION/opensearch-dashboards-$RELEASE_VERSION.yml" --date "$GIT_LOG_DATE" --output "$GITHUB_WORKSPACE/table.md"
+          cat "$GITHUB_WORKSPACE/table.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Require metrics and GitHub App credentials
+        if: ${{ !inputs.DRY_RUN }}
+        env:
+          NEEDS_METRICS: ${{ needs.parameters.outputs.metrics }}
+          UPSTREAM_WRITES: ${{ needs.parameters.outputs.upstream-writes }}
         run: |
-          if [[ -f ./table.md ]]; then
-            cat ./table.md >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$NEEDS_METRICS" == true && "$HAS_METRICS_ROLE" != true ]]; then
+            echo "::error::secrets.AWS_ROLE_METRICS / METRICS_CLUSTER_ENDPOINT are required for this chore"
+            exit 1
           fi
-      - name: TODO(migration) checkReleaseNotes
-        run: |-
-          echo "TODO(migration): the Jenkins stage calls checkReleaseNotes(version, dataTable, action) from"
-          echo "the shared library opensearch-build-libraries (jenkins@12.0.0), which posts the table above to"
-          echo "the release issue and notifies component owners when action=notify. That Groovy source lives"
-          echo "outside this repository and has not been reimplemented, so the table produced above is"
-          echo "published as an artifact and job summary only."
-          echo "Run the Jenkins job distribution-release-chores for the notification half of this chore."
-          exit 1
+          if [[ "$UPSTREAM_WRITES" == true && "$HAS_APP" != true ]]; then
+            echo "::error::secrets.GH_APP_ID / GH_APP_PRIVATE_KEY are required to comment on opensearch-project repositories"
+            exit 1
+          fi
+      - name: Configure AWS credentials (metrics cluster)
+        if: needs.parameters.outputs.metrics == 'true' && env.HAS_METRICS_ROLE == 'true'
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_METRICS }}
+          role-session-name: gha-release-chores
+          role-duration-seconds: 900
+          aws-region: us-east-1
+      - name: Mint GitHub App token
+        id: app-token
+        if: needs.parameters.outputs.upstream-writes == 'true' && env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: opensearch-project
+          repositories: ${{ needs.parameters.outputs.app-repositories }}
+          permission-issues: write
+      - name: Run ${{ needs.parameters.outputs.chore }}
+        uses: ./.github/actions/release-chore
+        with:
+          chore: ${{ needs.parameters.outputs.chore }}
+          action: ${{ needs.parameters.outputs.action }}
+          version: ${{ inputs.RELEASE_VERSION }}
+          manifests: |
+            manifests/${{ inputs.RELEASE_VERSION }}/opensearch-${{ inputs.RELEASE_VERSION }}.yml
+            manifests/${{ inputs.RELEASE_VERSION }}/opensearch-dashboards-${{ inputs.RELEASE_VERSION }}.yml
+          table: ${{ needs.parameters.outputs.chore == 'release-notes' && format('{0}/table.md', github.workspace) || '' }}
+          git-log-date: ${{ inputs.GIT_LOG_DATE }}
+          metrics-endpoint: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+          github-token: ${{ steps.app-token.outputs.token || github.token }}
+          dry-run: ${{ inputs.DRY_RUN }}
 
   release-notes-generate:
-    # Jenkins stage 'checkReleaseNotes', action 'create': two build job: 'release-notes-generate' calls,
-    # one per product manifest.
-    needs: validate-inputs
-    if: inputs.chore == 'checkReleaseNotes' && inputs.action == 'create'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: TODO(migration) trigger release-notes-generate
-        env:
-          RELEASE_VERSION: ${{ inputs.release_version }}
-          GIT_LOG_DATE: ${{ inputs.git_log_date }}
-        run: |-
-          echo "TODO(migration): Jenkins triggers the release-notes-generate job twice, with"
-          echo "  INPUT_MANIFEST=${RELEASE_VERSION}/opensearch-${RELEASE_VERSION}.yml"
-          echo "  INPUT_MANIFEST=${RELEASE_VERSION}/opensearch-dashboards-${RELEASE_VERSION}.yml"
-          echo "  GIT_LOG_DATE=${GIT_LOG_DATE}"
-          echo "jenkins/release-workflows/release-notes-generate.jenkinsfile is not migrated yet (blocked on"
-          echo "decision (e), artifact identity, per docs/jenkins-to-github-actions-migration.md section 7)."
-          echo "Once it exists as .github/workflows/release-notes-generate.yml this job becomes two"
-          echo "'uses: ./.github/workflows/release-notes-generate.yml' jobs, per migration doc section 2."
-          echo "Until then run the Jenkins job release-notes-generate."
-          exit 1
+    name: Create release notes (${{ matrix.product }})
+    needs: parameters
+    if: inputs.RELEASE_CHORE == 'checkReleaseNotes' && needs.parameters.outputs.action == 'create'
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        product: [opensearch, opensearch-dashboards]
+    uses: ./.github/workflows/release-notes-generate.yml
+    with:
+      INPUT_MANIFEST: ${{ inputs.RELEASE_VERSION }}/${{ matrix.product }}-${{ inputs.RELEASE_VERSION }}.yml
+      GIT_LOG_DATE: ${{ inputs.GIT_LOG_DATE }}
+      DRY_RUN: ${{ inputs.DRY_RUN }}
+    secrets:
+      BEDROCK_ACCESS_ROLE: ${{ secrets.BEDROCK_ACCESS_ROLE }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
   release-notes-compile:
-    # Jenkins stage 'checkReleaseNotes', action 'compile': build job: 'release-notes-tracker'.
-    needs: validate-inputs
-    if: inputs.chore == 'checkReleaseNotes' && inputs.action == 'compile'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: TODO(migration) trigger release-notes-tracker
-        env:
-          RELEASE_VERSION: ${{ inputs.release_version }}
-          GIT_LOG_DATE: ${{ inputs.git_log_date }}
-        run: |-
-          echo "TODO(migration): Jenkins triggers the release-notes-tracker job with"
-          echo "  RELEASE_VERSION=${RELEASE_VERSION} ACTION=compile GIT_LOG_DATE=${GIT_LOG_DATE}"
-          echo "That job is not migrated yet, so this chore has no GitHub Actions equivalent."
-          echo "Run the Jenkins job release-notes-tracker."
-          exit 1
-
-  shared-library-chores:
-    # Every other Jenkins stage calls a same-named function from opensearch-build-libraries against the
-    # OpenSearch and OpenSearch Dashboards input manifests. None of those functions can be called from
-    # GitHub Actions and none of them are reimplemented in this repository, so each one fails fast with
-    # the exact call it is replacing rather than reporting a green run that did nothing.
-    needs: validate-inputs
-    if: inputs.chore != 'checkReleaseNotes'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      RELEASE_VERSION: ${{ inputs.release_version }}
-      ACTION: ${{ inputs.action }}
-      OS_MANIFEST: manifests/${{ inputs.release_version }}/opensearch-${{ inputs.release_version }}.yml
-      OSD_MANIFEST: manifests/${{ inputs.release_version }}/opensearch-dashboards-${{ inputs.release_version }}.yml
-    steps:
-      - name: TODO(migration) addRcDetailsComment
-        if: inputs.chore == 'addRcDetailsComment'
-        run: |-
-          echo "TODO(migration): addRcDetailsComment(version: ${RELEASE_VERSION})"
-          echo "Comments the release candidate build numbers and distribution URLs on the release issue."
-          exit 1
-      - name: TODO(migration) checkReleaseOwners
-        if: inputs.chore == 'checkReleaseOwners'
-        run: |-
-          echo "TODO(migration): checkRequestAssignReleaseOwners(inputManifest: [${OS_MANIFEST}, ${OSD_MANIFEST}], action: ${ACTION})"
-          echo "Checks, requests or assigns a release owner per component in both input manifests."
-          exit 1
-      - name: TODO(migration) checkDocumentation
-        if: inputs.chore == 'checkDocumentation'
-        run: |-
-          echo "TODO(migration): checkDocumentationIssues(version: ${RELEASE_VERSION}, action: ${ACTION})"
-          echo "Checks or notifies on the documentation issues tracked for the release."
-          exit 1
-      - name: TODO(migration) checkCodeCoverage
-        if: inputs.chore == 'checkCodeCoverage'
-        run: |-
-          echo "TODO(migration): checkCodeCoverage(inputManifest: [${OS_MANIFEST}, ${OSD_MANIFEST}], action: ${ACTION})"
-          echo "Checks or notifies on per-component code coverage for the release."
-          exit 1
-      - name: TODO(migration) checkReleaseIssues
-        if: inputs.chore == 'checkReleaseIssues'
-        run: |-
-          echo "TODO(migration): checkReleaseIssues(version: ${RELEASE_VERSION}, inputManifest: [${OS_MANIFEST}, ${OSD_MANIFEST}], action: ${ACTION})"
-          echo "Checks or creates the per-component release issues."
-          echo "Note: .github/workflows/create-release-issues.yml already creates release issues from a"
-          echo "version and repo list and is the likely replacement, but its behaviour is not verified to"
-          echo "match this chore, so it is not wired up here."
-          exit 1
-      - name: TODO(migration) checkDocumentationPullRequests
-        if: inputs.chore == 'checkDocumentationPullRequests'
-        run: |-
-          echo "TODO(migration): checkDocumentationPullRequests(version: ${RELEASE_VERSION})"
-          echo "Reports the state of the documentation pull requests for the release."
-          exit 1
-      - name: TODO(migration) checkIntegTestResultsOverview
-        if: inputs.chore == 'checkIntegTestResultsOverview'
-        run: |-
-          echo "TODO(migration): checkIntegTestResultsOverview(inputManifest: [${OS_MANIFEST}, ${OSD_MANIFEST}])"
-          echo "Summarises the integration test results for the release."
-          exit 1
-      - name: TODO(migration) buildRC
-        if: inputs.chore == 'buildRC'
-        run: |-
-          echo "TODO(migration): buildRC(version: ${RELEASE_VERSION}, product: ${ACTION})"
-          echo "Triggers the distribution builds that produce a release candidate; also blocked on the"
-          echo "distribution-build migration, see docs/jenkins-to-github-actions-migration.md section 3.1."
-          exit 1
+    name: Compile release notes
+    needs: parameters
+    if: inputs.RELEASE_CHORE == 'checkReleaseNotes' && needs.parameters.outputs.action == 'compile'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    uses: ./.github/workflows/release-notes-check.yml
+    with:
+      RELEASE_VERSION: ${{ inputs.RELEASE_VERSION }}
+      ACTION: compile
+      GIT_LOG_DATE: ${{ inputs.GIT_LOG_DATE }}
+      COMMENT: NO_COMMENT
+      DRY_RUN: ${{ inputs.DRY_RUN }}

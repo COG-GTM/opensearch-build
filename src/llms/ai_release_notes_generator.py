@@ -53,6 +53,16 @@ class AIReleaseNotesGenerator:
         jitter: float = random.uniform(0.1, 0.5)
         return delay + jitter
 
+    def _converse(self, prompt: str) -> str:
+        """Call a non-Anthropic Bedrock model (e.g. Amazon Nova, OpenAI gpt-oss) through the model-agnostic Converse API."""
+        response = self.bedrock_client.converse(
+            modelId=self.model_id,
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            inferenceConfig={"maxTokens": self.max_tokens_override, "temperature": 0.1},
+        )
+        blocks = response['output']['message']['content']
+        return "".join(str(block['text']) for block in blocks if 'text' in block)
+
     def call_bedrock_claude(self, prompt: str) -> str:
         """Call AWS Bedrock Claude Sonnet 3.5 v2 model with retry logic"""
 
@@ -73,6 +83,9 @@ class AIReleaseNotesGenerator:
 
         for attempt in range(self.max_retries + 1):
             try:
+                if 'anthropic' not in self.model_id:
+                    return self._converse(prompt)
+
                 # Call Bedrock
                 response = self.bedrock_client.invoke_model(
                     modelId=self.model_id,

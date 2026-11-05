@@ -1,0 +1,106 @@
+---
+name: release-chore
+description: >-
+  Replaces the opensearch-build-libraries release steps called by release-chores (addRcDetailsComment, buildRC,
+  checkCodeCoverage, checkDocumentationIssues, checkDocumentationPullRequests, checkIntegTestResultsOverview,
+  checkReleaseIssues, checkReleaseNotes, checkRequestAssignReleaseOwners) and the pull request halves of
+  release-notes-generate and release-notes-check (compile). Runs .github/scripts/release_chores.py; with dry-run
+  every read runs for real and every GitHub write is printed instead.
+
+inputs:
+  chore:
+    description: >-
+      release-owners, doc-issues, doc-prs, code-coverage, release-notes, release-issues, integ-overview, rc-details,
+      build-rc, notes-matrix, notes-pr or notes-compiled-pr.
+    required: true
+  action:
+    description: Chore action (the Jenkins ACTION parameter), e.g. check, notify, request, assign, create, add, both.
+    default: ''
+  version:
+    description: Release version (the Jenkins RELEASE_VERSION parameter).
+    default: ''
+  manifests:
+    description: Input manifest paths, one per line.
+    default: ''
+  table:
+    description: release_notes.sh check table (release-notes chore).
+    default: ''
+  component:
+    description: Component name (notes-pr).
+    default: ''
+  components:
+    description: Space-separated component filter (notes-matrix).
+    default: ''
+  ref:
+    description: Override for the component ref from the input manifest (notes-pr).
+    default: ''
+  git-log-date:
+    description: GIT_LOG_DATE, only used in messages.
+    default: ''
+  git-name:
+    description: Commit author name for release notes commits.
+    default: opensearch-ci-bot
+  git-email:
+    description: Commit author email for release notes commits.
+    default: opensearch-infra@amazon.com
+  metrics-endpoint:
+    description: Metrics cluster endpoint (secrets.METRICS_CLUSTER_ENDPOINT); AWS credentials come from configure-aws-credentials.
+    default: ''
+  github-token:
+    description: Token for gh (GitHub App installation token for writes, github.token for reads and same-repo dispatches).
+    required: true
+  dry-run:
+    description: Print GitHub writes instead of running them.
+    default: 'false'
+
+outputs:
+  matrix:
+    description: notes-matrix only; strategy.matrix JSON with component, repository and index.
+    value: ${{ steps.run.outputs.matrix }}
+  count:
+    description: notes-matrix only; number of components in the matrix.
+    value: ${{ steps.run.outputs.count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare Python
+      id: prepare
+      shell: bash
+      run: |
+        python=python3
+        if ! python3 -c 'import yaml, requests, boto3' 2>/dev/null; then
+          python3 -m venv "$RUNNER_TEMP/release-chore-venv"
+          "$RUNNER_TEMP/release-chore-venv/bin/pip" install --quiet 'PyYAML==6.0.2' 'requests==2.32.4' 'boto3~=1.35.0'
+          python="$RUNNER_TEMP/release-chore-venv/bin/python"
+        fi
+        echo "python=$python" >> "$GITHUB_OUTPUT"
+
+    - name: Run ${{ inputs.chore }}
+      id: run
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PYTHON: ${{ steps.prepare.outputs.python }}
+        SCRIPT: ${{ github.action_path }}/../../scripts/release_chores.py
+        CHORE: ${{ inputs.chore }}
+        CHORE_ACTION: ${{ inputs.action }}
+        VERSION: ${{ inputs.version }}
+        MANIFESTS: ${{ inputs.manifests }}
+        TABLE: ${{ inputs.table }}
+        COMPONENT: ${{ inputs.component }}
+        COMPONENTS: ${{ inputs.components }}
+        REF: ${{ inputs.ref }}
+        GIT_LOG_DATE: ${{ inputs.git-log-date }}
+        GIT_NAME: ${{ inputs.git-name }}
+        GIT_EMAIL: ${{ inputs.git-email }}
+        METRICS_CLUSTER_ENDPOINT: ${{ inputs.metrics-endpoint }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        args=("$CHORE" --action "$CHORE_ACTION" --version "$VERSION" --table "$TABLE" --component "$COMPONENT"
+          --components "$COMPONENTS" --ref "$REF" --git-log-date "$GIT_LOG_DATE" --git-name "$GIT_NAME" --git-email "$GIT_EMAIL")
+        while IFS= read -r manifest; do
+          [[ -n "$manifest" ]] && args+=(--manifest "$manifest")
+        done <<< "$MANIFESTS"
+        [[ "$DRY_RUN" == 'true' ]] && args+=(--dry-run)
+        "$PYTHON" "$SCRIPT" "${args[@]}"

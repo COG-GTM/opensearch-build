@@ -1,0 +1,236 @@
+---
+# GitHub Actions port of jenkins/release-workflows/release-notes-generate.jenkinsfile (Jenkins job release-notes-generate).
+# One matrix leg per component of INPUT_MANIFEST (Jenkins parallel stages, staggered 30 s apart to spread the Bedrock
+# load): release_notes.sh generate (AWS Bedrock through the BEDROCK_ACCESS_ROLE OIDC role), then an
+# '[AUTO] Add release notes for <version>' PR on the component repository with the LLM's borderline calls in the body.
+# Jenkins forked each repository to opensearch-ci-bot; the GitHub App pushes release-chores/release-notes-<version> to the
+# component repository itself (ADR 0001). release-chores.yml calls this workflow once per product.
+# DRY_RUN generates the notes for real, diffs them against the file committed under release-notes/ at the component
+# ref and prints the PR it would open instead of pushing.
+name: release-notes-generate
+run-name: release-notes-generate ${{ inputs.INPUT_MANIFEST }}${{ inputs.DRY_RUN && ' (dry run)' || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      INPUT_MANIFEST:
+        description: '<Required> Input manifest under the manifests folder, e.g. 3.0.0/opensearch-3.0.0.yml.'
+        required: true
+        type: string
+      GIT_LOG_DATE:
+        description: '<Required> in format yyyy-mm-dd, example 2022-07-26.'
+        required: true
+        type: string
+      COMPONENTS:
+        description: '<Optional> Space-separated component names; empty generates every component of INPUT_MANIFEST.'
+        required: false
+        default: ''
+        type: string
+      MODEL_ID:
+        description: '<Optional> AWS Bedrock model id to use, defaults to Anthropic Claude 3.7v2'
+        required: false
+        default: us.anthropic.claude-3-7-sonnet-20250219-v1:0
+        type: string
+      MAX_TOKENS:
+        description: '<Optional> Max number of tokens to use for supplied model id, defaults to 4000'
+        required: false
+        default: '4000'
+        type: string
+      REF:
+        description: '<Optional> Override input component github repo ref, defaults to provided in input manifest file'
+        required: false
+        default: ''
+        type: string
+      SKIP_CHANGELOG:
+        description: '<Optional> Skip changelog parsing even if the file is present'
+        required: false
+        default: false
+        type: boolean
+      DRY_RUN:
+        description: 'Generate and compare with the committed release notes, but do not push or open PRs'
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      INPUT_MANIFEST:
+        required: true
+        type: string
+      GIT_LOG_DATE:
+        required: true
+        type: string
+      COMPONENTS:
+        required: false
+        default: ''
+        type: string
+      MODEL_ID:
+        required: false
+        default: us.anthropic.claude-3-7-sonnet-20250219-v1:0
+        type: string
+      MAX_TOKENS:
+        required: false
+        default: '4000'
+        type: string
+      REF:
+        required: false
+        default: ''
+        type: string
+      SKIP_CHANGELOG:
+        required: false
+        default: false
+        type: boolean
+      DRY_RUN:
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      BEDROCK_ACCESS_ROLE:
+        required: false
+      GH_APP_ID:
+        required: false
+      GH_APP_PRIVATE_KEY:
+        required: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  parameters:
+    name: Parameters Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Parameters Check
+        env:
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
+          GIT_LOG_DATE: ${{ inputs.GIT_LOG_DATE }}
+          MAX_TOKENS: ${{ inputs.MAX_TOKENS }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$INPUT_MANIFEST" || -z "$GIT_LOG_DATE" ]]; then
+            echo "::error::INPUT_MANIFEST or GIT_LOG_DATE parameters cannot be empty!"
+            exit 1
+          fi
+          if [[ "$INPUT_MANIFEST" == *..* || ! -f "manifests/$INPUT_MANIFEST" ]]; then
+            echo "::error::Input manifest manifests/$INPUT_MANIFEST does not exist"
+            exit 1
+          fi
+          if ! [[ "$GIT_LOG_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || [[ "$(date -d "$GIT_LOG_DATE" +%Y-%m-%d 2>/dev/null)" != "$GIT_LOG_DATE" ]]; then
+            echo "::error::GIT_LOG_DATE '$GIT_LOG_DATE' is not a valid yyyy-mm-dd date"
+            exit 1
+          fi
+          if ! [[ "$MAX_TOKENS" =~ ^[0-9]+$ ]]; then
+            echo "::error::MAX_TOKENS must be a number"
+            exit 1
+          fi
+      - name: Component list
+        id: matrix
+        uses: ./.github/actions/release-chore
+        with:
+          chore: notes-matrix
+          manifests: manifests/${{ inputs.INPUT_MANIFEST }}
+          components: ${{ inputs.COMPONENTS }}
+          github-token: ${{ github.token }}
+
+  generate:
+    name: Release notes for ${{ matrix.component }}
+    needs: parameters
+    if: needs.parameters.outputs.count != '0'
+    # Jenkins agent label Jenkins-Agent-AL2023-X64-M54xlarge-Docker-Host; dry runs stay on a hosted runner.
+    runs-on: ${{ fromJSON(inputs.DRY_RUN && '["ubuntu-24.04"]' || '["self-hosted","linux","x64","al2023-x64-m5-4xlarge-docker-host"]') }}
+    container:
+      image: public.ecr.aws/opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-build-v1
+      options: --user root
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.parameters.outputs.matrix) }}
+    env:
+      HAS_BEDROCK_ROLE: ${{ secrets.BEDROCK_ACCESS_ROLE != '' }}
+      HAS_APP: ${{ secrets.GH_APP_ID != '' && secrets.GH_APP_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Stagger start
+        env:
+          COMPONENT: ${{ matrix.component }}
+          INDEX: ${{ matrix.index }}
+        run: |
+          echo "$COMPONENT with index $INDEX will sleep $((INDEX * 30)) seconds to reduce load"
+          sleep $((INDEX * 30))
+      - name: Require the Bedrock role
+        if: env.HAS_BEDROCK_ROLE != 'true'
+        run: |
+          echo "::error::secrets.BEDROCK_ACCESS_ROLE is not set; release notes generation needs AWS Bedrock"
+          exit 1
+      - name: Configure AWS credentials (Bedrock)
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.BEDROCK_ACCESS_ROLE }}
+          role-session-name: gha-release-notes-generate
+          role-duration-seconds: 900
+          aws-region: us-east-1
+      - name: Generate release notes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
+          COMPONENT: ${{ matrix.component }}
+          GIT_LOG_DATE: ${{ inputs.GIT_LOG_DATE }}
+          MAX_TOKENS: ${{ inputs.MAX_TOKENS }}
+          MODEL_ID: ${{ inputs.MODEL_ID }}
+          REF: ${{ inputs.REF }}
+          SKIP_CHANGELOG: ${{ inputs.SKIP_CHANGELOG }}
+        run: |
+          args=(generate "manifests/$INPUT_MANIFEST" --component "$COMPONENT" --date "$GIT_LOG_DATE"
+            --max-tokens "$MAX_TOKENS" --model-id "$MODEL_ID")
+          [[ -n "$REF" ]] && args+=(--ref "$REF")
+          [[ "$SKIP_CHANGELOG" == 'true' ]] && args+=(--skip-changelog)
+          if ! ./release_notes.sh "${args[@]}"; then
+            echo "::error::Release notes generation failed for component $COMPONENT"
+            exit 1
+          fi
+      - name: Upload generated release notes
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-notes-${{ matrix.component }}
+          path: release-notes/*${{ matrix.repository }}.release-notes-*
+          if-no-files-found: ignore
+      - name: Mint GitHub App token
+        id: app-token
+        if: ${{ !inputs.DRY_RUN }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: opensearch-project
+          repositories: ${{ matrix.repository }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Open release notes PR
+        uses: ./.github/actions/release-chore
+        with:
+          chore: notes-pr
+          manifests: manifests/${{ inputs.INPUT_MANIFEST }}
+          component: ${{ matrix.component }}
+          ref: ${{ inputs.REF }}
+          git-log-date: ${{ inputs.GIT_LOG_DATE }}
+          git-name: ${{ steps.app-token.outputs.app-slug && format('{0}[bot]', steps.app-token.outputs.app-slug) || 'opensearch-ci-bot' }}
+          git-email: ${{ steps.app-token.outputs.app-slug && format('{0}[bot]@users.noreply.github.com', steps.app-token.outputs.app-slug) || 'opensearch-infra@amazon.com' }}
+          github-token: ${{ steps.app-token.outputs.token || github.token }}
+          dry-run: ${{ inputs.DRY_RUN }}

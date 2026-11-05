@@ -375,6 +375,24 @@ class TestAIReleaseNotesGenerator(unittest.TestCase):
         self.assertEqual(generator.model_id, "custom-model-id")
         self.assertEqual(generator.max_tokens_override, 5000)
 
+    @patch('boto3.client')
+    def test_call_bedrock_non_anthropic_model_uses_converse(self, mock_boto3_client: MagicMock) -> None:
+        """Non-Anthropic model ids go through the Converse API instead of the Anthropic messages body."""
+        mock_boto3_client.return_value = self.mock_bedrock_client
+        self.mock_args.model_id = "us.amazon.nova-pro-v1:0"
+        self.mock_bedrock_client.converse.return_value = {
+            'output': {'message': {'content': [{'reasoningContent': {'reasoningText': {'text': 'skip'}}}, {'text': 'Converse '}, {'text': 'notes'}]}}
+        }
+        generator = AIReleaseNotesGenerator(self.mock_args)
+
+        self.assertEqual(generator.call_bedrock_claude("Test prompt"), "Converse notes")
+        self.mock_bedrock_client.converse.assert_called_once_with(
+            modelId="us.amazon.nova-pro-v1:0",
+            messages=[{"role": "user", "content": [{"text": "Test prompt"}]}],
+            inferenceConfig={"maxTokens": 2000, "temperature": 0.1},
+        )
+        self.mock_bedrock_client.invoke_model.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
