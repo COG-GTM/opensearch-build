@@ -75,11 +75,13 @@ runs:
         DOCKER_ARGS: ${{ inputs.docker-args }}
         SKIP_CORE_PLUGINS: ${{ inputs.skip-core-plugins }}
         DOCKER_EXEC_CONTAINER: ${{ inputs.docker-exec-container }}
+        # authenticates the native-plugin list lookup (validation.py) against the per-IP anonymous API quota
+        GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -uo pipefail
         command=()
         if [[ -n "${DOCKER_EXEC_CONTAINER}" ]]; then
-          command+=(docker exec "${DOCKER_EXEC_CONTAINER}")
+          command+=(docker exec -e GITHUB_TOKEN "${DOCKER_EXEC_CONTAINER}")
         fi
         command+=(./validation.sh)
         [[ -n "${VERSION}" ]] && command+=(--version "${VERSION}")

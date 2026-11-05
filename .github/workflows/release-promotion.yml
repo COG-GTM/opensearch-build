@@ -1,0 +1,406 @@
+---
+# GitHub Actions port of jenkins/release-workflows/release-promotion.jenkinsfile (central-release-promotion).
+# Each Jenkins stage is a job and each `build job:` a reusable-workflow call, chained with `needs` in the jenkinsfile's
+# stage order: Parameters Check -> Validate staging artifacts -> Publish (17 parallel promote-repos/promote-artifacts
+# branches) -> Publish OpenSearch Linux tar x64 -> Invalidate Cloudfront | Promote Docker -> Validate production
+# artifacts -> Publish to Maven. publish-to-maven was `wait: false`, so a real run dispatches it as its own run and does not
+# wait (docs/jenkins-gha-inventory.md, `build job:` across trigger boundaries). With `dry-run` (the default) every child runs
+# its no-secrets plan only and the CloudFront invalidation is listed, not sent; validate-artifacts is read-only and always
+# runs. Promotion jobs hold their secrets in the `release` environment (ADR 0001), so a reviewer approves real runs.
+name: release-promotion
+run-name: release-promotion ${{ inputs.dry-run && '(dry run) ' || '' }}${{ inputs.RELEASE_VERSION }} OS ${{ inputs.OPENSEARCH_RC_BUILD_NUMBER }} OSD ${{ inputs.OPENSEARCH_DASHBOARDS_RC_BUILD_NUMBER }} ${{ inputs.PROJECTS }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      RELEASE_VERSION:
+        description: '<Required> Release version'
+        required: true
+        type: string
+      OPENSEARCH_RC_BUILD_NUMBER:
+        description: '<Required> OpenSearch Release Candidate Build Number'
+        required: false
+        type: string
+      OPENSEARCH_DASHBOARDS_RC_BUILD_NUMBER:
+        description: '<Required> OpenSearch Dashboards Release Candidate Build Number'
+        required: false
+        type: string
+      TAG_DOCKER_LATEST:
+        description: '<Optional> Tag the images as latest'
+        required: false
+        default: true
+        type: boolean
+      PROJECTS:
+        description: '<Optional> Enter the project to promote to production buckets. Defaults to both.'
+        required: false
+        default: both
+        type: choice
+        options:
+          - both
+          - opensearch
+          - opensearch-dashboards
+      dry-run:
+        description: 'Run every child workflow in dry-run mode (plans only, nothing signed, uploaded, copied or invalidated).'
+        required: false
+        default: true
+        type: boolean
+      production-docker-build-number-override:
+        description: '<Dry run only> OpenSearch staging build number (e.g. latest) for the production docker digest gate instead of the RC; Dashboards keeps latest. Empty = Jenkins behavior.'
+        required: false
+        default: ''
+        type: string
+  workflow_call:
+    inputs:
+      RELEASE_VERSION:
+        required: true
+        type: string
+      OPENSEARCH_RC_BUILD_NUMBER:
+        required: false
+        default: ''
+        type: string
+      OPENSEARCH_DASHBOARDS_RC_BUILD_NUMBER:
+        required: false
+        default: ''
+        type: string
+      TAG_DOCKER_LATEST:
+        required: false
+        default: true
+        type: boolean
+      PROJECTS:
+        required: false
+        default: both
+        type: string
+      dry-run:
+        required: false
+        default: true
+        type: boolean
+      production-docker-build-number-override:
+        required: false
+        default: ''
+        type: string
+    secrets:
+      # repository secrets come from the caller; AWS_ROLE_PROMOTION and CLOUDFRONT_DISTRIBUTION_ID are `release`-environment
+      # secrets (ADR 0001), which the environment job reads even when the caller passes nothing
+      AWS_ROLE_ARTIFACTS:
+        required: false
+      ARTIFACT_BUCKET_NAME:
+        required: false
+      GH_APP_ID:
+        required: false
+      GH_APP_PRIVATE_KEY:
+        required: false
+      AWS_ROLE_PROMOTION:
+        required: false
+      CLOUDFRONT_DISTRIBUTION_ID:
+        required: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  parameters:
+    name: Parameters Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      release-version: ${{ steps.plan.outputs.release-version }}
+      opensearch: ${{ steps.plan.outputs.opensearch }}
+      repos: ${{ steps.plan.outputs.repos }}
+      artifacts: ${{ steps.plan.outputs.artifacts }}
+      os-rc: ${{ steps.plan.outputs.os-rc }}
+      os-manifest: ${{ steps.plan.outputs.os-manifest }}
+      validation-projects: ${{ steps.plan.outputs.validation-projects }}
+      staging-validation-options: ${{ steps.plan.outputs.staging-validation-options }}
+      production-validation-options: ${{ steps.plan.outputs.production-validation-options }}
+      source-images: ${{ steps.plan.outputs.source-images }}
+      cloudfront-paths: ${{ steps.plan.outputs.cloudfront-paths }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Check parameters and plan the stages
+        id: plan
+        env:
+          RELEASE_VERSION: ${{ inputs.RELEASE_VERSION }}
+          OPENSEARCH_RC_BUILD_NUMBER: ${{ inputs.OPENSEARCH_RC_BUILD_NUMBER }}
+          OPENSEARCH_DASHBOARDS_RC_BUILD_NUMBER: ${{ inputs.OPENSEARCH_DASHBOARDS_RC_BUILD_NUMBER }}
+          TAG_DOCKER_LATEST: ${{ inputs.TAG_DOCKER_LATEST }}
+          PROJECTS: ${{ inputs.PROJECTS }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          PRODUCTION_DOCKER_BUILD_NUMBER_OVERRIDE: ${{ inputs.production-docker-build-number-override }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release_promotion.py plan \
+            --release-version "${RELEASE_VERSION}" --opensearch-rc "${OPENSEARCH_RC_BUILD_NUMBER}" \
+            --opensearch-dashboards-rc "${OPENSEARCH_DASHBOARDS_RC_BUILD_NUMBER}" --projects "${PROJECTS}" \
+            --tag-docker-latest "${TAG_DOCKER_LATEST}" --dry-run "${DRY_RUN}" \
+            --production-docker-build-number-override "${PRODUCTION_DOCKER_BUILD_NUMBER_OVERRIDE}" \
+            --github-output "${GITHUB_OUTPUT}" --summary "${GITHUB_STEP_SUMMARY}"
+
+  validate-staging:
+    name: Validate staging artifacts
+    needs: parameters
+    permissions:
+      contents: read
+    uses: ./.github/workflows/validate-artifacts.yml
+    with:
+      VERSION: ${{ needs.parameters.outputs.release-version }}
+      DISTRIBUTION: tar rpm yum deb zip docker
+      ARCHITECTURE: x64 arm64
+      PROJECTS: ${{ needs.parameters.outputs.validation-projects }}
+      DOCKER_SOURCE: dockerhub
+      ARTIFACT_TYPE: staging
+      OPTIONS: ${{ needs.parameters.outputs.staging-validation-options }}
+
+  # 'Publish' parallel stage: the distribution-promote-repos branches ...
+  promote-repos:
+    name: ${{ matrix.target.stage }}
+    needs: [parameters, validate-staging]
+    if: ${{ needs.parameters.outputs.repos != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.parameters.outputs.repos) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/distribution-promote-repos.yml
+    with:
+      DISTRIBUTION_JOB_NAME: ${{ matrix.target.job }}
+      DISTRIBUTION_REPO_TYPE: ${{ matrix.target.repo-type }}
+      DISTRIBUTION_BUILD_NUMBER: ${{ matrix.target.build }}
+      INPUT_MANIFEST: ${{ matrix.target.manifest }}
+      dry-run: ${{ inputs.dry-run }}
+
+  # ... and the distribution-promote-artifacts branches
+  promote-artifacts:
+    name: ${{ matrix.target.stage }}
+    needs: [parameters, validate-staging]
+    if: ${{ needs.parameters.outputs.artifacts != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.parameters.outputs.artifacts) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/distribution-promote-artifacts.yml
+    with:
+      DISTRIBUTION_JOB_NAME: ${{ matrix.target.job }}
+      DISTRIBUTION_PLATFORM: ${{ matrix.target.platform }}
+      DISTRIBUTION_NAME: ${{ matrix.target.distribution }}
+      DISTRIBUTION_ARCHITECTURE: ${{ matrix.target.architecture }}
+      DISTRIBUTION_BUILD_NUMBER: ${{ matrix.target.build }}
+      INPUT_MANIFEST: ${{ matrix.target.manifest }}
+      dry-run: ${{ inputs.dry-run }}
+    secrets:
+      AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+
+  # Jenkins ends the parallel stage when every branch has finished and fails it if any branch failed; branches skipped by
+  # their PROJECTS `when` do not fail it.
+  publish:
+    name: Publish
+    needs: [validate-staging, promote-repos, promote-artifacts]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check the parallel branches
+        env:
+          VALIDATE_STAGING: ${{ needs.validate-staging.result }}
+          PROMOTE_REPOS: ${{ needs.promote-repos.result }}
+          PROMOTE_ARTIFACTS: ${{ needs.promote-artifacts.result }}
+        run: |
+          set -euo pipefail
+          echo "Validate staging artifacts: ${VALIDATE_STAGING}; promote-repos: ${PROMOTE_REPOS}; promote-artifacts: ${PROMOTE_ARTIFACTS}"
+          [[ "${VALIDATE_STAGING}" == success ]] || { echo "::error::Validate staging artifacts did not succeed"; exit 1; }
+          for result in "${PROMOTE_REPOS}" "${PROMOTE_ARTIFACTS}"; do
+            [[ "${result}" == success || "${result}" == skipped ]] || { echo "::error::a Publish branch did not succeed"; exit 1; }
+          done
+
+  promote-opensearch-tar-x64:
+    name: Publish OpenSearch Linux tar x64
+    needs: [parameters, publish]
+    if: ${{ needs.parameters.outputs.opensearch == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/distribution-promote-artifacts.yml
+    with:
+      DISTRIBUTION_JOB_NAME: distribution-build-opensearch
+      DISTRIBUTION_PLATFORM: linux
+      DISTRIBUTION_NAME: tar
+      DISTRIBUTION_ARCHITECTURE: x64
+      DISTRIBUTION_BUILD_NUMBER: ${{ needs.parameters.outputs.os-rc }}
+      INPUT_MANIFEST: ${{ needs.parameters.outputs.os-manifest }}
+      dry-run: ${{ inputs.dry-run }}
+    secrets:
+      AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+
+  # 'Invalidate cloudfront and promote docker' parallel stage. In a dry run the paths are listed by Parameters Check.
+  invalidate-cloudfront:
+    name: Invalidate Cloudfront
+    needs: [parameters, publish, promote-opensearch-tar-x64]
+    if: ${{ !cancelled() && !inputs.dry-run && needs.publish.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.promote-opensearch-tar-x64.result) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Configure AWS credentials (artifact promotion role)
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_PROMOTION }}
+          role-session-name: gha-release-promotion
+          role-duration-seconds: 900
+          aws-region: us-east-1
+      - name: Invalidate and wait for completion
+        env:
+          CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+          CLOUDFRONT_PATHS: ${{ needs.parameters.outputs.cloudfront-paths }}
+        run: |
+          set -euo pipefail
+          read -r -a paths <<< "${CLOUDFRONT_PATHS}"
+          set -f
+          invalidation_id="$(aws cloudfront create-invalidation --distribution-id "${CLOUDFRONT_DISTRIBUTION_ID}" \
+            --paths "${paths[@]}" --query Invalidation.Id --output text)"
+          set +f
+          echo "Invalidation ${invalidation_id}: ${CLOUDFRONT_PATHS}"
+          aws cloudfront wait invalidation-completed --distribution-id "${CLOUDFRONT_DISTRIBUTION_ID}" --id "${invalidation_id}"
+          echo "- CloudFront invalidation ${invalidation_id} completed: ${CLOUDFRONT_PATHS}" >> "${GITHUB_STEP_SUMMARY}"
+
+  promote-docker:
+    name: Promote Docker
+    needs: [parameters, publish, promote-opensearch-tar-x64]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.promote-opensearch-tar-x64.result) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/docker-promotion.yml
+    with:
+      SOURCE_IMAGES: ${{ needs.parameters.outputs.source-images }}
+      RELEASE_VERSION: ${{ needs.parameters.outputs.release-version }}
+      DOCKER_HUB_PROMOTE: true
+      ECR_PROMOTE: true
+      TAG_LATEST: ${{ inputs.TAG_DOCKER_LATEST }}
+      TAG_MAJOR_VERSION: true
+      dry-run: ${{ inputs.dry-run }}
+
+  validate-production:
+    name: Validate production artifacts
+    needs: [parameters, invalidate-cloudfront, promote-docker]
+    if: ${{ !cancelled() && needs.promote-docker.result == 'success' && (needs.invalidate-cloudfront.result == 'success' || (inputs.dry-run && needs.invalidate-cloudfront.result == 'skipped')) }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/validate-artifacts.yml
+    with:
+      VERSION: ${{ needs.parameters.outputs.release-version }}
+      DISTRIBUTION: tar rpm yum deb zip docker
+      ARCHITECTURE: x64 arm64
+      PROJECTS: ${{ needs.parameters.outputs.validation-projects }}
+      DOCKER_SOURCE: Both
+      ARTIFACT_TYPE: production
+      OPTIONS: ${{ needs.parameters.outputs.production-validation-options }}
+
+  # build job: 'publish-to-maven', wait: false. A real run dispatches it as its own run with the GitHub App token, not
+  # awaited (docs/jenkins-gha-inventory.md); a dry run calls its no-secrets plan instead, so pull-request dry runs need no
+  # Actions write access.
+  publish-to-maven:
+    name: Publish to Maven
+    needs: [parameters, validate-production]
+    if: ${{ !inputs.dry-run && needs.parameters.outputs.opensearch == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    outputs:
+      run-url: ${{ steps.dispatch.outputs.run-url }}
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-actions: write
+      - name: Dispatch publish-to-maven (not awaited)
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          BUILD_ID: ${{ needs.parameters.outputs.os-rc }}
+          VERSION: ${{ needs.parameters.outputs.release-version }}
+        run: |
+          set -euo pipefail
+          response="$(gh api -X POST "repos/${REPOSITORY}/actions/workflows/publish-to-maven.yml/dispatches" \
+            -f ref="${REF}" -f "inputs[BUILD_ID]=${BUILD_ID}" -f "inputs[VERSION]=${VERSION}" \
+            -f "inputs[dry-run]=false" -F return_run_details=true)"
+          [[ -n "${response}" ]] || response='{}'
+          run_url="$(jq -r '.html_url // empty' <<< "${response}")"
+          echo "Dispatched publish-to-maven ${VERSION} build ${BUILD_ID} on ${REF}: ${run_url:-run URL not returned}"
+          printf 'run-url=%s\n' "${run_url}" >> "${GITHUB_OUTPUT}"
+
+  publish-to-maven-plan:
+    name: Publish to Maven
+    needs: [parameters, validate-production]
+    if: ${{ inputs.dry-run && needs.parameters.outputs.opensearch == 'true' }}
+    permissions:
+      contents: read
+      # the called workflow's release job declares id-token: write; it is skipped in a dry run
+      id-token: write
+    uses: ./.github/workflows/publish-to-maven.yml
+    with:
+      BUILD_ID: ${{ needs.parameters.outputs.os-rc }}
+      VERSION: ${{ needs.parameters.outputs.release-version }}
+      dry-run: true
+
+  summary:
+    name: Release promotion summary
+    needs:
+      - parameters
+      - validate-staging
+      - promote-repos
+      - promote-artifacts
+      - publish
+      - promote-opensearch-tar-x64
+      - invalidate-cloudfront
+      - promote-docker
+      - validate-production
+      - publish-to-maven
+      - publish-to-maven-plan
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: List every child run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          MAVEN_RUN_URL: ${{ needs.publish-to-maven.outputs.run-url }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp "repos/${REPOSITORY}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" > "${RUNNER_TEMP}/jobs.json"
+          python3 .github/scripts/release_promotion.py summary --jobs "${RUNNER_TEMP}/jobs.json" \
+            --maven-run-url "${MAVEN_RUN_URL}" --maven-run-note "(dispatched with wait: false; not awaited)" \
+            --summary "${GITHUB_STEP_SUMMARY}"

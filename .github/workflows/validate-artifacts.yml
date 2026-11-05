@@ -405,6 +405,18 @@ jobs:
           # A degraded state is acceptable: some units may fail inside a container,
           # but systemd is up as PID 1 and systemctl is usable.
           timeout 180 docker exec validate systemctl is-system-running --wait || true
+          # On hosted runners root cannot read the image's mode-000 /etc/shadow, so pam_unix account checks fail
+          # and every `sudo` in validation_rpm.py/validation_yum.py exits 1 ("PAM account management error").
+          # The container already runs as root; skip the PAM account check so sudo behaves as on the Jenkins agents.
+          docker exec validate sh -c "echo 'Defaults !pam_acct_mgmt' > /etc/sudoers.d/99-gha-no-pam-acct-mgmt && chmod 0440 /etc/sudoers.d/99-gha-no-pam-acct-mgmt"
+
+      # The Jenkins ci-runner-windows2019 image runs OpenSearch on JAVA_HOME=Temurin 21
+      # (docker/ci/config/windows-setup.ps1:109-113). windows-2022 exports JAVA_HOME=<JDK 8>, which cannot run 3.x, and
+      # the bundled JDK 25 makes repository-s3's Netty event loop fail under the security policy
+      # (opensearch-project/OpenSearch#23466), so use the runner's preinstalled Temurin 21 like Jenkins.
+      - name: Use JDK 21 for zip legs
+        if: ${{ matrix.distribution == 'zip' }}
+        run: echo "JAVA_HOME=${JAVA_HOME_21_X64}" >> "${GITHUB_ENV}"
 
       - name: Validate artifacts
         uses: ./.github/actions/validate-artifacts

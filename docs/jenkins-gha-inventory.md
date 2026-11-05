@@ -71,7 +71,7 @@ The ticket text says 56 files / 35 outside `legacy/`. `find -iname` is case-inse
 | p5 / s5.3 | `.github/workflows/sign-standalone-artifacts.yml` | `legacy/sign-artifacts/sign-standalone-artifacts.jenkinsfile` |
 | p5 / s5.4 | `.github/workflows/release-promotion.yml` | `release-workflows/release-promotion.jenkinsfile` |
 
-36 target workflows for 38 ported files (the three scheduled benchmark pipelines run the same `runBenchmarkTestScript` flow with near-identical parameters, so they share one `benchmark-test.yml` with a schedule config per suite).
+36 target workflows for 38 ported files (the three scheduled benchmark pipelines run the same `runBenchmarkTestScript` flow with near-identical parameters, so they share one `benchmark-test.yml` with a schedule config per suite). `benchmark-test.yml`, `benchmark-test-endpoint.yml` and `benchmark-pull-request.yml` run each build through the reusable `_benchmark-run.yml`; their parameterizedCron entries are in `.github/schedules/benchmark-*.yml`, and `benchmark-dry-run.yml` exercises them on hosted runners for pull requests.
 
 ## Inventory
 

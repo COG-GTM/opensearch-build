@@ -86,7 +86,10 @@ class Validation(ABC):
             bundle_manifest = BundleManifest.from_path(os.path.join(workdir, "manifest.yml"))
             commit_id = bundle_manifest.components["OpenSearch"].commit_id
             plugin_url = f"https://api.github.com/repos/opensearch-project/OpenSearch/contents/plugins?ref={commit_id}"
-            api_response = requests.get(plugin_url)
+            # Shared CI runners exhaust the unauthenticated API quota (60 requests/hour per IP); use GITHUB_TOKEN when set.
+            token = os.environ.get("GITHUB_TOKEN")
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            api_response = requests.get(plugin_url, headers=headers)
             if api_response.status_code != 200:
                 raise Exception("Github Api returned error code while retrieving the list of native plugins")
             response = api_response.json()

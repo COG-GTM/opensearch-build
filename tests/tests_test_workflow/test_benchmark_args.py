@@ -102,6 +102,16 @@ class TestBenchmarkArgs(unittest.TestCase):
         self.assertEqual(test_args.include_tasks,
                          'index,type:search,tag:setup')
 
+    @patch("argparse._sys.argv", [ARGS_PY, "execute-test", "--distribution-url", "https://example.com/opensearch.tar.gz",
+                                  "--distribution-version", "3.9.0", "--workload", "nyc_taxis", "--test-mode"])
+    def test_benchmark_with_test_mode(self) -> None:
+        self.assertTrue(BenchmarkArgs().test_mode)
+
+    @patch("argparse._sys.argv", [ARGS_PY, "execute-test", "--distribution-url", "https://example.com/opensearch.tar.gz",
+                                  "--distribution-version", "3.9.0", "--workload", "nyc_taxis"])
+    def test_benchmark_without_test_mode(self) -> None:
+        self.assertFalse(BenchmarkArgs().test_mode)
+
     @patch("argparse._sys.argv", [ARGS_PY, "compare", "baseline_id", "contender_id"])
     def test_compare_with_required_arguments(self) -> None:
         test_args = BenchmarkArgs()

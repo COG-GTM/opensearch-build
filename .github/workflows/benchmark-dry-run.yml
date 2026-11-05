@@ -1,0 +1,54 @@
+---
+# Evidence for the benchmark-* ports on GitHub-hosted runners, without the perf account, S3 config or metrics
+# datastore: a released OpenSearch tarball is started on the runner (_benchmark-run.yml local-cluster) and benchmarked
+# with nyc_taxis in opensearch-benchmark test mode.
+#   - benchmark-test: one build through benchmark-test.yml (no webhook post)
+#   - benchmark-pull-request: the client_payload the sender in docs/benchmark-pull-request-dispatch.md sends, with
+#     "dry_run": true, so the PR comment and the compare queries are rendered but nothing is posted or dispatched
+name: benchmark-dry-run
+
+on:
+  pull_request:
+    paths:
+      - .github/scripts/benchmark_test.py
+      - .github/schedules/benchmark-*.yml
+      - .github/workflows/_benchmark-run.yml
+      - .github/workflows/benchmark-*.yml
+      - src/test_workflow/benchmark_test/**
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  benchmark-test:
+    uses: ./.github/workflows/benchmark-test.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      suite: benchmark-test
+      params: >-
+        {"DISTRIBUTION_URL": "https://artifacts.opensearch.org/releases/bundle/opensearch/3.9.0/opensearch-3.9.0-linux-x64.tar.gz",
+        "DISTRIBUTION_VERSION": "3.9.0", "TEST_WORKLOAD": "nyc_taxis", "SINGLE_NODE_CLUSTER": "true", "TEST_MODE": "true",
+        "USER_TAGS": "run-type:dry-run,arch:x64"}
+      runs-on: '["ubuntu-24.04"]'
+      local-cluster: true
+      notify: false
+
+  benchmark-pull-request:
+    uses: ./.github/workflows/benchmark-pull-request.yml
+    permissions:
+      contents: read
+      id-token: write
+      actions: write
+    with:
+      client-payload: >-
+        {"pull_request_number": "12345", "repository": "opensearch-project/OpenSearch",
+        "baseline_cluster_config": "x64-r5.xlarge-single-node-1-shard-0-replica-baseline",
+        "DISTRIBUTION_URL": "https://artifacts.opensearch.org/releases/core/opensearch/3.9.0/opensearch-min-3.9.0-linux-x64.tar.gz",
+        "DISTRIBUTION_VERSION": "3.9.0", "TEST_WORKLOAD": "nyc_taxis",
+        "USER_TAGS": "run-type:dry-run,pull_request_number:12345,cluster-config:x64-r5.xlarge-single-node-1-shard-0-replica",
+        "WORKLOAD_PARAMS": "{\"number_of_replicas\":\"0\",\"number_of_shards\":\"1\"}",
+        "OPTIONS": "SINGLE_NODE_CLUSTER=true;MIN_DISTRIBUTION=true;TEST_MODE=true", "dry_run": true}
+      runs-on: '["ubuntu-24.04"]'
+      local-cluster: true

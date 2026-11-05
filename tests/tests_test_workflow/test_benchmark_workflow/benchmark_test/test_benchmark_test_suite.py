@@ -36,6 +36,7 @@ class TestBenchmarkTestSuite(unittest.TestCase):
             self.args.test_procedure = kwargs['test_procedure'] if 'test_procedure' in kwargs else None
             self.args.exclude_tasks = kwargs['exclude_tasks'] if 'exclude_tasks' in kwargs else None
             self.args.include_tasks = kwargs['include_tasks'] if 'include_tasks' in kwargs else None
+            self.args.test_mode = kwargs.get('test_mode', False)
             self.endpoint = "abc.com"
 
     @patch('test_workflow.benchmark_test.benchmark_test_suite_execute.subprocess.check_call')
@@ -131,6 +132,19 @@ class TestBenchmarkTestSuite(unittest.TestCase):
                          '--pipeline=benchmark-only --target-hosts=abc.com:80 '
                          '--workload-params \'{"number_of_replicas":"1"}\' '
                          '--user-tag="key1:value1,key2:value2" --telemetry node-stats --telemetry-params \'{"example_key":"example_value"}\' '
+                         '--client-options="timeout:120" --results-file=final_result.md')
+
+    @patch('test_workflow.benchmark_test.benchmark_test_suite_execute.subprocess.check_call')
+    @patch('test_workflow.benchmark_test.benchmark_test_suite_execute.BenchmarkTestSuiteExecute.convert')
+    def test_execute_test_mode(self, mock_convert: Mock, mock_check_call: Mock) -> None:
+        mock_check_call.return_value = 0
+        TestBenchmarkTestSuite.setUp(self, test_mode=True)
+        test_suite = BenchmarkTestSuiteExecute("abc.com:80", False, self.args, "")
+        test_suite.execute()
+        self.assertEqual(test_suite.command,
+                         f'docker run --user root --name docker-container-{test_suite.args.stack_suffix}'
+                         ' opensearchproject/opensearch-benchmark:1.20.0 execute-test '
+                         '--workload=nyc_taxis --pipeline=benchmark-only --target-hosts=abc.com:80 --test-mode '
                          '--client-options="timeout:120" --results-file=final_result.md')
 
     @patch('test_workflow.benchmark_test.benchmark_test_suite_execute.subprocess.check_call')
