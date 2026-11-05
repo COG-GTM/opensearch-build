@@ -1,0 +1,154 @@
+---
+name: notify-failure
+description: >-
+  Replaces the Jenkins shared-library notifications: AUTOCUT distribution build / integration test failure issues
+  (updateBuildFailureIssues, updateIntegTestFailureIssues) and the jenkins-integ-test-webhook post (publishNotification).
+  Issue titles, labels and bodies match Jenkins so issue-dedupe*.yml keeps working; links point at this workflow run.
+
+inputs:
+  kind:
+    description: >-
+      Issues to update: 'distribution-build', 'integ-test' or 'none' (webhook only).
+    default: none
+  input-manifest:
+    description: Input manifest (e.g. manifests/3.9.0/opensearch-3.9.0.yml) mapping components to repositories. Required unless kind is 'none'.
+    default: ''
+  component:
+    description: A failed component. When set, every failures entry belongs to it; leave empty to pass several components in failures.
+    default: ''
+  version:
+    description: Version used in titles, labels and bodies. Defaults to build.version of the input manifest.
+    default: ''
+  run-url:
+    description: Build link written to issues and the webhook. Defaults to this workflow run.
+    default: ''
+  failures:
+    description: >-
+      Failure list: component names (newline or comma separated, or a JSON list), or a JSON list of objects with
+      component, platform, distribution, architecture, distribution_build_number, rc_number, test_report_manifest_yml
+      and integ_test_build_url (one integration test table row each).
+    default: ''
+  passed:
+    description: Components that passed; their open AUTOCUT issue is closed with the Jenkins closing comment.
+    default: ''
+  release-owners:
+    description: JSON object mapping a component to the release owner logins tagged in its integration test issue.
+    default: ''
+  dry-run:
+    description: Print the issues and webhook payload instead of calling GitHub or the webhook.
+    default: 'false'
+  app-id:
+    description: GitHub App ID (secrets.GH_APP_ID) used to mint an issues:write token for the component repositories.
+    default: ''
+  app-private-key:
+    description: GitHub App private key (secrets.GH_APP_PRIVATE_KEY).
+    default: ''
+  webhook-url:
+    description: Webhook URL (secrets.INTEG_TEST_WEBHOOK_URL, replaces Jenkins credential jenkins-integ-test-webhook). Empty skips the post.
+    default: ''
+  webhook-message:
+    description: MESSAGE line of the webhook post. Empty skips the webhook.
+    default: ''
+  webhook-icon:
+    description: First line of the webhook post.
+    default: ':warning:'
+  webhook-manifest:
+    description: Optional MANIFEST line of the webhook post.
+    default: ''
+
+outputs:
+  repositories:
+    description: Component repositories whose issues were (or would be) updated.
+    value: ${{ steps.plan.outputs.repositories }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare
+      id: prepare
+      shell: bash
+      env:
+        RUN_URL: ${{ inputs.run-url }}
+        DEFAULT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        python=python3
+        if ! python3 -c 'import yaml' 2>/dev/null; then
+          python3 -m venv "$RUNNER_TEMP/notify-failure-venv"
+          "$RUNNER_TEMP/notify-failure-venv/bin/pip" install --quiet 'PyYAML==6.0.2'
+          python="$RUNNER_TEMP/notify-failure-venv/bin/python"
+        fi
+        echo "python=$python" >> "$GITHUB_OUTPUT"
+        echo "run-url=${RUN_URL:-$DEFAULT_RUN_URL}" >> "$GITHUB_OUTPUT"
+
+    - name: Plan issue updates
+      id: plan
+      if: inputs.kind != 'none'
+      shell: bash
+      env:
+        PYTHON: ${{ steps.prepare.outputs.python }}
+        SCRIPT: ${{ github.action_path }}/../../scripts/notify_failure.py
+        KIND: ${{ inputs.kind }}
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
+        COMPONENT: ${{ inputs.component }}
+        VERSION: ${{ inputs.version }}
+        RUN_URL: ${{ steps.prepare.outputs.run-url }}
+        FAILURES: ${{ inputs.failures }}
+        PASSED: ${{ inputs.passed }}
+      run: |
+        "$PYTHON" "$SCRIPT" repos --kind "$KIND" --input-manifest "$INPUT_MANIFEST" --component "$COMPONENT" \
+          --version "$VERSION" --run-url "$RUN_URL" --failures "$FAILURES" --passed "$PASSED"
+
+    - name: Mint GitHub App token
+      id: token
+      if: inputs.kind != 'none' && inputs.dry-run != 'true' && steps.plan.outputs.repositories != ''
+      uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.app-private-key }}
+        owner: ${{ steps.plan.outputs.owner }}
+        repositories: ${{ steps.plan.outputs.repositories }}
+        permission-issues: write
+
+    - name: Update AUTOCUT issues
+      if: inputs.kind != 'none' && (inputs.dry-run == 'true' || steps.plan.outputs.repositories != '')
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.token.outputs.token }}
+        PYTHON: ${{ steps.prepare.outputs.python }}
+        SCRIPT: ${{ github.action_path }}/../../scripts/notify_failure.py
+        KIND: ${{ inputs.kind }}
+        INPUT_MANIFEST: ${{ inputs.input-manifest }}
+        COMPONENT: ${{ inputs.component }}
+        VERSION: ${{ inputs.version }}
+        RUN_URL: ${{ steps.prepare.outputs.run-url }}
+        FAILURES: ${{ inputs.failures }}
+        PASSED: ${{ inputs.passed }}
+        RELEASE_OWNERS: ${{ inputs.release-owners }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        args=(issues --kind "$KIND" --input-manifest "$INPUT_MANIFEST" --component "$COMPONENT" --version "$VERSION"
+          --run-url "$RUN_URL" --failures "$FAILURES" --passed "$PASSED" --release-owners "$RELEASE_OWNERS")
+        if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+        "$PYTHON" "$SCRIPT" "${args[@]}"
+
+    - name: Post webhook notification
+      if: inputs.webhook-message != ''
+      shell: bash
+      env:
+        WEBHOOK_URL: ${{ inputs.webhook-url }}
+        PYTHON: ${{ steps.prepare.outputs.python }}
+        SCRIPT: ${{ github.action_path }}/../../scripts/notify_failure.py
+        COMPONENT: ${{ inputs.component }}
+        RUN_URL: ${{ steps.prepare.outputs.run-url }}
+        FAILURES: ${{ inputs.failures }}
+        JOB_NAME: ${{ github.workflow }}
+        RUN_NUMBER: ${{ github.run_number }}
+        MESSAGE: ${{ inputs.webhook-message }}
+        ICON: ${{ inputs.webhook-icon }}
+        WEBHOOK_MANIFEST: ${{ inputs.webhook-manifest }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        args=(webhook --component "$COMPONENT" --run-url "$RUN_URL" --failures "$FAILURES" --job-name "$JOB_NAME"
+          --run-number "$RUN_NUMBER" --message "$MESSAGE" --icon "$ICON" --webhook-manifest "$WEBHOOK_MANIFEST")
+        if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+        "$PYTHON" "$SCRIPT" "${args[@]}"
