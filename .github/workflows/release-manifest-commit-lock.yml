@@ -1,0 +1,175 @@
+---
+# Port of jenkins/release-workflows/release-manifest-commit-lock-lf.jenkinsfile (Jenkins job
+# release-manifest-commit-lock). Rewrites the component refs in manifests/<version>/{opensearch,opensearch-dashboards}-<version>.yml
+# and opens or updates the `manifest-lock` pull request. Called by release-tag.yml with UPDATE_TO_TAGS.
+# Dry runs (the default) only show the diff; the pull request is pushed with a GitHub App token scoped to this
+# repository, in the `release` environment.
+name: release-manifest-commit-lock
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-version:
+        description: 'Release version, e.g. 3.10.0.'
+        required: true
+        type: string
+      manifest-lock-action:
+        description: 'MATCH_BUILD_MANIFEST: RC build commit_ids. UPDATE_TO_RECENT_COMMITS: release branch HEADs. UPDATE_TO_TAGS: release tags. UPDATE_TO_RELEASE_BRANCH: release branch name.'
+        required: true
+        default: MATCH_BUILD_MANIFEST
+        type: choice
+        options:
+          - MATCH_BUILD_MANIFEST
+          - UPDATE_TO_RECENT_COMMITS
+          - UPDATE_TO_TAGS
+          - UPDATE_TO_RELEASE_BRANCH
+      opensearch-release-candidate:
+        description: 'OpenSearch RC build number (MATCH_BUILD_MANIFEST only).'
+        required: false
+        default: ''
+        type: string
+      opensearch-dashboards-release-candidate:
+        description: 'OpenSearch Dashboards RC build number (MATCH_BUILD_MANIFEST only).'
+        required: false
+        default: ''
+        type: string
+      components:
+        description: 'Comma-separated components to lock; all when empty.'
+        required: false
+        default: ''
+        type: string
+      dry-run:
+        description: 'Only show the manifest diff.'
+        required: false
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      release-version:
+        required: true
+        type: string
+      manifest-lock-action:
+        required: true
+        type: string
+      opensearch-release-candidate:
+        required: false
+        default: ''
+        type: string
+      opensearch-dashboards-release-candidate:
+        required: false
+        default: ''
+        type: string
+      components:
+        required: false
+        default: ''
+        type: string
+      dry-run:
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      GH_APP_ID:
+        required: false
+      GH_APP_PRIVATE_KEY:
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # one manifest-lock branch, as in Jenkins
+  group: release-manifest-commit-lock-${{ inputs.dry-run && github.run_id || 'write' }}
+  cancel-in-progress: false
+
+jobs:
+  lock:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.9'
+      - name: Install Pipenv and dependencies
+        run: |
+          python -m pip install --upgrade pipenv==2023.6.12 wheel
+          pipenv install --deploy --dev
+      - name: Lock manifests
+        env:
+          RELEASE_VERSION: ${{ inputs.release-version }}
+          MANIFEST_LOCK_ACTION: ${{ inputs.manifest-lock-action }}
+          COMPONENTS: ${{ inputs.components }}
+          OPENSEARCH_RC: ${{ inputs.opensearch-release-candidate }}
+          OPENSEARCH_DASHBOARDS_RC: ${{ inputs.opensearch-dashboards-release-candidate }}
+        run: |
+          pipenv run python src/run_release_manifest_lock.py --version "$RELEASE_VERSION" --action "$MANIFEST_LOCK_ACTION" \
+            --components "$COMPONENTS" --opensearch-rc "$OPENSEARCH_RC" --opensearch-dashboards-rc "$OPENSEARCH_DASHBOARDS_RC" \
+            --summary "$GITHUB_STEP_SUMMARY"
+      - name: Manifest diff
+        id: diff
+        run: |
+          git diff -- manifests/ > manifest-lock.patch
+          if [ -s manifest-lock.patch ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            { echo '```diff'; cat manifest-lock.patch; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to commit." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: manifest-lock-patch
+          path: manifest-lock.patch
+
+  pull-request:
+    needs: lock
+    if: ${{ !inputs.dry-run && needs.lock.outputs.changed == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        with:
+          name: manifest-lock-patch
+          path: ${{ runner.temp }}
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
+        id: app-token
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Open or update the manifest-lock pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          RELEASE_VERSION: ${{ inputs.release-version }}
+          MANIFEST_LOCK_ACTION: ${{ inputs.manifest-lock-action }}
+        run: |
+          git apply "$RUNNER_TEMP/manifest-lock.patch"
+          bot_id=$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)
+          git checkout -b manifest-lock
+          git add -- manifests/
+          git -c user.name="${APP_SLUG}[bot]" -c user.email="${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com" \
+            commit -sm "Manifest Commit Lock for Release ${RELEASE_VERSION}"
+          gh auth setup-git
+          git push "https://github.com/${GITHUB_REPOSITORY}.git" manifest-lock --force
+          existing_pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head manifest-lock --state open --json number --jq '.[0].number')
+          if [ -n "$existing_pr" ]; then
+            gh pr edit "$existing_pr" --repo "$GITHUB_REPOSITORY" --body "Manifest Commit Lock for Release ${RELEASE_VERSION}"
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --head manifest-lock --base main \
+              --title "[${RELEASE_VERSION}] Manifest Commit Lock with action ${MANIFEST_LOCK_ACTION}" \
+              --body "Manifest Commit Lock for Release ${RELEASE_VERSION}"
+          fi
