@@ -72,16 +72,18 @@ jobs:
           latest_version=$(docker inspect --format '{{ index .Config.Labels "org.label-schema.version"}}' "${latest_docker_image}")
           manifest="manifests/${version}/${PRODUCT}-${version}.yml"
           # InputManifest: build.version, build.qualifier, build.getFilename() = name lower-cased, spaces -> '-'
-          read -r build_version build_qualifier filename < <(python3 - "${manifest}" <<'PY'
-          import sys
-          import yaml
-          with open(sys.argv[1], encoding="utf-8") as f:
-              build = yaml.safe_load(f)["build"]
-          qualifier = build.get("qualifier")
-          qualifier = "" if qualifier in (None, "null") else f"-{qualifier}"
-          print(build["version"], qualifier or "-", build["name"].lower().replace(" ", "-"))
-          PY
-          )
+          # the ci-runner image has no PyYAML, so read the flat build: block with awk
+          read -r build_version build_qualifier filename < <(awk '
+            /^build:/ { in_build = 1; next }
+            /^[^ #]/ { in_build = 0 }
+            in_build && /^  [a-z]+:/ {
+              key = $1; sub(":", "", key); value = $0; sub(/^  [a-z]+:[ ]*/, "", value); gsub(/["\047]/, "", value); build[key] = value
+            }
+            END {
+              qualifier = (build["qualifier"] == "" || build["qualifier"] == "null") ? "-" : "-" build["qualifier"]
+              name = tolower(build["name"]); gsub(/ /, "-", name)
+              print build["version"], qualifier, name
+            }' "${manifest}")
           [ "${build_qualifier}" = "-" ] && build_qualifier=""
           # buildDockerImage: keep al2 for the 1.x versions
           image_base_os=al2023
