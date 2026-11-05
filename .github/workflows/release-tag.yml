@@ -1,0 +1,121 @@
+---
+# Port of jenkins/release-workflows/release-tag.jenkinsfile (Jenkins job distribution-release-tag-creation).
+# Tags every OpenSearch and OpenSearch Dashboards component at the commit_id of the release distribution
+# manifest (createReleaseTag), then locks the input manifests to those tags by calling
+# release-manifest-commit-lock.yml with UPDATE_TO_TAGS, where Jenkins ran `build job: 'release-manifest-commit-lock'`.
+# Dry runs (the default) only plan; tags are written with a GitHub App token scoped to the repositories in the
+# plan, in the `release` environment.
+name: release-tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, e.g. 3.10.0.'
+        required: true
+        type: string
+      opensearch-build:
+        description: 'Optional OpenSearch release candidate build number to tag from; defaults to the published release bundle.'
+        required: false
+        default: ''
+        type: string
+      opensearch-dashboards-build:
+        description: 'Optional OpenSearch Dashboards release candidate build number to tag from; defaults to the published release bundle.'
+        required: false
+        default: ''
+        type: string
+      dry-run:
+        description: 'Only show the tags (and manifest lock) that would be written.'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-tag-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      owner: ${{ steps.scope.outputs.owner }}
+      repositories: ${{ steps.scope.outputs.repositories }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: '3.9'
+      - name: Install Pipenv and dependencies
+        run: |
+          python -m pip install --upgrade pipenv==2023.6.12 wheel
+          pipenv install --deploy --dev
+      - name: Plan release tags
+        env:
+          VERSION: ${{ inputs.version }}
+          OPENSEARCH_BUILD: ${{ inputs.opensearch-build }}
+          OPENSEARCH_DASHBOARDS_BUILD: ${{ inputs.opensearch-dashboards-build }}
+        run: |
+          pipenv run python src/run_release_tag.py --version "$VERSION" \
+            ${OPENSEARCH_BUILD:+--opensearch-build "$OPENSEARCH_BUILD"} \
+            ${OPENSEARCH_DASHBOARDS_BUILD:+--opensearch-dashboards-build "$OPENSEARCH_DASHBOARDS_BUILD"} \
+            --output release-tag-plan.json --summary "$GITHUB_STEP_SUMMARY"
+      - name: GitHub App token scope
+        id: scope
+        run: ./.github/scripts/release-plan-scope.sh release-tag-plan.json
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: release-tag-plan
+          path: release-tag-plan.json
+
+  create:
+    needs: plan
+    if: ${{ !inputs.dry-run && needs.plan.outputs.repositories != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: '3.9'
+      - name: Install Pipenv and dependencies
+        run: |
+          python -m pip install --upgrade pipenv==2023.6.12 wheel
+          pipenv install --deploy --dev
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        with:
+          name: release-tag-plan
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
+        id: app-token
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ needs.plan.outputs.owner }}
+          repositories: ${{ needs.plan.outputs.repositories }}
+          permission-contents: write
+      - name: Create release tags
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: pipenv run python src/run_release_tag.py --apply release-tag-plan.json
+
+  manifest-lock:
+    needs: [plan, create]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.create.result) }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-manifest-commit-lock.yml
+    with:
+      release-version: ${{ inputs.version }}
+      manifest-lock-action: UPDATE_TO_TAGS
+      dry-run: ${{ inputs.dry-run }}
+    secrets:
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}

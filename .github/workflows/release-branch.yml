@@ -1,0 +1,107 @@
+---
+# Port of jenkins/release-workflows/release-branch.jenkinsfile (Jenkins job release-branch-creation).
+# Creates TARGET_BRANCH in every component repository of the given manifests that does not have it yet:
+# at the component's commit_id for build manifest URLs, at the SOURCE_BRANCH HEAD for input manifests.
+# Dry runs (the default) only plan; the create job writes with a GitHub App token scoped to the repositories
+# in the plan and runs in the `release` environment.
+name: release-branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest-file:
+        description: 'Space-separated input manifests relative to manifests/ (e.g. 3.10.0/opensearch-3.10.0.yml) or build manifest URLs.'
+        required: true
+        type: string
+      source-branch:
+        description: 'Branch to cut from when using input manifests.'
+        required: false
+        default: main
+        type: string
+      target-branch:
+        description: 'Release branch to create, e.g. 3.10.'
+        required: true
+        type: string
+      dry-run:
+        description: 'Only show the branches that would be created.'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-branch-${{ inputs.target-branch }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    # Jenkins agent AL2023-X64-M54xlarge-Docker-Host; this job only runs git ls-remote and the repository's Python
+    # tooling, so it stays on a hosted runner until the s2.4 self-hosted pools exist.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      owner: ${{ steps.scope.outputs.owner }}
+      repositories: ${{ steps.scope.outputs.repositories }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: '3.9'
+      - name: Install Pipenv and dependencies
+        run: |
+          python -m pip install --upgrade pipenv==2023.6.12 wheel
+          pipenv install --deploy --dev
+      - name: Plan release branches
+        env:
+          MANIFEST_FILE: ${{ inputs.manifest-file }}
+          SOURCE_BRANCH: ${{ inputs.source-branch }}
+          TARGET_BRANCH: ${{ inputs.target-branch }}
+        run: |
+          read -ra manifests <<< "$MANIFEST_FILE"
+          pipenv run python src/run_release_branch.py --manifest "${manifests[@]}" \
+            --source-branch "$SOURCE_BRANCH" --target-branch "$TARGET_BRANCH" \
+            --output release-branch-plan.json --summary "$GITHUB_STEP_SUMMARY"
+      - name: GitHub App token scope
+        id: scope
+        run: ./.github/scripts/release-plan-scope.sh release-branch-plan.json
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: release-branch-plan
+          path: release-branch-plan.json
+
+  create:
+    needs: plan
+    if: ${{ !inputs.dry-run && needs.plan.outputs.repositories != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: '3.9'
+      - name: Install Pipenv and dependencies
+        run: |
+          python -m pip install --upgrade pipenv==2023.6.12 wheel
+          pipenv install --deploy --dev
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        with:
+          name: release-branch-plan
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
+        id: app-token
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ needs.plan.outputs.owner }}
+          repositories: ${{ needs.plan.outputs.repositories }}
+          permission-contents: write
+      - name: Create release branches
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: pipenv run python src/run_release_branch.py --apply release-branch-plan.json
