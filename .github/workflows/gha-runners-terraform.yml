@@ -7,10 +7,12 @@ on:
       - main
     paths:
       - 'deployment/gha-runners/**'
+      - 'deployment/packer/gha-runner/runner-version.json'
       - '.github/workflows/gha-runners-terraform.yml'
   pull_request:
     paths:
       - 'deployment/gha-runners/**'
+      - 'deployment/packer/gha-runner/runner-version.json'
       - '.github/workflows/gha-runners-terraform.yml'
 
 permissions:

@@ -18,6 +18,25 @@ locals {
 
   runner_pools = yamldecode(file("${path.module}/runner-pools.yaml"))
 
+  # Pools boot the agent baked into their AMI by deployment/packer (no module install_runner, no binaries
+  # syncer). The packer pin is the minimum agent version a pool accepts; older AMIs terminate at boot.
+  min_runner_version = jsondecode(file("${path.module}/../packer/gha-runner/runner-version.json")).version
+
+  userdata_template = {
+    for k, p in local.runner_pools : k => (
+      p.os == "windows" ? "${path.module}/templates/user-data-windows.ps1" :
+      p.os == "osx" ? "${path.module}/templates/user-data-osx.sh" :
+      try(p.run_as, "ec2-user") == "ubuntu" ? "${path.module}/templates/user-data-ubuntu.sh" :
+      "${path.module}/templates/user-data-al2023.sh"
+    )
+  }
+
+  baked_runner_check = {
+    for os, ext in { linux = "sh", osx = "sh", windows = "ps1" } : os => templatefile(
+      "${path.module}/templates/baked-runner.${ext}.tftpl", { min_runner_version = local.min_runner_version }
+    )
+  }
+
   ssm_arn_prefix = "arn:${data.aws_partition.runner.partition}:ssm:${var.aws_region}"
 
   # Public AWS parameters (/aws/service/...) have no account in their ARN.
@@ -66,7 +85,11 @@ locals {
         runner_architecture = p.arch
         runner_name_prefix  = "${p.id}-"
         runner_run_as       = p.os == "windows" ? null : try(p.run_as, "ec2-user")
-        userdata_template   = p.os == "linux" && try(p.run_as, "ec2-user") == "ubuntu" ? "${path.module}/templates/user-data-ubuntu.sh" : null
+
+        enable_runner_binaries_syncer = false
+        enable_userdata               = true
+        userdata_template             = local.userdata_template[k]
+        userdata_post_install         = local.baked_runner_check[p.os]
 
         # The pool label is the only extra label; GitHub adds self-hosted/<os>/<arch>.
         runner_extra_labels = [for l in p.labels : l if !contains(["self-hosted", "linux", "windows", "macos", "x64", "arm64"], l)]

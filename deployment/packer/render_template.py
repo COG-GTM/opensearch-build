@@ -21,17 +21,14 @@ import re
 import sys
 from typing import Any, Dict, List
 
-# Baked agent version. While the runner pools keep the module's boot-time install_runner, that copy
-# replaces this one at launch (see README.md).
-RUNNER_VERSION = "2.338.2"
-# SHA-256 of actions-runner-<os>-<arch>-<version>.(tar.gz|zip), from the actions/runner release notes.
-RUNNER_SHA256 = {
-    "linux-x64": "baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40",
-    "linux-arm64": "670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945",
-    "osx-x64": "109fff505a34014a7e8d1acb850c33d404811102f572b8fb9788e2fff013cc49",
-    "osx-arm64": "25a065af409ffa317ab4d5a3b614dd15fc9c40f2172bc1b35a1b1258e919a388",
-    "win-x64": "a1f17aa987fc8158bc7521d284912267a0d01b7c2c4684b33c86783b5e8221cc",
-}
+SCRIPT_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "gha-runner")
+
+# Baked agent version and the SHA-256 of actions-runner-<os>-<arch>-<version>.(tar.gz|zip), from the
+# actions/runner release notes. deployment/gha-runners reads the same file for the boot-time version check.
+with open(os.path.join(SCRIPT_DIR, "runner-version.json")) as _f:
+    _RUNNER = json.load(_f)
+RUNNER_VERSION: str = _RUNNER["version"]
+RUNNER_SHA256: Dict[str, str] = _RUNNER["sha256"]
 
 TEMPLATE_NAME = re.compile(r"^(legacy/)?[A-Za-z0-9][A-Za-z0-9._-]*\.json$")
 
@@ -43,8 +40,6 @@ BUILD_VARIABLES = {
     "build-region": "PACKER_BUILD_REGION",
     "aws_ami_region": "PACKER_BUILD_REGION",
 }
-
-SCRIPT_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "gha-runner")
 
 
 def runner_platform(template_name: str) -> str:

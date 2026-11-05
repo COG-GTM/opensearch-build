@@ -29,9 +29,22 @@ every role name is new (`gha-opensearch-build-*`), so Jenkins keeps working unti
 * **Instance profile is boot-time only:** SSM (JIT config, Session Manager), CloudWatch agent, ECR
   read-only. Workflows get AWS access only through the OIDC roles below.
 * On-demand capacity (no spot interruptions mid-build), IMDSv2 required with hop limit 1 (job containers
-  cannot reach the instance profile), encrypted gp3 root volumes. The Ubuntu pool boots with
-  `templates/user-data-ubuntu.sh` (the module default assumes AL2023).
+  cannot reach the instance profile), encrypted gp3 root volumes.
   Benchmark pools use `benchmark_vpc_id` / `benchmark_subnet_ids` when set.
+* **Baked runner agent.** The AMIs from `packer-build.yml` carry the GitHub Actions runner in
+  `/opt/actions-runner` (`C:\actions-runner` on Windows), pinned in
+  [`deployment/packer/gha-runner/runner-version.json`](../packer/gha-runner/runner-version.json). Pools set
+  `enable_runner_binaries_syncer = false` (no syncer Lambda or distribution bucket) and boot with the
+  module's user data minus its `install_runner` step: `templates/user-data-al2023.sh`, `user-data-ubuntu.sh`,
+  `user-data-windows.ps1`, `user-data-osx.sh`. Nothing is downloaded at boot; the module's start script
+  then fetches the JIT config and starts the baked agent.
+* **Stale AMIs fail loudly.** Before the runner registers, `templates/baked-runner.{sh,ps1}.tftpl` (the pool's
+  `userdata_post_install`) reads `Runner.Listener --version`. If the agent is missing or older than the
+  `version` in `runner-version.json`, the instance logs
+  `FATAL: stale runner AMI: ...` (console, `/var/log/user-data.log` / `C:\UserData.log`, and the pool's
+  CloudWatch `user_data` log group), terminates itself, and the job stays queued. Newer agents are accepted,
+  so an AMI rebuilt after a bump keeps working before the next apply. Fix: rebuild the AMI with
+  `packer-build.yml` and update the pool's AMI parameter.
 
 ### OIDC roles
 
@@ -61,9 +74,11 @@ work and the release roles trust nothing but the `release` environment, which re
    account under the names in `var.github_app` (defaults `/gha-runners/opensearch-build/github-app/*`).
    This is not the release-bot App behind `GH_APP_ID` / `GH_APP_PRIVATE_KEY`.
 2. **AMI parameters**: SSM `String` parameters (data type `aws:ec2:image`) named as in
-   `var.runner_ami_ssm_parameters`, holding the Jenkins agent AMI IDs. `packer-build.yml` (s3.5) builds
-   them and reports the IDs; see `deployment/packer/README.md` for updating the parameters. The plan fails
-   early if one is missing.
+   `var.runner_ami_ssm_parameters`, holding the agent AMI IDs built by `packer-build.yml` (s3.5) with the
+   runner agent baked in (`INSTALL_GHA_RUNNER` on). See `deployment/packer/README.md` for updating the
+   parameters. The plan fails early if one is missing; an AMI without the agent, or with an agent older than
+   `runner-version.json`, fails at boot (see *Stale AMIs fail loudly*). Point the parameters at baked
+   AMIs before applying this configuration.
 3. **State backend**: an S3 bucket + DynamoDB lock table in the runner account.
 4. **Cross-account access**: a role Terraform can assume in each account of `var.account_role_arns`,
    and, if the GitHub OIDC provider already exists in an account, `create_oidc_provider.<key> = false`.
@@ -90,7 +105,11 @@ Sandbox dry run (AWS public AMIs, placeholder ARNs, local throwaway state, GitHu
 AWS_REGION=us-east-1 scripts/plan-sandbox.sh   # writes out/validate.txt and out/plan.txt
 ```
 
-The sandbox plan only reads (`describe-*`, SSM public parameters); never apply it.
+The sandbox plan only reads (`describe-*`, SSM public parameters); never apply it. The sandbox AMIs are
+AWS public images without the baked agent, so instances from them would stop at the version check.
+
+Bumping the agent: update `runner-version.json` (version + release SHA-256s), rebuild the AMIs with
+`packer-build.yml`, update the AMI parameters, then plan/apply here so pools require the new minimum.
 
 ## Apply procedure (human-approved, not part of s2.4)
 
@@ -111,7 +130,8 @@ action approved on the ticket by a maintainer.
 5. Set the GitHub App webhook URL to `terraform output -raw webhook_endpoint` and its secret to the SSM
    webhook secret.
 6. Smoke test: a `workflow_dispatch` job on each pool's `runs-on` array starts one instance, runs, and the
-   instance is gone within minutes; a job assuming each `AWS_ROLE_*` from the right ref/environment
+   instance is gone within minutes (its user-data log shows `Using baked actions/runner <version>` and no
+   download); a job assuming each `AWS_ROLE_*` from the right ref/environment
    succeeds and from the wrong one is denied.
 7. Record the apply (plan, apply output, smoke-test run links) on the ticket.
 
