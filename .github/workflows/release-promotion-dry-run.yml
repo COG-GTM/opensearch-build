@@ -28,8 +28,8 @@ jobs:
       contents: read
       # the called workflows' release jobs declare id-token: write; they are skipped in a dry run
       id-token: write
-      # dispatch publish-to-maven (Jenkins `wait: false`) and list the child jobs for the summary
-      actions: write
+      # list the run's jobs for the summary
+      actions: read
     uses: ./.github/workflows/release-promotion.yml
     with:
       RELEASE_VERSION: 3.9.0

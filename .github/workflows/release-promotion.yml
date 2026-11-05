@@ -1,10 +1,10 @@
 ---
 # GitHub Actions port of jenkins/release-workflows/release-promotion.jenkinsfile (central-release-promotion).
 # Each Jenkins stage is a job and each `build job:` a reusable-workflow call, chained with `needs` in the jenkinsfile's
-# stage order: Parameters Check -> Validate staging artifacts -> Publish (19 parallel promote-repos/promote-artifacts
+# stage order: Parameters Check -> Validate staging artifacts -> Publish (17 parallel promote-repos/promote-artifacts
 # branches) -> Publish OpenSearch Linux tar x64 -> Invalidate Cloudfront | Promote Docker -> Validate production
-# artifacts -> Publish to Maven. publish-to-maven was `wait: false`, so it is dispatched as its own run and not awaited
-# (docs/jenkins-gha-inventory.md, `build job:` across trigger boundaries). With `dry-run` (the default) every child runs
+# artifacts -> Publish to Maven. publish-to-maven was `wait: false`, so a real run dispatches it as its own run and does not
+# wait (docs/jenkins-gha-inventory.md, `build job:` across trigger boundaries). With `dry-run` (the default) every child runs
 # its no-secrets plan only and the CloudFront invalidation is listed, not sent; validate-artifacts is read-only and always
 # runs. Promotion jobs hold their secrets in the `release` environment (ADR 0001), so a reviewer approves real runs.
 name: release-promotion
@@ -99,6 +99,7 @@ jobs:
     permissions:
       contents: read
     outputs:
+      release-version: ${{ steps.plan.outputs.release-version }}
       opensearch: ${{ steps.plan.outputs.opensearch }}
       repos: ${{ steps.plan.outputs.repos }}
       artifacts: ${{ steps.plan.outputs.artifacts }}
@@ -138,7 +139,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/validate-artifacts.yml
     with:
-      VERSION: ${{ inputs.RELEASE_VERSION }}
+      VERSION: ${{ needs.parameters.outputs.release-version }}
       DISTRIBUTION: tar rpm yum deb zip docker
       ARCHITECTURE: x64 arm64
       PROJECTS: ${{ needs.parameters.outputs.validation-projects }}
@@ -278,7 +279,7 @@ jobs:
     uses: ./.github/workflows/docker-promotion.yml
     with:
       SOURCE_IMAGES: ${{ needs.parameters.outputs.source-images }}
-      RELEASE_VERSION: ${{ inputs.RELEASE_VERSION }}
+      RELEASE_VERSION: ${{ needs.parameters.outputs.release-version }}
       DOCKER_HUB_PROMOTE: true
       ECR_PROMOTE: true
       TAG_LATEST: ${{ inputs.TAG_DOCKER_LATEST }}
@@ -293,7 +294,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/validate-artifacts.yml
     with:
-      VERSION: ${{ inputs.RELEASE_VERSION }}
+      VERSION: ${{ needs.parameters.outputs.release-version }}
       DISTRIBUTION: tar rpm yum deb zip docker
       ARCHITECTURE: x64 arm64
       PROJECTS: ${{ needs.parameters.outputs.validation-projects }}
@@ -301,47 +302,58 @@ jobs:
       ARTIFACT_TYPE: production
       OPTIONS: ${{ needs.parameters.outputs.production-validation-options }}
 
+  # build job: 'publish-to-maven', wait: false. A real run dispatches it as its own run with the GitHub App token, not
+  # awaited (docs/jenkins-gha-inventory.md); a dry run calls its no-secrets plan instead, so pull-request dry runs need no
+  # Actions write access.
   publish-to-maven:
     name: Publish to Maven
     needs: [parameters, validate-production]
-    if: ${{ needs.parameters.outputs.opensearch == 'true' }}
+    if: ${{ !inputs.dry-run && needs.parameters.outputs.opensearch == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    permissions:
-      actions: write
+    permissions: {}
     outputs:
       run-url: ${{ steps.dispatch.outputs.run-url }}
-    env:
-      HAS_APP: ${{ secrets.GH_APP_ID != '' && secrets.GH_APP_PRIVATE_KEY != '' }}
     steps:
       - name: Mint GitHub App token
         id: app-token
-        if: env.HAS_APP == 'true'
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
         with:
           app-id: ${{ secrets.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
           repositories: ${{ github.event.repository.name }}
           permission-actions: write
-      # build job: 'publish-to-maven', wait: false
       - name: Dispatch publish-to-maven (not awaited)
         id: dispatch
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPOSITORY: ${{ github.repository }}
-          REF: ${{ github.head_ref || github.ref_name }}
+          REF: ${{ github.ref_name }}
           BUILD_ID: ${{ needs.parameters.outputs.os-rc }}
-          VERSION: ${{ inputs.RELEASE_VERSION }}
-          DRY_RUN: ${{ inputs.dry-run }}
+          VERSION: ${{ needs.parameters.outputs.release-version }}
         run: |
           set -euo pipefail
           response="$(gh api -X POST "repos/${REPOSITORY}/actions/workflows/publish-to-maven.yml/dispatches" \
             -f ref="${REF}" -f "inputs[BUILD_ID]=${BUILD_ID}" -f "inputs[VERSION]=${VERSION}" \
-            -f "inputs[dry-run]=${DRY_RUN}" -F return_run_details=true)"
+            -f "inputs[dry-run]=false" -F return_run_details=true)"
           [[ -n "${response}" ]] || response='{}'
           run_url="$(jq -r '.html_url // empty' <<< "${response}")"
-          echo "Dispatched publish-to-maven ${VERSION} build ${BUILD_ID} (dry-run: ${DRY_RUN}) on ${REF}: ${run_url:-run URL not returned}"
+          echo "Dispatched publish-to-maven ${VERSION} build ${BUILD_ID} on ${REF}: ${run_url:-run URL not returned}"
           printf 'run-url=%s\n' "${run_url}" >> "${GITHUB_OUTPUT}"
+
+  publish-to-maven-plan:
+    name: Publish to Maven
+    needs: [parameters, validate-production]
+    if: ${{ inputs.dry-run && needs.parameters.outputs.opensearch == 'true' }}
+    permissions:
+      contents: read
+      # the called workflow's release job declares id-token: write; it is skipped in a dry run
+      id-token: write
+    uses: ./.github/workflows/publish-to-maven.yml
+    with:
+      BUILD_ID: ${{ needs.parameters.outputs.os-rc }}
+      VERSION: ${{ needs.parameters.outputs.release-version }}
+      dry-run: true
 
   summary:
     name: Release promotion summary
@@ -356,6 +368,7 @@ jobs:
       - promote-docker
       - validate-production
       - publish-to-maven
+      - publish-to-maven-plan
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10

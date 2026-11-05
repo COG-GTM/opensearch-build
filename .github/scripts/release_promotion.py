@@ -158,7 +158,7 @@ def plan_markdown(result: Dict[str, Any], dry_run: bool) -> str:
         f"DOCKER_SOURCE=Both, OPTIONS=`{result['production-validation-options']}` |",
     ]
     if result["opensearch"]:
-        lines.append(f"| Publish to Maven | publish-to-maven (dispatched, not awaited) | BUILD_ID={result['os-rc']}, VERSION={result['release-version']} |")
+        lines.append(f"| Publish to Maven | publish-to-maven ({'plan only' if dry_run else 'dispatched, not awaited'}) | BUILD_ID={result['os-rc']}, VERSION={result['release-version']} |")
     return "\n".join(lines) + "\n"
 
 
