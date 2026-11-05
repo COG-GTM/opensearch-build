@@ -129,7 +129,8 @@ jobs:
             commit -sm "Update manifests"
           gh auth setup-git
           git push "https://github.com/${GITHUB_REPOSITORY}.git" update-manifest --force
-          existing_pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head update-manifest --state open --json number --jq '.[0].number')
+          existing_pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY_OWNER}:update-manifest&state=open" \
+            --jq '.[0].number // empty')
           if [ -n "$existing_pr" ]; then
             gh pr edit "$existing_pr" --repo "$GITHUB_REPOSITORY" --body "$PR_BODY"
           else
