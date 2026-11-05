@@ -1,0 +1,125 @@
+---
+# GitHub Actions port of jenkins/opensearch/benchmark-compare.jenkinsfile: `opensearch-benchmark compare` of two test
+# executions stored in the benchmark metrics datastore, posted to the pull request as the same
+# "Benchmark Baseline Comparison Results" comment. benchmark-pull-request.yml dispatches it (Jenkins `build job:
+# 'benchmark-compare', wait: false, propagate: false`).
+name: benchmark-compare
+
+run-name: >-
+  benchmark-compare ${{ inputs.BASELINE_TEST_EXECUTION_ID }} vs ${{ inputs.CONTENDER_TEST_EXECUTION_ID }}
+  ${{ inputs.PULL_REQUEST_NUMBER && format('({0}#{1})', inputs.REPOSITORY, inputs.PULL_REQUEST_NUMBER) || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      BASELINE_TEST_EXECUTION_ID:
+        description: '<Required> opensearch-benchmark test-execution-id of the baseline run.'
+        required: true
+        type: string
+      CONTENDER_TEST_EXECUTION_ID:
+        description: '<Required> opensearch-benchmark test-execution-id of the contender, mainly from pull requests.'
+        required: true
+        type: string
+      PULL_REQUEST_NUMBER:
+        description: '<Optional> Pull request to post the comparison to; empty posts nothing.'
+        required: false
+        type: string
+      REPOSITORY:
+        description: '<Optional> owner/repo of the pull request.'
+        required: false
+        default: opensearch-project/OpenSearch
+        type: string
+      DRY_RUN:
+        description: '<Optional> Render the comment in the log instead of posting it.'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  compare:
+    name: benchmark-compare
+    runs-on: [self-hosted, linux, x64, al2023-x64-m5-2xlarge-benchmark-test]
+    timeout-minutes: 60
+    environment: benchmark
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      BASELINE: ${{ inputs.BASELINE_TEST_EXECUTION_ID }}
+      CONTENDER: ${{ inputs.CONTENDER_TEST_EXECUTION_ID }}
+      PULL_REQUEST_NUMBER: ${{ inputs.PULL_REQUEST_NUMBER }}
+      TARGET_REPOSITORY: ${{ inputs.REPOSITORY }}
+      SUFFIX: ${{ github.run_id }}
+    steps:
+      - name: Validate parameters
+        run: |
+          set -euo pipefail
+          if [ -z "$BASELINE" ] || [ -z "$CONTENDER" ]; then
+            echo "::error::Benchmark test failed to start. Please provide BASELINE_TEST_EXECUTION_ID and CONTENDER_TEST_EXECUTION_ID to run the job."
+            exit 1
+          fi
+          [[ -z "$PULL_REQUEST_NUMBER" || "$PULL_REQUEST_NUMBER" =~ ^[0-9]+$ ]] || { echo "::error::PULL_REQUEST_NUMBER must be a number"; exit 1; }
+          [[ -z "$TARGET_REPOSITORY" || "$TARGET_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::REPOSITORY must be owner/repo"; exit 1; }
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Assume the test-results role
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+          role-duration-seconds: 900
+          aws-region: us-east-1
+
+      - name: Download benchmark.ini
+        env:
+          BUCKET: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          CONFIG_LOCATION: ${{ vars.BENCHMARK_TEST_CONFIG_LOCATION }}
+        run: aws s3 cp --only-show-errors "s3://${BUCKET}/${CONFIG_LOCATION}/benchmark.ini" benchmark.ini
+
+      - name: Add the metrics datastore credentials
+        env:
+          DATASTORE_USER: ${{ secrets.BENCHMARK_METRICS_DATASTORE_USER }}
+          DATASTORE_PASSWORD: ${{ secrets.BENCHMARK_METRICS_DATASTORE_PASSWORD }}
+        run: python3 .github/scripts/benchmark_test.py edit-config benchmark.ini
+
+      - name: Compare
+        run: |
+          python3 .github/scripts/benchmark_test.py run --command compare --baseline "$BASELINE" --contender "$CONTENDER" \
+            --suffix "$SUFFIX" --benchmark-config "$GITHUB_WORKSPACE/benchmark.ini"
+
+      - name: Render the pull request comment
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 .github/scripts/benchmark_test.py comment --title 'Benchmark Baseline Comparison Results' \
+            --run-url "$RUN_URL" --results "final_result_${SUFFIX}.md" --output comment.md
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Split the repository
+        id: target
+        if: ${{ inputs.PULL_REQUEST_NUMBER != '' && inputs.REPOSITORY != '' && !inputs.DRY_RUN }}
+        run: |
+          echo "owner=${TARGET_REPOSITORY%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${TARGET_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint a GitHub App token for the pull request repository
+        # replaces op:github-bot/ci-bot-token (ADR 0001: GitHub App, narrowest permission)
+        id: app-token
+        if: ${{ steps.target.outcome == 'success' }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target.outputs.owner }}
+          repositories: ${{ steps.target.outputs.name }}
+          permission-pull-requests: write
+
+      - name: Post the comparison
+        if: ${{ steps.app-token.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: gh pr comment "$PULL_REQUEST_NUMBER" --repo "$TARGET_REPOSITORY" --body-file comment.md
