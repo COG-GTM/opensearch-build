@@ -86,6 +86,19 @@ class TestCompareBuildLayout(unittest.TestCase):
         self.assertEqual(sections["input refs"], [f"OpenSearch: jenkins {SHA_A}, actions 3.9"])
         self.assertEqual(sections["build manifest"], [])
 
+    def test_component_build_order_is_not_a_difference(self) -> None:
+        plugin = {"plugins": ["plugins/opensearch-job-scheduler-3.9.0.0.zip"]}
+        core = self.actions_build["components"][0]["artifacts"]
+        self.actions_build = build_manifest("3.9.0-SNAPSHOT", "9876543210", SHA_B, {"job-scheduler": plugin, "OpenSearch": core})
+        self.write("builds/opensearch/manifest.yml", yaml.safe_dump(self.actions_build))
+        self.write("dist/opensearch/manifest.yml", yaml.safe_dump(dist_manifest("3.9.0-SNAPSHOT", "9876543210", ACTIONS_ROOT, SHA_B, ["job-scheduler", "OpenSearch"])))
+        self.files.append("builds/opensearch/plugins/opensearch-job-scheduler-3.9.0.0.zip")
+        self.write("file-list.txt", "\n".join(sorted(self.files)) + "\n")
+        sections = compare_build_layout.compare(self.record, JENKINS_ROOT, self.jenkins.__getitem__)
+        self.assertEqual(sections["shared components"], ["OpenSearch, job-scheduler"])
+        self.assertEqual(sections["build manifest"], [])
+        self.assertEqual(sections["bundle manifest"], [])
+
     def test_bundle_ref_must_match_build_ref(self) -> None:
         dist = dist_manifest("3.9.0-SNAPSHOT", "9876543210", ACTIONS_ROOT, SHA_B, ["OpenSearch"])
         dist["components"][0]["ref"] = "main"
