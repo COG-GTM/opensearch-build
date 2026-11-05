@@ -324,7 +324,12 @@ jobs:
           SYSTEMD: ${{ matrix.systemd }}
         run: |
           set -euo pipefail
-          docker pull "${IMAGE}"
+          # Anonymous public.ecr.aws pulls are rate limited (toomanyrequests), so back off and retry.
+          for attempt in 1 2 3 4 5; do
+            docker pull "${IMAGE}" && break
+            [[ "${attempt}" == 5 ]] && exit 1
+            sleep $((attempt * 20))
+          done
           if [[ "${SYSTEMD}" == 'true' ]]; then
             docker run -d --name validate --privileged -u root \
               -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host \
