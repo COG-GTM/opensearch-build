@@ -6,8 +6,10 @@
 # The pull request is pushed with a GitHub App token scoped to this repository instead of the opensearch-ci-bot PAT
 # and fork; manifests.yml only checks manifests changed by a pull request, so it does not overlap with this job.
 # Dry runs compute the manifest changes and publish them as a patch artifact and in the job summary, without a PR.
+# Scheduled runs are dry runs on a hosted runner until the repository variable MANIFESTS_UPDATE_LIVE is 'true' (set at
+# Jenkins cutover), so Jenkins and Actions never open manifest pull requests side by side; dispatch uses its input.
 name: manifests-update
-run-name: manifests-update${{ inputs.dry-run && ' (dry run)' || '' }}
+run-name: manifests-update${{ (inputs.dry-run || (github.event_name == 'schedule' && vars.MANIFESTS_UPDATE_LIVE != 'true')) && ' (dry run)' || '' }}
 
 on:
   schedule:
@@ -35,7 +37,7 @@ jobs:
   update:
     name: Update Manifests
     # Jenkins agent label Jenkins-Agent-AL2023-X64-M54xlarge-Docker-Host; dry runs stay on a hosted runner.
-    runs-on: ${{ fromJSON(inputs.dry-run && '["ubuntu-24.04"]' || '["self-hosted","linux","x64","al2023-x64-m5-4xlarge-docker-host"]') }}
+    runs-on: ${{ fromJSON((inputs.dry-run || (github.event_name == 'schedule' && vars.MANIFESTS_UPDATE_LIVE != 'true')) && '["ubuntu-24.04"]' || '["self-hosted","linux","x64","al2023-x64-m5-4xlarge-docker-host"]') }}
     container:
       image: public.ecr.aws/opensearchstaging/ci-runner:ci-runner-almalinux8-opensearch-build-v1
       options: --user root
@@ -46,9 +48,19 @@ jobs:
       contents: read
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
+      dry-run: ${{ steps.mode.outputs.dry-run }}
     steps:
+      - name: Select mode
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DRY_RUN: ${{ (inputs.dry-run || (github.event_name == 'schedule' && vars.MANIFESTS_UPDATE_LIVE != 'true')) }}
+          MANIFESTS_UPDATE_LIVE: ${{ vars.MANIFESTS_UPDATE_LIVE }}
+        run: |
+          echo "dry-run=$DRY_RUN" >> "$GITHUB_OUTPUT"
+          echo "Mode: event=$EVENT_NAME dry-run=$DRY_RUN MANIFESTS_UPDATE_LIVE=${MANIFESTS_UPDATE_LIVE:-<unset>}" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Require the default branch for pull requests
-        if: ${{ !inputs.dry-run && github.ref != 'refs/heads/main' }}
+        if: ${{ !(inputs.dry-run || (github.event_name == 'schedule' && vars.MANIFESTS_UPDATE_LIVE != 'true')) && github.ref != 'refs/heads/main' }}
         run: |
           echo "::error::The update-manifest pull request targets main; run from main or set dry-run."
           exit 1
@@ -91,7 +103,7 @@ jobs:
   pull-request:
     name: Open or update the pull request
     needs: update
-    if: ${{ !inputs.dry-run && needs.update.outputs.changed == 'true' }}
+    if: ${{ needs.update.outputs.dry-run == 'false' && needs.update.outputs.changed == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
