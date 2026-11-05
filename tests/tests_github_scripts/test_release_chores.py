@@ -292,6 +292,23 @@ def test_notes_pr_dry_run(tmp_path: Any, capsys: Any) -> None:
     assert gh.calls == [["api", "repos/opensearch-project/job-scheduler/pulls?head=opensearch-project:release-chores/release-notes-3.9.0&state=open", "--jq", ".[0].number"]]
 
 
+def test_notes_pr_tag_ref_fails_even_when_notes_unchanged(tmp_path: Any) -> None:
+    notes = tmp_path / "release-notes"
+    notes.mkdir()
+    (notes / "opensearch-job-scheduler.release-notes-3.9.0.0.md").write_text("same\n")
+
+    def fake_clone(repository: str, ref: str, destination: str) -> None:
+        os.makedirs(os.path.join(destination, "release-notes"))
+        with open(os.path.join(destination, "release-notes", "opensearch-job-scheduler.release-notes-3.9.0.0.md"), "w") as f:
+            f.write("same\n")
+
+    gh = FakeGh()
+    args = release_chores.parse_args(["notes-pr", "--manifest", OS_MANIFEST, "--component", "job-scheduler", "--notes-dir", str(notes), "--ref", "tags/3.9.0.0"])
+    with patch.object(release_chores, "clone", fake_clone), pytest.raises(release_chores.ChoreError, match="is a tag"):
+        release_chores.notes_pr(args, release_chores.GitHub(False, gh))
+    assert gh.calls == []
+
+
 def test_main_reports_errors(capsys: Any) -> None:
     assert release_chores.main(["doc-prs", "--action", "check"]) == 1
     assert "::error::Version parameter is required." in capsys.readouterr().out
@@ -318,21 +335,15 @@ def test_release_owners_without_metrics_document_is_skipped(capsys: pytest.Captu
     assert "All components have release owner assigned." not in out
 
 
-def test_release_issues_metrics_failure_does_not_dispatch() -> None:
+def test_release_issues_metrics_failure_counts_as_missing_like_jenkins() -> None:
     gh = FakeGh()
     chore, _ = chores(["release-issues", "--action", "create", "--manifest", OS_MANIFEST], gh, FakeMetrics({release_chores.RELEASE_METRICS_INDEX: {"hits": {"hits": []}}}))
-    with pytest.raises(release_chores.ChoreError, match="not dispatching"):
-        chore.run("release-issues")
-    assert gh.calls == []
+    chore.run("release-issues")
+    assert [c[2] for c in gh.calls if c[:2] == ["workflow", "run"]] == ["os-release-issues.yml", "osd-release-issues.yml"]
 
 
-def test_pr_base_for_tag_refs() -> None:
-    gh = FakeGh({"api repos/o/r --jq .default_branch": "main"})
-    assert release_chores.pr_base(release_chores.GitHub(False, gh), "o/r", "tags/3.8.0.0") == "main"
-    assert release_chores.pr_base(release_chores.GitHub(False, FakeGh()), "o/r", "3.9") == "3.9"
-
-    def failing(args: List[str]) -> str:
-        raise release_chores.subprocess.CalledProcessError(1, "gh")
-
-    with pytest.raises(release_chores.subprocess.CalledProcessError):
-        release_chores.pr_base(release_chores.GitHub(False, failing), "o/r", "tags/3.8.0.0")
+def test_pr_base_matches_jenkins() -> None:
+    assert release_chores.pr_base("main") == "main"
+    assert release_chores.pr_base("3.9") == "3.9"
+    with pytest.raises(release_chores.ChoreError, match="is a tag"):
+        release_chores.pr_base("tags/3.8.0.0")
