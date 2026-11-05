@@ -1,0 +1,129 @@
+---
+# Composite port of opensearch-build-libraries/vars/validateArtifacts.groovy.
+# Command assembly follows validateArtifacts.groovy:29-58. The two-attempt loop ports Jenkins retry(2)
+# from validate-artifacts-lf.jenkinsfile:220-232 and :251-271.
+name: Validate artifacts
+description: Run validation.sh with the validateArtifacts shared-library arguments.
+inputs:
+  version:
+    description: OpenSearch version.
+    required: false
+  file-path:
+    description: Artifact URL mappings.
+    required: false
+  distribution:
+    description: Distribution.
+    required: false
+  platform:
+    description: Platform.
+    required: false
+  arch:
+    description: Architecture.
+    required: false
+  projects:
+    description: Projects to validate.
+    required: false
+  docker-source:
+    description: Docker source.
+    required: false
+  os-build-number:
+    description: OpenSearch build number.
+    required: false
+  osd-build-number:
+    description: OpenSearch Dashboards build number.
+    required: false
+  artifact-type:
+    description: Artifact type.
+    required: false
+  allow-http:
+    description: Allow validation without the security plugin.
+    required: false
+    default: 'false'
+  docker-args:
+    description: Docker validation optional argument.
+    required: false
+  skip-core-plugins:
+    description: >-
+      Comma-separated native plugins to skip. 'None' omits the flag, '__skip_all__' emits a bare
+      --skip-core-plugins (Jenkins empty-string semantics), and empty means not applicable.
+      Callers must pass an explicit value; there is intentionally no non-empty default.
+    required: false
+    default: ''
+  docker-exec-container:
+    description: >-
+      Optional name of a running container; when set, validation.sh runs inside it with
+      `docker exec` (used for the systemd rpm/yum/deb legs).
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Validate artifacts with retry(2)
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        FILE_PATH: ${{ inputs.file-path }}
+        DISTRIBUTION: ${{ inputs.distribution }}
+        PLATFORM: ${{ inputs.platform }}
+        ARCH: ${{ inputs.arch }}
+        PROJECTS: ${{ inputs.projects }}
+        DOCKER_SOURCE: ${{ inputs.docker-source }}
+        OS_BUILD_NUMBER: ${{ inputs.os-build-number }}
+        OSD_BUILD_NUMBER: ${{ inputs.osd-build-number }}
+        ARTIFACT_TYPE: ${{ inputs.artifact-type }}
+        ALLOW_HTTP: ${{ inputs.allow-http }}
+        DOCKER_ARGS: ${{ inputs.docker-args }}
+        SKIP_CORE_PLUGINS: ${{ inputs.skip-core-plugins }}
+        DOCKER_EXEC_CONTAINER: ${{ inputs.docker-exec-container }}
+      run: |
+        set -uo pipefail
+        command=()
+        if [[ -n "${DOCKER_EXEC_CONTAINER}" ]]; then
+          command+=(docker exec "${DOCKER_EXEC_CONTAINER}")
+        fi
+        command+=(./validation.sh)
+        [[ -n "${VERSION}" ]] && command+=(--version "${VERSION}")
+        # --file-path, --projects, --docker-source, and --skip-core-plugins are argparse
+        # nargs='+'/'*' flags (src/validation_workflow/validation_args.py), so multi-value
+        # strings must be split into separate argv words like the Jenkins sh() invocation.
+        if [[ -n "${FILE_PATH}" ]]; then
+          read -ra file_path_values <<< "${FILE_PATH}"
+          command+=(--file-path "${file_path_values[@]}")
+        fi
+        [[ -n "${DISTRIBUTION}" ]] && command+=(--distribution "${DISTRIBUTION}")
+        [[ -n "${PLATFORM}" ]] && command+=(--platform "${PLATFORM}")
+        [[ -n "${ARCH}" ]] && command+=(--arch "${ARCH}")
+        if [[ -n "${PROJECTS}" ]]; then
+          read -ra projects_values <<< "${PROJECTS}"
+          command+=(--projects "${projects_values[@]}")
+        fi
+        if [[ -n "${DOCKER_SOURCE}" ]]; then
+          read -ra docker_source_values <<< "${DOCKER_SOURCE}"
+          command+=(--docker-source "${docker_source_values[@]}")
+        fi
+        [[ -n "${OS_BUILD_NUMBER}" ]] && command+=(--os-build-number "${OS_BUILD_NUMBER}")
+        [[ -n "${OSD_BUILD_NUMBER}" ]] && command+=(--osd-build-number "${OSD_BUILD_NUMBER}")
+        [[ -n "${ARTIFACT_TYPE}" ]] && command+=(--artifact-type "${ARTIFACT_TYPE}")
+        [[ "${ALLOW_HTTP}" == 'true' ]] && command+=(--allow-http)
+        [[ -n "${DOCKER_ARGS}" ]] && command+=(--"${DOCKER_ARGS}")
+        # Match validateArtifacts.groovy:51: SKIP_CORE_PLUGINS='' in Jenkins produces a bare
+        # --skip-core-plugins (skip all) and 'None' omits the flag. The workflow passes the
+        # '__skip_all__' sentinel for the Jenkins empty-string case because an empty input
+        # here means "not applicable for this call shape".
+        if [[ "${SKIP_CORE_PLUGINS}" == '__skip_all__' ]]; then
+          command+=(--skip-core-plugins)
+        elif [[ -n "${SKIP_CORE_PLUGINS}" && "${SKIP_CORE_PLUGINS}" != 'None' ]]; then
+          read -ra skip_core_plugins_values <<< "${SKIP_CORE_PLUGINS//,/ }"
+          command+=(--skip-core-plugins "${skip_core_plugins_values[@]}")
+        fi
+        for attempt in 1 2; do
+          echo "validation attempt ${attempt}/2"
+          status=0
+          "${command[@]}" || status=$?
+          if [[ "${status}" == 0 ]]; then
+            exit 0
+          fi
+          if [[ "${attempt}" == 2 ]]; then
+            exit "${status}"
+          fi
+        done
