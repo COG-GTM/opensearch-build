@@ -709,16 +709,17 @@ jobs:
             printf -v COMMAND '%q ' "${REPORT[@]}"
             docker exec test-report bash -c "${COMMAND}"
           fi
+          [ "${PLATFORM}" = windows ] || sudo chown "$(id -u):$(id -g)" test-report.yml
+          if [ -n "${ARTIFACTS_FROM_RUN}" ]; then
+            # Local builds are reported under their artifact URLs (uploaded or not), never the runner workspace.
+            sed -i -e "s#${LOCAL_ROOT}/\([a-z]*\)/opensearch-dashboards/#${ARTIFACT_ROOT_URL}/\1/opensearch-dashboards/#g" \
+              -e "s#${LOCAL_ROOT}/\([a-z]*\)/opensearch/#${OPENSEARCH_URL}/\1/opensearch/#g" \
+              -e "s#opensearch=${LOCAL_ROOT}#opensearch=${OPENSEARCH_URL}#g" \
+              -e "s#${LOCAL_ROOT}#${ARTIFACT_ROOT_URL}#g" test-report.yml
+          fi
           if [ "${UPLOAD_RESULTS}" != true ]; then
             # Keep the report exactly as it would have been uploaded: the local base path read back by report.sh
             # becomes the public test-results location Jenkins wrote into test-report.yml.
-            sudo chown "$(id -u):$(id -g)" test-report.yml
-            if [ -n "${ARTIFACTS_FROM_RUN}" ]; then
-              # Local builds are reported under their published artifact URLs.
-              sed -i -e "s#${LOCAL_ROOT}/\([a-z]*\)/opensearch-dashboards/#${ARTIFACT_ROOT_URL}/\1/opensearch-dashboards/#g" \
-                -e "s#${LOCAL_ROOT}/\([a-z]*\)/opensearch/#${OPENSEARCH_URL}/\1/opensearch/#g" \
-                -e "s#${LOCAL_ROOT}#${ARTIFACT_ROOT_URL}#g" test-report.yml
-            fi
             sed -i "s#${GITHUB_WORKSPACE}#${PUBLIC_BASE_PATH}#g" test-report.yml
           fi
           UPLOAD_PATH="${JOB_NAME}/${ROOT}/test-results/${TEST_RUN_ID}/${TEST_TYPE}/test-report.yml"
