@@ -91,7 +91,11 @@ jobs:
           role-duration-seconds: 900
           audience: sts.amazonaws.com
           aws-region: us-east-1
-      - name: Register release schedule
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        with:
+          name: release-schedule
+          path: ${{ runner.temp }}/approved
+      - name: Register the approved release schedule
         env:
           METRICS_HOST_URL: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
-        run: pipenv run python src/run_release_schedule.py --releases-url "$RELEASES_URL" --register --output release-schedule.json
+        run: pipenv run python src/run_release_schedule.py --from-json "$RUNNER_TEMP/approved/release-schedule.json" --register --output release-schedule.json
