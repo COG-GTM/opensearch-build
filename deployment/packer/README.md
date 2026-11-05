@@ -21,6 +21,13 @@ pools in [`deployment/gha-runners`](../gha-runners).
   or `C:\actions-runner` (Windows, [`install-gha-runner.ps1`](gha-runner/install-gha-runner.ps1)), inserted before the
   template's final reboot / sysprep step. Nothing is registered: the runner module's boot script fetches a JIT config.
   The Jenkins setup is untouched, so the AMIs still work as Jenkins agents until cutover.
+
+  With the current `deployment/gha-runners` settings (module user data on, runner binaries syncer on), the
+  module's boot-time `install_runner` extracts the syncer's runner over `/opt/actions-runner`, so jobs run that
+  version and boot still downloads it; the baked copy only pre-installs the agent and its dependencies. Making the
+  baked agent the one that runs (pool `enable_userdata = false`, `enable_runner_binaries_syncer = false`, and the
+  module's `start-runner.sh` baked as a boot script, as in the module's prebuilt-AMI examples) is a change to the
+  runner infrastructure, not to this workflow.
 * A `manifest` post-processor so the run summary and the `packer-manifest` artifact list the AMI IDs.
 
 To bump the agent, update `RUNNER_VERSION` and `RUNNER_SHA256` from the

@@ -21,6 +21,8 @@ import re
 import sys
 from typing import Any, Dict, List
 
+# Baked agent version. While the runner pools keep the module's boot-time install_runner, that copy
+# replaces this one at launch (see README.md).
 RUNNER_VERSION = "2.338.2"
 # SHA-256 of actions-runner-<os>-<arch>-<version>.(tar.gz|zip), from the actions/runner release notes.
 RUNNER_SHA256 = {
