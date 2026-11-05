@@ -4,6 +4,18 @@ self-hosted-runner:
   # GitHub-hosted label that actionlint < 1.7.8 does not know yet
   labels:
     - macos-15-intel
+    # ADR 0001 self-hosted runner pools (deployment/gha-runners/runner-pools.yaml)
+    - al2023-x64-m5-4xlarge-docker-host
+    - al2023-arm64-m6g-4xlarge-docker-host
+    - windows2019-x64-m5-4xlarge-docker-host
+    - windows2019-x64-m5-4xlarge-docker-builder
+    - ubuntu2404-x64-m5-2xlarge-docker-builder
+    - al2023-x64-c5-4xlarge-single-host
+    - al2023-arm64-c6g-4xlarge-single-host
+    - al2023-x64-m5-2xlarge-benchmark-test
+    - al2023-x64-m5-2xlarge-vector-benchmark-test
+    - macos14-x64-mac1
+    - macos14-arm64-mac2
 paths:
   .github/workflows/osd-increment-plugin-versions.yml:
     ignore:

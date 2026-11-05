@@ -1,0 +1,108 @@
+---
+# Runner pools for ADR 0001 (docs/adr/0001-gha-runners-and-secrets.md), one per row of its label map.
+# `labels` is the full `runs-on` array; tests/tests_deployment checks it against the ADR table.
+# `id` is the short name used in AWS resource names (EventBridge/IAM names are capped at 64 chars).
+al2023-x64-m5-4xlarge-docker-host:
+  id: al2023-x64-dhost
+  jenkins_label: AL2023-X64-M54xlarge-Docker-Host
+  os: linux
+  arch: x64
+  labels: [self-hosted, linux, x64, al2023-x64-m5-4xlarge-docker-host]
+  instance_type: m5.4xlarge
+  max_runners: 40
+  volume_size_gb: 200
+al2023-arm64-m6g-4xlarge-docker-host:
+  id: al2023-arm64-dhost
+  jenkins_label: AL2023-Arm64-M6g4xlarge-Docker-Host
+  os: linux
+  arch: arm64
+  labels: [self-hosted, linux, arm64, al2023-arm64-m6g-4xlarge-docker-host]
+  instance_type: m6g.4xlarge
+  max_runners: 20
+  volume_size_gb: 200
+windows2019-x64-m5-4xlarge-docker-host:
+  id: win2019-x64-dhost
+  jenkins_label: Windows2019-X64-M54xlarge-Docker-Host
+  os: windows
+  arch: x64
+  labels: [self-hosted, windows, x64, windows2019-x64-m5-4xlarge-docker-host]
+  instance_type: m5.4xlarge
+  max_runners: 10
+  volume_size_gb: 300
+windows2019-x64-m5-4xlarge-docker-builder:
+  id: win2019-x64-dbuild
+  jenkins_label: Windows2019-X64-M54xlarge-Docker-Builder
+  os: windows
+  arch: x64
+  labels: [self-hosted, windows, x64, windows2019-x64-m5-4xlarge-docker-builder]
+  instance_type: m5.4xlarge
+  max_runners: 2
+  volume_size_gb: 300
+ubuntu2404-x64-m5-2xlarge-docker-builder:
+  id: ubuntu2404-x64-dbuild
+  jenkins_label: Ubuntu2404-X64-M52xlarge-Docker-Builder
+  os: linux
+  arch: x64
+  labels: [self-hosted, linux, x64, ubuntu2404-x64-m5-2xlarge-docker-builder]
+  instance_type: m5.2xlarge
+  max_runners: 4
+  volume_size_gb: 200
+  run_as: ubuntu
+al2023-x64-c5-4xlarge-single-host:
+  id: al2023-x64-single
+  jenkins_label: AL2023-X64-C54xlarge-Single-Host
+  os: linux
+  arch: x64
+  labels: [self-hosted, linux, x64, al2023-x64-c5-4xlarge-single-host]
+  instance_type: c5.4xlarge
+  max_runners: 10
+  volume_size_gb: 200
+al2023-arm64-c6g-4xlarge-single-host:
+  id: al2023-arm64-single
+  jenkins_label: AL2023-Arm64-C6g4xlarge-Single-Host
+  os: linux
+  arch: arm64
+  labels: [self-hosted, linux, arm64, al2023-arm64-c6g-4xlarge-single-host]
+  instance_type: c6g.4xlarge
+  max_runners: 10
+  volume_size_gb: 200
+al2023-x64-m5-2xlarge-benchmark-test:
+  id: al2023-x64-bench
+  jenkins_label: AL2023-X64-M52xlarge-Benchmark-Test
+  os: linux
+  arch: x64
+  labels: [self-hosted, linux, x64, al2023-x64-m5-2xlarge-benchmark-test]
+  instance_type: m5.2xlarge
+  max_runners: 20
+  volume_size_gb: 100
+  network: benchmark
+al2023-x64-m5-2xlarge-vector-benchmark-test:
+  id: al2023-x64-vbench
+  jenkins_label: AL2023-X64-M52xlarge-Vector-Benchmark-Test
+  os: linux
+  arch: x64
+  labels: [self-hosted, linux, x64, al2023-x64-m5-2xlarge-vector-benchmark-test]
+  instance_type: m5.2xlarge
+  max_runners: 10
+  volume_size_gb: 100
+  network: benchmark
+macos14-x64-mac1:
+  id: macos14-x64
+  jenkins_label: MacOS14-X64-Mac1-Multi-Host
+  os: osx
+  arch: x64
+  labels: [self-hosted, macos, x64, macos14-x64-mac1]
+  instance_type: mac1.metal
+  max_runners: 1
+  volume_size_gb: 200
+  run_as: ec2-user
+macos14-arm64-mac2:
+  id: macos14-arm64
+  jenkins_label: MacOS14-ARM64-Mac2-Multi-Host
+  os: osx
+  arch: arm64
+  labels: [self-hosted, macos, arm64, macos14-arm64-mac2]
+  instance_type: mac2.metal
+  max_runners: 1
+  volume_size_gb: 200
+  run_as: ec2-user
