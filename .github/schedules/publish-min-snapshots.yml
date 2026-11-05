@@ -1,0 +1,22 @@
+# parameterizedCron entries of jenkins/opensearch/publish-min-snapshots.jenkinsfile (`H */4 * * *` per version),
+# read by .github/scripts/scheduled_builds.py for .github/workflows/publish-min-snapshots.yml. Every cron here must
+# also be listed under on.schedule in that workflow, and every active OpenSearch input manifest under manifests/
+# needs an entry (tests/tests_github_scripts/test_scheduled_builds.py checks both). 3.8.0 and 2.19.6 are released
+# (tag refs) but Jenkins kept publishing their snapshots, so they stay.
+---
+entries:
+  - cron: 37 */4 * * *
+    params:
+      INPUT_MANIFEST: 3.10.0/opensearch-3.10.0.yml
+  - cron: 37 */4 * * *
+    params:
+      INPUT_MANIFEST: 3.9.0/opensearch-3.9.0.yml
+  - cron: 37 */4 * * *
+    params:
+      INPUT_MANIFEST: 3.8.1/opensearch-3.8.1.yml
+  - cron: 37 */4 * * *
+    params:
+      INPUT_MANIFEST: 3.8.0/opensearch-3.8.0.yml
+  - cron: 37 */4 * * *
+    params:
+      INPUT_MANIFEST: 2.19.6/opensearch-2.19.6.yml

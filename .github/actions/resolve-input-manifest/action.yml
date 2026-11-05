@@ -12,6 +12,10 @@ inputs:
       Input manifest, either relative to manifests/ as the Jenkins INPUT_MANIFEST parameter was
       (e.g. "3.9.0/opensearch-3.9.0.yml") or with the manifests/ prefix. It must resolve to a file under manifests/.
     required: true
+  manifests-dir:
+    description: 'Folder the input manifest lives in: manifests, or feature-manifests for feature builds'
+    required: false
+    default: 'manifests'
   checkout:
     description: >-
       Check out the repository into `path` first. Set to 'false' when the job already checked out the ref it wants
@@ -95,19 +99,24 @@ runs:
       env:
         CHECKOUT_PATH: ${{ inputs.path }}
         INPUT_MANIFEST: ${{ inputs.input-manifest }}
+        MANIFESTS_DIR: ${{ inputs.manifests-dir }}
       run: |
         set -euo pipefail
+        case "${MANIFESTS_DIR}" in
+          manifests|feature-manifests) ;;
+          *) echo "::error::manifests-dir must be manifests or feature-manifests, got '${MANIFESTS_DIR}'."; exit 1 ;;
+        esac
         ROOT=$(cd "${GITHUB_WORKSPACE}/${CHECKOUT_PATH}" && pwd -P)
         RELATIVE="${INPUT_MANIFEST#./}"
-        RELATIVE="${RELATIVE#manifests/}"
-        if [ -z "${RELATIVE}" ] || [ ! -f "${ROOT}/manifests/${RELATIVE}" ]; then
-          echo "::error::Input manifest '${INPUT_MANIFEST}' not found under ${CHECKOUT_PATH}/manifests/."
+        RELATIVE="${RELATIVE#"${MANIFESTS_DIR}/"}"
+        if [ -z "${RELATIVE}" ] || [ ! -f "${ROOT}/${MANIFESTS_DIR}/${RELATIVE}" ]; then
+          echo "::error::Input manifest '${INPUT_MANIFEST}' not found under ${CHECKOUT_PATH}/${MANIFESTS_DIR}/."
           exit 1
         fi
-        FILE=$(realpath "${ROOT}/manifests/${RELATIVE}")
+        FILE=$(realpath "${ROOT}/${MANIFESTS_DIR}/${RELATIVE}")
         case "${FILE}" in
-          "${ROOT}/manifests/"*) ;;
-          *) echo "::error::Input manifest '${INPUT_MANIFEST}' resolves outside manifests/."; exit 1 ;;
+          "${ROOT}/${MANIFESTS_DIR}/"*) ;;
+          *) echo "::error::Input manifest '${INPUT_MANIFEST}' resolves outside ${MANIFESTS_DIR}/."; exit 1 ;;
         esac
         {
           echo "manifest-path=${FILE#"${ROOT}/"}"

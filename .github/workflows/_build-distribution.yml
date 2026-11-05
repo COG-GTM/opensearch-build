@@ -122,6 +122,18 @@ on:
         required: false
         default: 'https://ci.opensearch.org/ci/dbc'
         type: string
+      manifests-dir:
+        description: 'Folder input-manifest is relative to: manifests, or feature-manifests (feature-build-opensearch)'
+        required: false
+        default: 'manifests'
+        type: string
+      build-feature:
+        description: >-
+          buildAssembleUpload(buildFeature): replaces the version segment of the artifact and index roots and skips
+          the release-candidate copy (feature-build-opensearch). Empty for distribution builds.
+        required: false
+        default: ''
+        type: string
     secrets:
       AWS_ROLE_ARTIFACTS:
         required: false
@@ -209,6 +221,7 @@ jobs:
           PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
           BUILD_USER: ${{ inputs.build-user }}
           ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix }}
+          BUILD_FEATURE: ${{ inputs.build-feature }}
         run: |
           set -euo pipefail
           [ "${DISTRIBUTION}" = windows ] && DISTRIBUTION=zip
@@ -229,6 +242,7 @@ jobs:
           check artifact-suffix "${ARTIFACT_SUFFIX}" '^[A-Za-z0-9._-]*$'
           check public-artifact-url "${PUBLIC_ARTIFACT_URL}" '^https://[A-Za-z0-9._~/-]+$'
           check build-user "${BUILD_USER}" '^([a-z_][a-z0-9_-]*)?$'
+          check build-feature "${BUILD_FEATURE}" '^[A-Za-z0-9._-]*$'
           case "${PLATFORM}-${DISTRIBUTION}" in
             linux-tar|linux-rpm|linux-deb|windows-zip|darwin-tar) ;;
             *) echo "::error::${DISTRIBUTION} is not built on ${PLATFORM} (Jenkins: linux tar/rpm/deb, windows zip, darwin tar)."; exit 1 ;;
@@ -251,6 +265,7 @@ jobs:
         uses: ./.github/actions/resolve-input-manifest
         with:
           input-manifest: ${{ inputs.input-manifest }}
+          manifests-dir: ${{ inputs.manifests-dir }}
           checkout: 'false'
           platform: ${{ inputs.platform }}
           distribution: ${{ steps.params.outputs.distribution }}
@@ -478,6 +493,7 @@ jobs:
           distribution: ${{ needs.setup.outputs.distribution }}
           filename: ${{ needs.setup.outputs.filename }}
           job-name: ${{ inputs.job-name }}
+          build-feature: ${{ inputs.build-feature }}
           build-number: ${{ github.run_id }}
           public-artifact-url: ${{ inputs.public-artifact-url }}
           upload: ${{ steps.creds.outputs.upload }}
@@ -570,6 +586,7 @@ jobs:
           distribution: ${{ needs.setup.outputs.distribution }}
           filename: ${{ needs.setup.outputs.filename }}
           job-name: ${{ inputs.job-name }}
+          build-feature: ${{ inputs.build-feature }}
           build-number: ${{ github.run_id }}
           public-artifact-url: ${{ inputs.public-artifact-url }}
           upload: ${{ steps.creds.outputs.upload }}
@@ -601,11 +618,11 @@ jobs:
           if-no-files-found: warn
 
   release-candidate:
-    # uploadArtifacts.groovy: when buildFeature == build.version (always for distribution builds) the core min artifact
+    # uploadArtifacts.groovy: when buildFeature == build.version (always for distribution builds, never for feature builds) the core min artifact
     # and the bundle are copied to release-candidates/{core,bundle}/<filename>/<version>/ with the promotion role.
     name: release-candidate-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
     needs: [setup, build, assemble]
-    if: ${{ always() && inputs.release-candidate-upload && inputs.upload && needs.build.outputs.uploaded != 'false' && (needs.assemble.result == 'success' || (needs.assemble.result == 'skipped' && needs.build.result == 'success')) }}
+    if: ${{ always() && inputs.release-candidate-upload && inputs.upload && inputs.build-feature == '' && needs.build.outputs.uploaded != 'false' && (needs.assemble.result == 'success' || (needs.assemble.result == 'skipped' && needs.build.result == 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     environment: release

@@ -24,6 +24,8 @@
 # pull_request runs are the evidence build: OpenSearch min + bundle of the current dev manifest for linux x64 tar on a
 # GitHub-hosted runner with every upload off, diffed against the latest Jenkins build of the same version.
 name: distribution-build-opensearch
+# check-for-build.yml finds the run it dispatched by this title
+run-name: distribution-build-opensearch ${{ inputs.INPUT_MANIFEST || 'dry run' }}
 
 on:
   workflow_dispatch:

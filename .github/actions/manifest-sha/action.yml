@@ -1,0 +1,194 @@
+---
+name: 'Manifest SHA'
+description: >-
+  getManifestSHA() and buildUploadManifestSHA() (jenkins@12.0.0). check: `./build.sh <manifest> --lock` writes
+  <manifest>.lock with every branch ref resolved to a commit, the sha1 of that file names
+  <job-name>/<version>/shas/<sha>.yml, and `exists` says whether that object is already in the artifact bucket.
+  record: stores the lock under that path after a successful build, reusing the lock of the check step (Jenkins
+  re-locked here, which could record a newer SHA than the one it built). Without AWS_ROLE_ARTIFACTS /
+  ARTIFACT_BUCKET_NAME the SHAs live in the GitHub Actions cache of the repository instead (a dry-run store that
+  keeps the skip / build decision working until the OIDC role and bucket exist).
+
+inputs:
+  manifest-path:
+    description: 'Manifest path from the repository root, e.g. manifests/3.9.0/opensearch-3.9.0.yml'
+    required: true
+  job-name:
+    description: 'Jenkins job name, the first segment of the SHA path, e.g. distribution-build-opensearch'
+    required: true
+  mode:
+    description: 'check or record'
+    required: false
+    default: 'check'
+  role-to-assume:
+    description: 'AWS_ROLE_ARTIFACTS role ARN (Jenkins used opensearch-bundle); empty uses the Actions cache'
+    required: false
+    default: ''
+  bucket:
+    description: 'ARTIFACT_BUCKET_NAME; empty uses the Actions cache'
+    required: false
+    default: ''
+  aws-region:
+    description: 'AWS region'
+    required: false
+    default: 'us-east-1'
+
+outputs:
+  sha:
+    description: 'sha1 of the lock file'
+    value: ${{ steps.sha.outputs.sha }}
+  lock:
+    description: 'Path of the lock file'
+    value: ${{ steps.sha.outputs.lock }}
+  path:
+    description: 'SHA path, <job-name>/<version>/shas/<sha>.yml'
+    value: ${{ steps.sha.outputs.path }}
+  exists:
+    description: '''true'' when the SHA path is already stored (check mode)'
+    value: ${{ steps.exists.outputs.exists }}
+  store:
+    description: 's3 or actions-cache'
+    value: ${{ steps.store.outputs.store }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check the inputs
+      shell: bash
+      env:
+        MANIFEST_PATH: ${{ inputs.manifest-path }}
+        JOB_NAME: ${{ inputs.job-name }}
+        MODE: ${{ inputs.mode }}
+      run: |
+        set -euo pipefail
+        [[ "${MANIFEST_PATH}" =~ ^(manifests|feature-manifests)/[A-Za-z0-9._/-]+\.yml$ && "${MANIFEST_PATH}" != *..* ]] \
+          || { echo "::error::manifest-path is not valid: '${MANIFEST_PATH}'"; exit 1; }
+        [[ "${JOB_NAME}" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::job-name is not valid: '${JOB_NAME}'"; exit 1; }
+        case "${MODE}" in check|record) ;; *) echo "::error::mode must be check or record, got '${MODE}'"; exit 1 ;; esac
+        if [ "${MODE}" = record ] && [ ! -f "${MANIFEST_PATH}.lock" ]; then
+          echo "::error::${MANIFEST_PATH}.lock not found; run this action with mode: check first in the same job."
+          exit 1
+        fi
+
+    - name: Set up Python
+      if: ${{ inputs.mode == 'check' }}
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+      with:
+        python-version: '3.9'
+
+    - name: Lock the manifest
+      # buildManifest(lock: true): ./build.sh <manifest> --lock
+      if: ${{ inputs.mode == 'check' }}
+      shell: bash
+      env:
+        MANIFEST_PATH: ${{ inputs.manifest-path }}
+      run: |
+        set -euo pipefail
+        python -m pip install --quiet --upgrade pipenv==2023.6.12
+        rm -f "${MANIFEST_PATH}.lock"
+        ./build.sh "${MANIFEST_PATH}" --lock
+        echo "Manifest lock: ${MANIFEST_PATH}.lock"
+        cat "${MANIFEST_PATH}.lock"
+
+    - name: Compute the manifest SHA
+      id: sha
+      shell: bash
+      env:
+        MANIFEST_PATH: ${{ inputs.manifest-path }}
+        JOB_NAME: ${{ inputs.job-name }}
+      run: |
+        set -euo pipefail
+        bash "${GITHUB_ACTION_PATH}/../../scripts/ensure-pyyaml.sh"
+        python3 "${GITHUB_ACTION_PATH}/../../scripts/scheduled_builds.py" manifest-sha --lock "${MANIFEST_PATH}.lock" --job-name "${JOB_NAME}"
+        echo "lock=${MANIFEST_PATH}.lock" >> "$GITHUB_OUTPUT"
+
+    - name: Pick the SHA store
+      id: store
+      shell: bash
+      env:
+        ROLE: ${{ inputs.role-to-assume }}
+        BUCKET: ${{ inputs.bucket }}
+      run: |
+        set -euo pipefail
+        if [ -n "${ROLE}" ] && [ -n "${BUCKET}" ]; then
+          echo "store=s3" >> "$GITHUB_OUTPUT"
+        else
+          echo "::notice::Manifest SHAs are kept in the GitHub Actions cache: AWS_ROLE_ARTIFACTS / ARTIFACT_BUCKET_NAME are not configured, so the artifact bucket's <job>/<version>/shas/ cannot be read or written."
+          echo "store=actions-cache" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Assume the artifacts role
+      if: ${{ steps.store.outputs.store == 's3' }}
+      uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
+      with:
+        role-to-assume: ${{ inputs.role-to-assume }}
+        role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}
+        role-duration-seconds: 900
+        audience: sts.amazonaws.com
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Look up the SHA in S3
+      # s3DoesObjectExist(bucket: ARTIFACT_BUCKET_NAME, path: manifestSHAPath)
+      id: s3-exists
+      if: ${{ inputs.mode == 'check' && steps.store.outputs.store == 's3' }}
+      shell: bash
+      env:
+        BUCKET: ${{ inputs.bucket }}
+        KEY: ${{ steps.sha.outputs.path }}
+      run: |
+        set -euo pipefail
+        if ERR=$(aws s3api head-object --bucket "${BUCKET}" --key "${KEY}" 2>&1 >/dev/null); then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+        elif grep -qE '\((404|NoSuchKey|Not Found)\)|Not Found' <<< "${ERR}"; then
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "::error::Could not look up s3://${BUCKET}/${KEY}: ${ERR}"
+          exit 1
+        fi
+
+    - name: Look up the SHA in the Actions cache
+      id: cache-exists
+      if: ${{ inputs.mode == 'check' && steps.store.outputs.store == 'actions-cache' }}
+      uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+      with:
+        key: manifest-sha/${{ steps.sha.outputs.path }}
+        path: ${{ steps.sha.outputs.lock }}
+        lookup-only: true
+
+    - name: Report
+      id: exists
+      if: ${{ inputs.mode == 'check' }}
+      shell: bash
+      env:
+        S3_EXISTS: ${{ steps.s3-exists.outputs.exists }}
+        CACHE_HIT: ${{ steps.cache-exists.outputs.cache-hit }}
+        SHA: ${{ steps.sha.outputs.sha }}
+        SHA_PATH: ${{ steps.sha.outputs.path }}
+        STORE: ${{ steps.store.outputs.store }}
+      run: |
+        set -euo pipefail
+        EXISTS=false
+        if [ "${S3_EXISTS}" = true ] || [ "${CACHE_HIT}" = true ]; then EXISTS=true; fi
+        echo "Manifest SHA: ${SHA}"
+        echo "Manifest SHA path: ${SHA_PATH} (${STORE})"
+        echo "Manifest SHA exists: ${EXISTS}"
+        echo "exists=${EXISTS}" >> "$GITHUB_OUTPUT"
+
+    - name: Record the SHA in S3
+      # buildUploadManifestSHA: s3Upload(bucket: ARTIFACT_BUCKET_NAME, file: sha.lock, path: sha.path)
+      if: ${{ inputs.mode == 'record' && steps.store.outputs.store == 's3' }}
+      shell: bash
+      env:
+        BUCKET: ${{ inputs.bucket }}
+        KEY: ${{ steps.sha.outputs.path }}
+        LOCK: ${{ steps.sha.outputs.lock }}
+      run: |
+        set -euo pipefail
+        aws s3 cp --no-progress "${LOCK}" "s3://${BUCKET}/${KEY}"
+
+    - name: Record the SHA in the Actions cache
+      if: ${{ inputs.mode == 'record' && steps.store.outputs.store == 'actions-cache' }}
+      uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+      with:
+        key: manifest-sha/${{ steps.sha.outputs.path }}
+        path: ${{ steps.sha.outputs.lock }}

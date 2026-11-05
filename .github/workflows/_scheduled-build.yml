@@ -1,0 +1,152 @@
+---
+# Shared core of the scheduled build workflows: check-for-build.yml, publish-min-snapshots.yml and
+# feature-build-opensearch.yml (ports of jenkins/check-for-build.jenkinsfile and the parameterizedCron triggers of
+# jenkins/opensearch/publish-min-snapshots.jenkinsfile / feature-build.jenkinsfile).
+#
+#   parameterizedCron entries           -> .github/schedules/<workflow>.yml; setup picks the entries of the cron
+#                                          that fired (or the caller's workflow_dispatch inputs) as a static matrix
+#   lock(resource: ..., skipIfLocked)   -> job concurrency keyed by manifest and job; GitHub queues one pending run
+#                                          instead of skipping, and the queued run's SHA check then finds the SHA the
+#                                          running build recorded (or retries a build that failed)
+#   getManifestSHA                      -> .github/actions/manifest-sha (check)
+#   build job: <target>, wait: true     -> .github/scripts/dispatch_and_watch.sh (`gh workflow run` + wait)
+#   buildUploadManifestSHA              -> .github/actions/manifest-sha (record), after the build succeeded
+#
+# Scheduled runs only check the SHAs until the repository variable SCHEDULED_BUILDS_LIVE is 'true' (the build
+# workflows still default to the ADR 0001 runner pools and the artifact role). workflow_dispatch runs always build a
+# changed manifest; pull requests check every schedule entry without dispatching anything.
+name: _scheduled-build
+
+on:
+  workflow_call:
+    inputs:
+      workflow:
+        description: 'check-for-build, publish-min-snapshots or feature-build-opensearch (.github/schedules/<workflow>.yml)'
+        required: true
+        type: string
+      data:
+        description: 'JSON of the caller''s workflow_dispatch inputs (toJSON(inputs)); ignored for schedule and pull_request'
+        required: false
+        default: '{}'
+        type: string
+    secrets:
+      AWS_ROLE_ARTIFACTS:
+        required: false
+      ARTIFACT_BUCKET_NAME:
+        required: false
+
+permissions: {}
+
+jobs:
+  setup:
+    name: resolve-${{ inputs.workflow }}-entries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      live: ${{ steps.resolve.outputs.live }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve the schedule entries
+        id: resolve
+        env:
+          WORKFLOW: ${{ inputs.workflow }}
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          DATA: ${{ inputs.data }}
+          LIVE_VAR: ${{ vars.SCHEDULED_BUILDS_LIVE }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/ensure-pyyaml.sh
+          python3 .github/scripts/scheduled_builds.py matrix --workflow "${WORKFLOW}" --event "${EVENT}" \
+            --schedule "${SCHEDULE}" --data "${DATA}" --live-var "${LIVE_VAR}"
+
+  check:
+    name: trigger-build-if-needed (${{ matrix.manifest-path }})
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    runs-on: ubuntu-24.04
+    # check-for-build.jenkinsfile: timeout(time: 5, unit: 'HOURS'), spent waiting for the triggered build
+    timeout-minutes: 300
+    concurrency:
+      group: ${{ inputs.workflow }}-${{ matrix.manifest-path }}-${{ matrix.job-name }}${{ github.event_name == 'pull_request' && format('-pr-{0}', github.event.pull_request.number) || '' }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check the manifest SHA
+        id: sha
+        uses: ./.github/actions/manifest-sha
+        with:
+          manifest-path: ${{ matrix.manifest-path }}
+          job-name: ${{ matrix.job-name }}
+          mode: check
+          role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+          bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+
+      - name: Decide
+        id: decide
+        env:
+          EXISTS: ${{ steps.sha.outputs.exists }}
+          LIVE: ${{ needs.setup.outputs.live }}
+          SHA_PATH: ${{ steps.sha.outputs.path }}
+          TARGET: ${{ matrix.target }}
+          INPUTS: ${{ matrix.inputs }}
+          EVENT: ${{ github.event_name }}
+          MANIFEST_PATH: ${{ matrix.manifest-path }}
+          STORE: ${{ steps.sha.outputs.store }}
+        run: |
+          set -euo pipefail
+          if [ "${EXISTS}" = true ]; then
+            echo "::notice::Skipping, ${SHA_PATH} already exists."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          elif [ "${LIVE}" != true ]; then
+            if [ "${EVENT}" = schedule ]; then
+              WHY="the repository variable SCHEDULED_BUILDS_LIVE is not 'true'"
+            else
+              WHY="pull request dry run"
+            fi
+            echo "::notice::${SHA_PATH} is new; would trigger ${TARGET} with ${INPUTS} (not dispatched: ${WHY})."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "${SHA_PATH} is new; triggering ${TARGET}."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "### ${TARGET%.yml} \`${MANIFEST_PATH}\`"
+            echo "- SHA: \`${SHA_PATH}\` (${STORE})"
+            echo "- exists: ${EXISTS}, live: ${LIVE}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Trigger the build and wait for it
+        if: ${{ steps.decide.outputs.build == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target }}
+          REF: ${{ github.ref_name }}
+          TITLE: ${{ matrix.title }}
+          INPUTS: ${{ matrix.inputs }}
+        run: bash .github/scripts/dispatch_and_watch.sh "${TARGET}" "${REF}" "${TITLE}" "${INPUTS}"
+
+      - name: Record the manifest SHA
+        if: ${{ steps.decide.outputs.build == 'true' }}
+        uses: ./.github/actions/manifest-sha
+        with:
+          manifest-path: ${{ matrix.manifest-path }}
+          job-name: ${{ matrix.job-name }}
+          mode: record
+          role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+          bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}

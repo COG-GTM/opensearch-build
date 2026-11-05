@@ -1,0 +1,9 @@
+# parameterizedCron entries of jenkins/opensearch/feature-build.jenkinsfile (`H */4 * * *`), read by
+# .github/scripts/scheduled_builds.py for .github/workflows/feature-build-opensearch.yml. INPUT_MANIFEST is relative
+# to feature-manifests/ and its first segment is the feature name. Every cron here must also be listed under
+# on.schedule in that workflow (tests/tests_github_scripts/test_scheduled_builds.py checks).
+---
+entries:
+  - cron: 47 */4 * * *
+    params:
+      INPUT_MANIFEST: feature-datafusion/opensearch-3.9.0.yml

@@ -1,0 +1,195 @@
+---
+# GitHub Actions port of jenkins/opensearch/feature-build.jenkinsfile (Jenkins job `feature-build-opensearch`): build,
+# assemble and upload the OpenSearch bundle of a feature-manifests/<feature>/opensearch-<version>.yml manifest for
+# linux x64 and arm64 tar through _build-distribution.yml, under feature-build-opensearch/<feature>/<build>/... with
+# the feature name in place of the version (buildAssembleUpload(buildFeature)), and point index.json at it.
+#
+#   stage('verify-parameters')     -> verify-parameters
+#   stage('build-and-test-linux-*) -> build (matrix of the two tar cells; Jenkins checked BUILD_PLATFORM /
+#                                     BUILD_DISTRIBUTION with contains('linux') / contains('tar'))
+#   post { success/unstable }      -> update-latest-url of _build-distribution.yml (uploadIndexFile)
+#   parameterizedCron              -> .github/schedules/feature-build-opensearch.yml; a scheduled run (or a dispatch
+#                                     with CHECK_FOR_CHANGES) runs only the `scheduled` job (_scheduled-build.yml),
+#                                     which skips a manifest whose SHA is recorded under
+#                                     feature-build-opensearch/<version>/shas/ and otherwise dispatches this workflow
+#
+# Not ported, as in distribution-build-opensearch.yml: INCREMENTAL / PREVIOUS_BUILD_ID (every build is a full build).
+# Jenkins BUILD_NUMBER is github.run_id. RUNS_ON is not a Jenkins parameter: a JSON runner label array overriding the
+# ADR 0001 pools for both cells.
+name: feature-build-opensearch
+
+run-name: >-
+  ${{ github.event_name == 'schedule' && format('feature-build-opensearch scheduled {0}', github.event.schedule)
+  || format('feature-build-opensearch {0}{1}', inputs.INPUT_MANIFEST, inputs.CHECK_FOR_CHANGES && ' (check for changes)' || '') }}
+
+on:
+  schedule:
+    # one cron per distinct parameterizedCron expression in .github/schedules/feature-build-opensearch.yml
+    - cron: '47 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      INPUT_MANIFEST:
+        description: '<Required> Input manifest under the feature-manifests folder, e.g. feature-datafusion/opensearch-3.9.0.yml.'
+        required: true
+        type: string
+      COMPONENT_NAME:
+        description: '<Optional> One or more component names (e.g. OpenSearch common-utils); empty builds everything in the INPUT_MANIFEST.'
+        required: false
+        default: ''
+        type: string
+      BUILD_PLATFORM:
+        description: '<Optional> Build selected platform: linux, windows (only linux is built), separated by spaces.'
+        required: false
+        default: 'linux'
+        type: string
+      BUILD_DISTRIBUTION:
+        description: '<Optional> Build selected distribution: tar, rpm, deb, zip (only tar is built), separated by spaces.'
+        required: false
+        default: 'tar'
+        type: string
+      UPDATE_LATEST_URL:
+        description: '<Optional> Update latest url so /latest/ is pointed to this build'
+        required: false
+        default: true
+        type: boolean
+      CONTINUE_ON_ERROR:
+        description: '<Optional> Continue building the distribution even if a one or more component fails'
+        required: false
+        default: false
+        type: boolean
+      SKIP_ARTIFACT_CHECK:
+        description: '<Optional> Skip Artifact Check upon completing the build of a component and plugin'
+        required: false
+        default: true
+        type: boolean
+      RUNS_ON:
+        description: '<Optional> JSON runner label array for both cells instead of the ADR 0001 pools, e.g. ["ubuntu-24.04"].'
+        required: false
+        default: ''
+        type: string
+      CHECK_FOR_CHANGES:
+        description: '<Optional> Build only when the manifest SHA changed since the last successful build, as the schedule does.'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  scheduled:
+    if: ${{ github.event_name == 'schedule' || inputs.CHECK_FOR_CHANGES }}
+    uses: ./.github/workflows/_scheduled-build.yml
+    permissions:
+      contents: read
+      actions: write
+      id-token: write
+    with:
+      workflow: feature-build-opensearch
+      data: ${{ toJSON(inputs) }}
+    secrets:
+      AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+
+  verify-parameters:
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.CHECK_FOR_CHANGES }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.params.outputs.matrix }}
+      build-count: ${{ steps.params.outputs.build-count }}
+      build-feature: ${{ steps.params.outputs.build-feature }}
+      runs-on: ${{ steps.params.outputs.runs-on }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify the parameters and build the matrix
+        id: params
+        env:
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
+          COMPONENT_NAME: ${{ inputs.COMPONENT_NAME }}
+          BUILD_PLATFORM: ${{ inputs.BUILD_PLATFORM }}
+          BUILD_DISTRIBUTION: ${{ inputs.BUILD_DISTRIBUTION }}
+          RUNS_ON: ${{ inputs.RUNS_ON }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee -a "$GITHUB_OUTPUT"
+          import json, os, re, sys
+
+          env = os.environ
+
+          def fail(message):
+              print(f"::error::{message}", file=sys.stderr)
+              sys.exit(1)
+
+          manifest = env["INPUT_MANIFEST"].strip()
+          if not manifest or not re.fullmatch(r"[A-Za-z0-9._/-]+\.yml", manifest) or ".." in manifest or not os.path.isfile(f"feature-manifests/{manifest}"):
+              fail(f"Input manifest was not provided or not found at feature-manifests/{manifest}.")
+          feature = manifest.split("/")[0] if "/" in manifest else ""
+          if not feature:
+              fail("Your INPUT_MANIFEST entry should be formated as '<feature_name>/opensearch-<version>.yml'")
+          print(f"Feature Name: {feature}", file=sys.stderr)
+          if not re.fullmatch(r"[A-Za-z0-9 ._-]*", env["COMPONENT_NAME"]):
+              fail(f"COMPONENT_NAME is not valid: '{env['COMPONENT_NAME']}'")
+          # verifyParameterPlatformDistribution()
+          for name, allowed in (("BUILD_PLATFORM", "linux windows"), ("BUILD_DISTRIBUTION", "tar rpm deb zip")):
+              value = env[name].split()
+              if not value:
+                  fail(f"Missing parameter '{name}' (possible entries: {allowed}).")
+              for entry in value:
+                  if entry not in allowed.split():
+                      fail(f"Error parameter '{name}': {env[name]} (possible entries: {allowed}).")
+          runs_on = env["RUNS_ON"].strip()
+          if runs_on:
+              try:
+                  labels = json.loads(runs_on)
+              except ValueError:
+                  labels = None
+              if not (isinstance(labels, list) and labels and all(isinstance(l, str) and re.fullmatch(r"[A-Za-z0-9._-]+", l) for l in labels)):
+                  fail(f"RUNS_ON must be a JSON array of runner labels, got '{runs_on}'")
+              runs_on = json.dumps(labels, separators=(",", ":"))
+          cells = []
+          if "linux" in env["BUILD_PLATFORM"].split() and "tar" in env["BUILD_DISTRIBUTION"].split():
+              cells = [{"architecture": "x64"}, {"architecture": "arm64"}]
+          else:
+              print("::notice::feature-build only builds linux tar (x64 and arm64); nothing selected.", file=sys.stderr)
+          print("matrix=" + json.dumps({"include": cells}, separators=(",", ":")))
+          print(f"build-count={len(cells)}")
+          print(f"build-feature={feature}")
+          print(f"runs-on={runs_on}")
+          PY
+
+  build:
+    needs: verify-parameters
+    if: ${{ needs.verify-parameters.outputs.build-count != '0' }}
+    strategy:
+      # the Jenkins stages ran in `parallel { }` without failing their siblings
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.verify-parameters.outputs.matrix) }}
+    uses: ./.github/workflows/_build-distribution.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      input-manifest: ${{ inputs.INPUT_MANIFEST }}
+      manifests-dir: feature-manifests
+      build-feature: ${{ needs.verify-parameters.outputs.build-feature }}
+      platform: linux
+      architecture: ${{ matrix.architecture }}
+      distribution: tar
+      component-name: ${{ inputs.COMPONENT_NAME }}
+      job-name: feature-build-opensearch
+      continue-on-error: ${{ inputs.CONTINUE_ON_ERROR }}
+      skip-artifact-check: ${{ inputs.SKIP_ARTIFACT_CHECK }}
+      # buildManifest() default: no --parallel
+      parallel: ''
+      upload: true
+      update-latest-url: ${{ inputs.UPDATE_LATEST_URL }}
+      release-candidate-upload: false
+      runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
+    secrets:
+      AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}

@@ -6,10 +6,18 @@
 # -latest copies plus the build manifest under snapshots/core/<filename>/<version>/ in the production bucket, and for
 # linux x64 tar the signed core plugins under snapshots/plugins/<plugin>/<revision>/.
 #
-# distribution-build-opensearch.yml calls it (Jenkins `build job: 'publish-opensearch-min-snapshots'`). The Jenkins
-# parameterizedCron schedule (4 manifests every 4 hours) belongs to the scheduled-builds port (s4.4). When the
+# distribution-build-opensearch.yml calls it (Jenkins `build job: 'publish-opensearch-min-snapshots'`). When the
 # promotion role or bucket is not configured the publish job only prints the S3 keys it would write.
+#
+# The Jenkins parameterizedCron entries (H */4 * * * per version) live in .github/schedules/publish-min-snapshots.yml.
+# A scheduled run (or a workflow_dispatch with CHECK_FOR_CHANGES) only runs the `scheduled` job: _scheduled-build.yml
+# locks each manifest, skips it when its SHA is already recorded under publish-opensearch-min-snapshots/<version>/shas/,
+# otherwise dispatches this workflow for that manifest, waits for it and records the SHA.
 name: publish-min-snapshots
+
+run-name: >-
+  ${{ github.event_name == 'schedule' && format('publish-min-snapshots scheduled {0}', github.event.schedule)
+  || format('publish-min-snapshots {0}{1}', inputs.INPUT_MANIFEST, inputs.CHECK_FOR_CHANGES && ' (check for changes)' || '') }}
 
 on:
   workflow_call:
@@ -50,6 +58,14 @@ on:
         required: false
       SIGNER_CLIENT_SIGNED_BUCKET:
         required: false
+      # read only by the `scheduled` job (manifest SHA store), which never runs under workflow_call
+      AWS_ROLE_ARTIFACTS:
+        required: false
+      ARTIFACT_BUCKET_NAME:
+        required: false
+  schedule:
+    # one cron per distinct parameterizedCron expression in .github/schedules/publish-min-snapshots.yml
+    - cron: '37 */4 * * *'
   workflow_dispatch:
     inputs:
       INPUT_MANIFEST:
@@ -66,12 +82,33 @@ on:
         required: false
         default: true
         type: boolean
+      CHECK_FOR_CHANGES:
+        description: '<Optional> Build only when the manifest SHA changed since the last successful build, as the schedule does.'
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
 jobs:
+  scheduled:
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.CHECK_FOR_CHANGES) }}
+    uses: ./.github/workflows/_scheduled-build.yml
+    permissions:
+      contents: read
+      actions: write
+      id-token: write
+    with:
+      workflow: publish-min-snapshots
+      data: ${{ toJSON(inputs) }}
+    secrets:
+      AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+
   setup:
     name: detect-docker-images
+    # workflow_call from distribution-build-opensearch.yml, or a direct workflow_dispatch build
+    if: ${{ inputs.input-manifest || (github.event_name == 'workflow_dispatch' && !inputs.CHECK_FOR_CHANGES) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
