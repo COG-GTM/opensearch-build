@@ -439,10 +439,8 @@ class Chores:
         metrics = self.metrics_factory(str(manifests[0]["build"]["version"]), None)
         missing = []
         for component in [c for m in manifests for c in m.get("components", [])]:
-            exists = metrics.release_issue_exists(component["name"])
-            if exists is None:
-                raise ChoreError(f"Unable to read the release issue status of {component['name']} from metrics; not dispatching")
-            if not exists:
+            # As checkReleaseIssues.groovy: `!getReleaseIssueStatus(name)` (null on a failed/empty metrics read) counts as missing.
+            if not metrics.release_issue_exists(component["name"]):
                 missing.append(component["name"])
         echo(f"Components missing release issues: {missing}")
         if self.args.action == "create" and missing:
@@ -660,11 +658,16 @@ def push_url(repository: str) -> str:
     return f"https://x-access-token:{os.environ.get('GH_TOKEN', '')}@github.com/{repository}.git"
 
 
-def pr_base(github: GitHub, upstream: str, ref: str) -> str:
-    """PR base branch: the ref itself, or for a tag (released version) the repository default branch."""
-    if not ref.startswith("tags/"):
-        return ref.replace("refs/heads/", "")
-    return github.read("api", f"repos/{upstream}", "--jq", ".default_branch")
+def pr_base(ref: str) -> str:
+    """PR base, as Jenkins release-notes-generate: `gh pr create -B ${ref}` with the manifest/REF value verbatim.
+
+    Jenkins cannot handle a tag ref (`git fetch upstream tags/...` / `checkout upstream/tags/...` fail before the PR),
+    so a tag fails here too, before any write.
+    """
+    if ref.startswith("tags/"):
+        raise ChoreError(f"ref '{ref}' is a tag; Jenkins release-notes-generate opens the notes PR against the ref (-B {ref}), "
+                         "which must be a branch. Re-run with REF set to the release branch.")
+    return ref
 
 
 def notes_pr(args: argparse.Namespace, github: GitHub) -> None:
@@ -705,6 +708,13 @@ def notes_pr(args: argparse.Namespace, github: GitHub) -> None:
         if committed == generated:
             echo(f"No changes to commit for component {name}. Skipping PR creation.")
             return
+        try:
+            base = pr_base(ref)
+        except ChoreError as error:
+            if not args.dry_run:
+                raise
+            echo(f"[dry-run] would fail like Jenkins: {error}")
+            return
         os.makedirs(os.path.dirname(target), exist_ok=True)
         shutil.copyfile(generated_path, target)
         git(checkout, "checkout", "-b", branch, dry_run=args.dry_run, description="create branch")
@@ -712,7 +722,6 @@ def notes_pr(args: argparse.Namespace, github: GitHub) -> None:
         git(checkout, "-c", f"user.email={args.git_email}", "-c", f"user.name={args.git_name}", "commit", "-sm", f"Add release notes for {version}", dry_run=args.dry_run, description="commit")
         git(checkout, "push", push_url(upstream), f"HEAD:refs/heads/{branch}", "--force", dry_run=args.dry_run, description=f"push {branch} to {upstream}")
         existing = github.read("api", f"repos/{upstream}/pulls?head={UPSTREAM_OWNER}:{branch}&state=open", "--jq", ".[0].number")
-        base = pr_base(github, upstream, ref)
         if existing and existing != "null":
             github.write(f"update PR #{existing} in {upstream} with new release notes", "pr", "edit", existing, "--repo", upstream, "--body", body)
         else:

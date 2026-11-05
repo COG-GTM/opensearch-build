@@ -318,21 +318,15 @@ def test_release_owners_without_metrics_document_is_skipped(capsys: pytest.Captu
     assert "All components have release owner assigned." not in out
 
 
-def test_release_issues_metrics_failure_does_not_dispatch() -> None:
+def test_release_issues_metrics_failure_counts_as_missing_like_jenkins() -> None:
     gh = FakeGh()
     chore, _ = chores(["release-issues", "--action", "create", "--manifest", OS_MANIFEST], gh, FakeMetrics({release_chores.RELEASE_METRICS_INDEX: {"hits": {"hits": []}}}))
-    with pytest.raises(release_chores.ChoreError, match="not dispatching"):
-        chore.run("release-issues")
-    assert gh.calls == []
+    chore.run("release-issues")
+    assert [c[2] for c in gh.calls if c[:2] == ["workflow", "run"]] == ["os-release-issues.yml", "osd-release-issues.yml"]
 
 
-def test_pr_base_for_tag_refs() -> None:
-    gh = FakeGh({"api repos/o/r --jq .default_branch": "main"})
-    assert release_chores.pr_base(release_chores.GitHub(False, gh), "o/r", "tags/3.8.0.0") == "main"
-    assert release_chores.pr_base(release_chores.GitHub(False, FakeGh()), "o/r", "3.9") == "3.9"
-
-    def failing(args: List[str]) -> str:
-        raise release_chores.subprocess.CalledProcessError(1, "gh")
-
-    with pytest.raises(release_chores.subprocess.CalledProcessError):
-        release_chores.pr_base(release_chores.GitHub(False, failing), "o/r", "tags/3.8.0.0")
+def test_pr_base_matches_jenkins() -> None:
+    assert release_chores.pr_base("main") == "main"
+    assert release_chores.pr_base("3.9") == "3.9"
+    with pytest.raises(release_chores.ChoreError, match="is a tag"):
+        release_chores.pr_base("tags/3.8.0.0")
