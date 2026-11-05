@@ -1,0 +1,721 @@
+---
+# GitHub Actions port of jenkins/opensearch-dashboards/distribution-build.jenkinsfile (job
+# distribution-build-opensearch-dashboards). Each Jenkins build stage (linux x64/arm64 tar/rpm/deb, windows x64 zip)
+# is one cell of a matrix over the reusable _build-distribution.yml, with job-name distribution-build-opensearch-dashboards
+# so the S3 layout stays <job>/<version>/<run id>/<platform>/<arch>/<distribution>/{builds,dist} + index/.../index.json.
+# The Dashboards toolchain (nvm + node/yarn) comes from the manifest's ci-runner image (detectDockerAgent), exactly as in
+# Jenkins. The `build job:` triggers become:
+#   integ / bwc tests          -> `gh workflow run <INTEG|BWC_TEST_JOB_NAME>.yml` (Jenkins wait: false), skipped with a
+#                                 notice until the s4.3 workflow exists
+#   buildDockerImage           -> docker-build.yml -> docker-copy.yml (build-number tag) -> docker-scan.yml
+#   distribution-validation    -> validate-artifacts.yml, dispatched and watched (Jenkins wait/propagate: true)
+#   post always                -> publish-metrics (publishDistributionBuildResults) + notify-failure
+#                                 (updateBuildFailureIssues); AUTOCUT issues are only written once vars.AUTOCUT_LIVE is
+#                                 'true', so Jenkins and Actions never edit the same issues before cutover
+#   nightly playground         -> gh workflow run in opensearch-project/opensearch-devops (OPENSEARCH_CI_BOT_TOKEN)
+# INCREMENTAL / PREVIOUS_BUILD_ID are not ported: _build-distribution.yml has no incremental mode, so every run is a
+# full build (same S3 layout, longer build).
+# pull_request runs a dry run of the linux x64 tar bundle on a GitHub-hosted runner (no upload, no downstream triggers)
+# and diffs its build manifests and file list against the latest Jenkins build of the same version. The dry-run default
+# is 3.8.0: manifests/3.9.0 here still tracks OpenSearch-Dashboards `main`, which is 3.10.0 now, while Jenkins built
+# 3.9.0 from the `3.9` branches.
+name: distribution-build-opensearch-dashboards
+run-name: distribution-build-opensearch-dashboards ${{ inputs.INPUT_MANIFEST || 'dry run' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      INPUT_MANIFEST:
+        description: '<Required> Input manifest under the manifests folder, e.g. 2.0.0/opensearch-dashboards-2.0.0.yml.'
+        required: true
+        type: string
+      COMPONENT_NAME:
+        description: '<Optional> One or more component names (e.g. OpenSearch-Dashboards reportsDashboards ...) to build with --component, else build everything in the INPUT_MANIFEST.'
+        required: false
+        default: ''
+        type: string
+      TEST_MANIFEST:
+        description: '<Optional> Test manifest under the manifests folder, e.g. 2.0.0/opensearch-dashboards-2.0.0-test.yml.'
+        required: false
+        default: ''
+        type: string
+      BUILD_PLATFORM:
+        description: '<Optional> Build selected platform, choices include ''linux'', ''windows''. Can combine multiple platforms with space in between (docker is only available on linux)'
+        required: false
+        default: 'linux windows'
+        type: string
+      BUILD_DISTRIBUTION:
+        description: '<Optional> Build selected distribution, choices include ''tar'', ''rpm'', ''deb'', ''zip''. Can combine multiple distributions with space in between (docker is only available on tar)'
+        required: false
+        default: 'tar rpm deb zip'
+        type: string
+      TEST_PLATFORM:
+        description: '<Optional> Test selected platform, choices include ''linux'', ''windows''. Can combine multiple platforms with space in between'
+        required: false
+        default: ''
+        type: string
+      TEST_DISTRIBUTION:
+        description: '<Optional> Test selected distribution, choices include ''tar'', ''rpm'', ''deb'', ''zip''. Can combine multiple distributions with space in between'
+        required: false
+        default: ''
+        type: string
+      RC_NUMBER:
+        description: '<Optional> The RC build count. Default is 0 which means its not a Release Candidate.'
+        required: false
+        default: '0'
+        type: string
+      BUILD_DOCKER:
+        description: '<Optional> Build docker image or not with options. Defaults to build_docker.'
+        required: false
+        default: build_docker
+        type: choice
+        options:
+          - build_docker
+          - build_docker_with_build_number_tag
+          - do_not_build_docker
+      OPTIONS:
+        description: >-
+          <Optional> Space-separated packed values because workflow_dispatch allows at most ten inputs:
+          integ-test-job-name=<workflow, empty skips integ tests> bwc-test-job-name=<workflow, empty skips bwc tests>
+          update-latest-url=<true|false> update-github-issue=<true|false> continue-on-error=<true|false>
+          skip-artifact-check=<true|false> (the Jenkins INTEG_TEST_JOB_NAME, BWC_TEST_JOB_NAME, UPDATE_LATEST_URL,
+          UPDATE_GITHUB_ISSUE, CONTINUE_ON_ERROR and SKIP_ARTIFACT_CHECK parameters; unset keys keep these defaults)
+        required: false
+        default: >-
+          integ-test-job-name=integ-test-opensearch-dashboards bwc-test-job-name=bwc-test-opensearch-dashboards
+          update-latest-url=true update-github-issue=true continue-on-error=true skip-artifact-check=false
+        type: string
+  pull_request:
+    paths:
+      - .github/workflows/distribution-build-opensearch-dashboards.yml
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  JOB_NAME: distribution-build-opensearch-dashboards
+  JOB_NAME_OPENSEARCH: distribution-build-opensearch
+  PUBLIC_ARTIFACT_URL: https://ci.opensearch.org/ci/dbc
+  DRY_RUN_MANIFEST: 3.8.0/opensearch-dashboards-3.8.0.yml
+
+jobs:
+  verify-parameters:
+    name: verify-parameters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      dry-run: ${{ steps.verify.outputs.dry-run }}
+      input-manifest: ${{ steps.verify.outputs.input-manifest }}
+      matrix: ${{ steps.verify.outputs.matrix }}
+      runs-on: ${{ steps.verify.outputs.runs-on }}
+      rc-number: ${{ steps.verify.outputs.rc-number }}
+      build-docker: ${{ steps.verify.outputs.build-docker }}
+      component-name: ${{ steps.verify.outputs.component-name }}
+      test-manifest: ${{ steps.verify.outputs.test-manifest }}
+      integ-test-job-name: ${{ steps.verify.outputs.integ-test-job-name }}
+      bwc-test-job-name: ${{ steps.verify.outputs.bwc-test-job-name }}
+      update-latest-url: ${{ steps.verify.outputs.update-latest-url }}
+      update-github-issue: ${{ steps.verify.outputs.update-github-issue }}
+      continue-on-error: ${{ steps.verify.outputs.continue-on-error }}
+      skip-artifact-check: ${{ steps.verify.outputs.skip-artifact-check }}
+      revision: ${{ steps.manifest.outputs.revision }}
+      filename: ${{ steps.manifest.outputs.filename }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify the parameters
+        id: verify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
+          COMPONENT_NAME: ${{ inputs.COMPONENT_NAME }}
+          TEST_MANIFEST: ${{ inputs.TEST_MANIFEST }}
+          BUILD_PLATFORM: ${{ inputs.BUILD_PLATFORM }}
+          BUILD_DISTRIBUTION: ${{ inputs.BUILD_DISTRIBUTION }}
+          TEST_PLATFORM: ${{ inputs.TEST_PLATFORM }}
+          TEST_DISTRIBUTION: ${{ inputs.TEST_DISTRIBUTION }}
+          RC_NUMBER: ${{ inputs.RC_NUMBER }}
+          BUILD_DOCKER: ${{ inputs.BUILD_DOCKER }}
+          OPTIONS: ${{ inputs.OPTIONS }}
+        run: |
+          set -euo pipefail
+          INTEG_TEST_JOB_NAME=integ-test-opensearch-dashboards
+          BWC_TEST_JOB_NAME=bwc-test-opensearch-dashboards
+          UPDATE_LATEST_URL=true UPDATE_GITHUB_ISSUE=true CONTINUE_ON_ERROR=true SKIP_ARTIFACT_CHECK=false
+          for option in ${OPTIONS}; do
+            case "${option}" in
+              integ-test-job-name=*) INTEG_TEST_JOB_NAME="${option#*=}" ;;
+              bwc-test-job-name=*) BWC_TEST_JOB_NAME="${option#*=}" ;;
+              update-latest-url=true|update-latest-url=false) UPDATE_LATEST_URL="${option#*=}" ;;
+              update-github-issue=true|update-github-issue=false) UPDATE_GITHUB_ISSUE="${option#*=}" ;;
+              continue-on-error=true|continue-on-error=false) CONTINUE_ON_ERROR="${option#*=}" ;;
+              skip-artifact-check=true|skip-artifact-check=false) SKIP_ARTIFACT_CHECK="${option#*=}" ;;
+              *) echo "::error::OPTIONS contains an unknown or invalid value: '${option}'"; exit 1 ;;
+            esac
+          done
+          if [ "${EVENT_NAME}" = pull_request ]; then
+            # Dry run: the linux x64 tar bundle only, built on a GitHub-hosted runner without upload or triggers.
+            DRY_RUN=true
+            INPUT_MANIFEST="${DRY_RUN_MANIFEST}"
+            BUILD_PLATFORM=linux BUILD_DISTRIBUTION=tar RC_NUMBER=0 BUILD_DOCKER=do_not_build_docker
+            COMPONENT_NAME='' TEST_MANIFEST='' UPDATE_LATEST_URL=false UPDATE_GITHUB_ISSUE=true CONTINUE_ON_ERROR=true SKIP_ARTIFACT_CHECK=false
+            ARCHITECTURES=x64
+            RUNS_ON='["ubuntu-24.04"]'
+          else
+            DRY_RUN=false
+            ARCHITECTURES='x64 arm64'
+            RUNS_ON=''
+          fi
+          if [ -z "${INPUT_MANIFEST}" ] || [[ "${INPUT_MANIFEST}" == *..* ]] || [ ! -f "manifests/${INPUT_MANIFEST}" ]; then
+            echo "::error::Input manifest was not provided or not found at manifests/${INPUT_MANIFEST}."
+            exit 1
+          fi
+          if [ -n "${TEST_MANIFEST}" ] && { [[ "${TEST_MANIFEST}" == *..* ]] || [ ! -f "manifests/${TEST_MANIFEST}" ]; }; then
+            echo "::error::Test manifest not found at manifests/${TEST_MANIFEST}."
+            exit 1
+          fi
+          check() {
+            if ! [[ "$2" =~ $3 ]]; then
+              echo "::error::$1 is not valid: '$2'"
+              exit 1
+            fi
+          }
+          check RC_NUMBER "${RC_NUMBER}" '^[0-9]+$'
+          check COMPONENT_NAME "${COMPONENT_NAME}" '^[A-Za-z0-9 ._-]*$'
+          # Jenkins job names could carry a folder (Playground/...); workflows are flat files in this repository.
+          check INTEG_TEST_JOB_NAME "${INTEG_TEST_JOB_NAME}" '^[A-Za-z0-9._-]*$'
+          check BWC_TEST_JOB_NAME "${BWC_TEST_JOB_NAME}" '^[A-Za-z0-9._-]*$'
+          # verifyParameterPlatformDistribution: every token must be an allowed value; TEST_* only when set.
+          verify_tokens() {
+            local name="$1" value="$2" allowed="$3" token
+            for token in ${value}; do
+              if [[ " ${allowed} " != *" ${token} "* ]]; then
+                echo "::error::${name} parameter contains invalid value '${token}', allowed values are '${allowed}'."
+                exit 1
+              fi
+            done
+          }
+          verify_tokens BUILD_PLATFORM "${BUILD_PLATFORM}" 'linux windows'
+          verify_tokens BUILD_DISTRIBUTION "${BUILD_DISTRIBUTION}" 'tar rpm deb zip'
+          verify_tokens TEST_PLATFORM "${TEST_PLATFORM}" 'linux windows'
+          verify_tokens TEST_DISTRIBUTION "${TEST_DISTRIBUTION}" 'tar rpm deb zip'
+          if [ "${RC_NUMBER}" -gt 0 ]; then
+            echo 'This is a release candidate build, enforcing build_docker_with_build_number_tag'
+            BUILD_DOCKER=build_docker_with_build_number_tag
+          fi
+          # The `build` stages and their when { BUILD_PLATFORM.contains / BUILD_DISTRIBUTION.contains } conditions.
+          MATRIX=$(python3 -c 'import json, sys
+          platforms, distributions, architectures = (a.split() for a in sys.argv[1:4])
+          stages = [("linux", "x64", "tar"), ("linux", "x64", "rpm"), ("linux", "x64", "deb"),
+                    ("linux", "arm64", "tar"), ("linux", "arm64", "rpm"), ("linux", "arm64", "deb"),
+                    ("windows", "x64", "zip")]
+          print(json.dumps([{"platform": p, "architecture": a, "distribution": d} for p, a, d in stages
+                            if p in platforms and d in distributions and a in architectures], separators=(",", ":")))' \
+            "${BUILD_PLATFORM}" "${BUILD_DISTRIBUTION}" "${ARCHITECTURES}")
+          if [ "${MATRIX}" = '[]' ]; then
+            echo "::error::BUILD_PLATFORM '${BUILD_PLATFORM}' and BUILD_DISTRIBUTION '${BUILD_DISTRIBUTION}' select no build stage (linux: tar rpm deb, windows: zip)."
+            exit 1
+          fi
+          {
+            echo "dry-run=${DRY_RUN}"
+            echo "input-manifest=${INPUT_MANIFEST}"
+            echo "matrix=${MATRIX}"
+            echo "runs-on=${RUNS_ON}"
+            echo "rc-number=${RC_NUMBER}"
+            echo "build-docker=${BUILD_DOCKER}"
+            echo "component-name=${COMPONENT_NAME}"
+            echo "test-manifest=${TEST_MANIFEST}"
+            echo "integ-test-job-name=${INTEG_TEST_JOB_NAME}"
+            echo "bwc-test-job-name=${BWC_TEST_JOB_NAME}"
+            echo "update-latest-url=${UPDATE_LATEST_URL}"
+            echo "update-github-issue=${UPDATE_GITHUB_ISSUE}"
+            echo "continue-on-error=${CONTINUE_ON_ERROR}"
+            echo "skip-artifact-check=${SKIP_ARTIFACT_CHECK}"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Detect Docker images and related parameters
+        id: manifest
+        env:
+          INPUT_MANIFEST: ${{ steps.verify.outputs.input-manifest }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/ensure-pyyaml.sh
+          for cell in linux:tar linux:deb linux:rpm windows:zip; do
+            echo "${cell/:/_} $(python3 .github/scripts/manifest_paths.py ci-image "manifests/${INPUT_MANIFEST}" --platform "${cell%%:*}" --distribution "${cell##*:}" | tr '\n' ' ')"
+          done
+          python3 .github/scripts/manifest_paths.py input-manifest-info "manifests/${INPUT_MANIFEST}" | grep -E '^(revision|filename)=' | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    name: build
+    needs: verify-parameters
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.verify-parameters.outputs.matrix) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_build-distribution.yml
+    with:
+      input-manifest: ${{ needs.verify-parameters.outputs.input-manifest }}
+      distribution: ${{ matrix.distribution }}
+      platform: ${{ matrix.platform }}
+      architecture: ${{ matrix.architecture }}
+      rc-number: ${{ needs.verify-parameters.outputs.rc-number }}
+      component-name: ${{ needs.verify-parameters.outputs.component-name }}
+      job-name: distribution-build-opensearch-dashboards
+      continue-on-error: ${{ needs.verify-parameters.outputs.continue-on-error == 'true' }}
+      skip-artifact-check: ${{ needs.verify-parameters.outputs.skip-artifact-check == 'true' }}
+      upload: ${{ needs.verify-parameters.outputs.dry-run != 'true' }}
+      update-latest-url: ${{ needs.verify-parameters.outputs.update-latest-url == 'true' }}
+      # uploadArtifacts() copied the core min artifact and the bundle to release-candidates/ on every build, and
+      # assembleManifest() signed every rpm.
+      release-candidate-upload: ${{ needs.verify-parameters.outputs.dry-run != 'true' }}
+      sign-rpm: ${{ needs.verify-parameters.outputs.dry-run != 'true' && matrix.distribution == 'rpm' }}
+      runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
+    secrets:
+      AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+      AWS_ROLE_PROMOTION: ${{ secrets.AWS_ROLE_PROMOTION }}
+      ARTIFACT_PRODUCTION_BUCKET_NAME: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+      AWS_ROLE_RPM_SIGNING: ${{ secrets.AWS_ROLE_RPM_SIGNING }}
+      RPM_SIGNING_KEY_ID: ${{ secrets.RPM_SIGNING_KEY_ID }}
+      RPM_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_SIGNING_PASSPHRASE_SECRETS_ARN }}
+      RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+      RPM_RELEASE_SIGNING_KEY_ID: ${{ secrets.RPM_RELEASE_SIGNING_KEY_ID }}
+      RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN }}
+      RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+
+  # The per-stage URL bookkeeping (buildManifestObj.getUrl / getArtifactUrl) and the integ / bwc triggers.
+  build-results:
+    name: build results and test triggers
+    needs: [verify-parameters, build]
+    if: ${{ !cancelled() && needs.verify-parameters.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      artifact-url-linux-x64-tar: ${{ steps.urls.outputs.artifact-url-linux-x64-tar }}
+      artifact-url-linux-arm64-tar: ${{ steps.urls.outputs.artifact-url-linux-arm64-tar }}
+      tar-x64: ${{ steps.urls.outputs.tar-x64 }}
+      tar-arm64: ${{ steps.urls.outputs.tar-arm64 }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download the build records
+        continue-on-error: true
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          pattern: build-record-*
+          path: build-records
+
+      - name: Resolve the build manifest and artifact URLs
+        id: urls
+        env:
+          MATRIX: ${{ needs.verify-parameters.outputs.matrix }}
+          FILENAME: ${{ needs.verify-parameters.outputs.filename }}
+          BUILD_NUMBER: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/ensure-pyyaml.sh
+          : > cells.txt
+          while read -r PLATFORM ARCHITECTURE DISTRIBUTION; do
+            CELL="${PLATFORM}-${ARCHITECTURE}-${DISTRIBUTION}"
+            MANIFEST="build-records/build-record-${CELL}/builds/${FILENAME}/manifest.yml"
+            if [ ! -f "${MANIFEST}" ]; then
+              echo "::warning::${CELL}: no build manifest, the build stage failed before assemble."
+              echo "${CELL} failed" >> cells.txt
+              continue
+            fi
+            python3 .github/scripts/manifest_paths.py build-manifest-info "${MANIFEST}" --job-name "${JOB_NAME}" \
+              --build-number "${BUILD_NUMBER}" --public-artifact-url "${PUBLIC_ARTIFACT_URL}" > info.env
+            ROOT_URL=$(sed -n 's/^artifact-root-url=//p' info.env)
+            VERSION=$(sed -n 's/^version=//p' info.env)
+            PACKAGE_NAME=$(sed -n 's/^package-name=//p' info.env)
+            BUILD_MANIFEST_URL="${ROOT_URL}/builds/${FILENAME}/manifest.yml"
+            ARTIFACT_URL="${ROOT_URL}/dist/${FILENAME}/${PACKAGE_NAME}"
+            # buildManifestObj.getArtifactRootUrl(JOB_NAME_OPENSEARCH, 'latest') + builds/opensearch/manifest.yml
+            OPENSEARCH_URL="${PUBLIC_ARTIFACT_URL}/${JOB_NAME_OPENSEARCH}/${VERSION}/latest/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}/builds/opensearch/manifest.yml"
+            echo "buildManifestUrl (${PLATFORM}, ${ARCHITECTURE}, ${DISTRIBUTION}): ${BUILD_MANIFEST_URL}"
+            echo "artifactUrl (${PLATFORM}, ${ARCHITECTURE}, ${DISTRIBUTION}): ${ARTIFACT_URL}"
+            # Jenkins only reached the triggers after uploadArtifacts(); an upload skipped for missing AWS secrets
+            # leaves nothing for the test jobs to download.
+            if curl -sSfIL --retry 3 -o /dev/null "${BUILD_MANIFEST_URL}" 2>/dev/null; then STATE=uploaded; else STATE=local; fi
+            echo "${CELL} ${STATE} ${BUILD_MANIFEST_URL} ${OPENSEARCH_URL} ${ARTIFACT_URL}" >> cells.txt
+            if [ "${DISTRIBUTION}" = tar ] && [ "${PLATFORM}" = linux ]; then
+              {
+                echo "tar-${ARCHITECTURE}=${STATE}"
+                echo "artifact-url-linux-${ARCHITECTURE}-tar=${ARTIFACT_URL}"
+              } >> "$GITHUB_OUTPUT"
+            fi
+          done < <(python3 -c 'import json, sys
+          for c in json.loads(sys.argv[1]):
+              print(c["platform"], c["architecture"], c["distribution"])' "${MATRIX}")
+          rm -f info.env
+          cat cells.txt
+
+      - name: Trigger the integ and bwc tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ needs.verify-parameters.outputs.dry-run }}
+          TEST_MANIFEST: ${{ needs.verify-parameters.outputs.test-manifest }}
+          INTEG_TEST_JOB_NAME: ${{ needs.verify-parameters.outputs.integ-test-job-name }}
+          BWC_TEST_JOB_NAME: ${{ needs.verify-parameters.outputs.bwc-test-job-name }}
+          TEST_PLATFORM: ${{ inputs.TEST_PLATFORM }}
+          TEST_DISTRIBUTION: ${{ inputs.TEST_DISTRIBUTION }}
+          RC_NUMBER: ${{ needs.verify-parameters.outputs.rc-number }}
+          REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "${DRY_RUN}" = true ]; then
+            echo "::notice::Dry run: integ and bwc tests are not triggered."
+            exit 0
+          fi
+          dispatch() {
+            local job="$1"; shift
+            if [ ! -f ".github/workflows/${job}.yml" ]; then
+              echo "::notice::${job}.yml is not ported yet (plan step s4.3); skipping the trigger: $*"
+              echo "- ${job}: not ported yet (s4.3), skipped: $*" >> "$GITHUB_STEP_SUMMARY"
+              return 0
+            fi
+            local args=() kv
+            for kv in "$@"; do args+=(-f "${kv}"); done
+            gh workflow run "${job}.yml" --ref "${REF}" "${args[@]}"
+            echo "- ${job}: triggered with $*" >> "$GITHUB_STEP_SUMMARY"
+          }
+          while read -r CELL STATE BUILD_MANIFEST_URL OPENSEARCH_URL _; do
+            [ "${STATE}" = failed ] && continue
+            PLATFORM="${CELL%%-*}"
+            DISTRIBUTION="${CELL##*-}"
+            if [ "${STATE}" != uploaded ]; then
+              echo "::notice::${CELL}: the build was not uploaded (S3 upload skipped), so no tests are triggered."
+              continue
+            fi
+            # triggerIntegrationTests: skipped when any value is empty or the platform/distribution is not under test
+            if [ -z "${INTEG_TEST_JOB_NAME}" ] || [ -z "${TEST_MANIFEST}" ] || [[ "${TEST_PLATFORM}" != *"${PLATFORM}"* ]] || [[ "${TEST_DISTRIBUTION}" != *"${DISTRIBUTION}"* ]]; then
+              echo "${CELL}: Skipping INTEG tests as one of the values has empty or wrong string: INTEG_TEST_JOB_NAME, TEST_MANIFEST, buildManifestUrl, buildManifestUrlOpenSearch, TEST_PLATFORM, TEST_DISTRIBUTION"
+            else
+              echo "${CELL}: Running INTEG tests"
+              dispatch "${INTEG_TEST_JOB_NAME}" "TEST_MANIFEST=${TEST_MANIFEST}" "BUILD_MANIFEST_URL=${BUILD_MANIFEST_URL}" \
+                "RC_NUMBER=${RC_NUMBER}" "BUILD_MANIFEST_URL_OPENSEARCH=${OPENSEARCH_URL}" "UPDATE_GITHUB_ISSUES=true"
+            fi
+            # triggerBWCTests runs from the linux tar stages only; AGENT_LABEL becomes the test workflow's runs-on.
+            [ "${DISTRIBUTION}" = tar ] || continue
+            if [ -z "${BWC_TEST_JOB_NAME}" ] || [ -z "${TEST_MANIFEST}" ] || [[ "${TEST_PLATFORM}" != *"${PLATFORM}"* ]] || [[ "${TEST_DISTRIBUTION}" != *"${DISTRIBUTION}"* ]]; then
+              echo "${CELL}: Skipping BWC tests as one of the values has empty or wrong string: BWC_TEST_JOB_NAME, TEST_MANIFEST, buildManifestUrl, TEST_PLATFORM, TEST_DISTRIBUTION"
+            else
+              echo "${CELL}: Running BWC tests"
+              dispatch "${BWC_TEST_JOB_NAME}" "TEST_MANIFEST=${TEST_MANIFEST}" "BUILD_MANIFEST_URL=${BUILD_MANIFEST_URL}"
+            fi
+          done < cells.txt
+
+  # stage('docker build'): buildDockerImage() once both linux tar bundles are uploaded.
+  docker-script:
+    name: docker build (buildDockerImage)
+    needs: [verify-parameters, build-results]
+    if: >-
+      ${{ !cancelled() && needs.build-results.result == 'success' && needs.verify-parameters.outputs.build-docker != 'do_not_build_docker'
+      && contains(needs.verify-parameters.outputs.matrix, '"distribution":"tar"') && contains(needs.verify-parameters.outputs.matrix, '"platform":"linux"') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.script.outputs.build }}
+      script: ${{ steps.script.outputs.script }}
+      filename: ${{ steps.script.outputs.filename }}
+      image-version: ${{ steps.script.outputs.image-version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Compose the docker-build script
+        id: script
+        env:
+          INPUT_MANIFEST: ${{ needs.verify-parameters.outputs.input-manifest }}
+          TAR_X64: ${{ needs.build-results.outputs.tar-x64 }}
+          TAR_ARM64: ${{ needs.build-results.outputs.tar-arm64 }}
+          ARTIFACT_URL_X64: ${{ needs.build-results.outputs.artifact-url-linux-x64-tar }}
+          ARTIFACT_URL_ARM64: ${{ needs.build-results.outputs.artifact-url-linux-arm64-tar }}
+          BUILD_NUMBER: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAR_X64}" ] || [ -z "${TAR_ARM64}" ]; then
+            # Jenkins polled every 120 s for both URLs until the 4 h pipeline timeout.
+            echo "::error::Waiting for x64 and arm64 tar builds to complete: one of them failed, so the docker image cannot be built."
+            exit 1
+          fi
+          if [ "${TAR_X64}" != uploaded ] || [ "${TAR_ARM64}" != uploaded ]; then
+            echo "::notice::Skipping docker build: the tar bundles were not uploaded (S3 upload skipped)."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash .github/scripts/ensure-pyyaml.sh
+          python3 .github/scripts/manifest_paths.py input-manifest-info "manifests/${INPUT_MANIFEST}" > info.env
+          VERSION=$(sed -n 's/^version=//p' info.env)
+          REVISION=$(sed -n 's/^revision=//p' info.env)
+          FILENAME=$(sed -n 's/^filename=//p' info.env)
+          # buildDockerImage.groovy (jenkins@12.0.0): al2 for 1.x, al2023 otherwise; no buildDate tag suffix
+          BASE_OS=al2023
+          [ "${VERSION%%.*}" = 1 ] && BASE_OS=al2
+          SCRIPT=$(printf '%s && ' id pwd 'cd docker/release' \
+            "curl -sSL ${ARTIFACT_URL_X64} -o ${FILENAME}-x64.tgz" \
+            "curl -sSL ${ARTIFACT_URL_ARM64} -o ${FILENAME}-arm64.tgz")
+          SCRIPT="${SCRIPT}bash build-image-multi-arch.sh -v ${REVISION} -f ./dockerfiles/${FILENAME}.${BASE_OS}.dockerfile -p ${FILENAME} -a 'x64,arm64' -r opensearchstaging/${FILENAME} -t '${FILENAME}-x64.tgz,${FILENAME}-arm64.tgz' -n ${BUILD_NUMBER}"
+          {
+            echo "build=true"
+            echo "script=${SCRIPT}"
+            echo "filename=${FILENAME}"
+            echo "image-version=${REVISION}"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  docker-build:
+    name: docker-build
+    needs: docker-script
+    if: ${{ needs.docker-script.outputs.build == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      DOCKER_BUILD_GIT_REPOSITORY: https://github.com/opensearch-project/opensearch-build
+      DOCKER_BUILD_GIT_REPOSITORY_REFERENCE: main
+      DOCKER_BUILD_SCRIPT_WITH_COMMANDS: ${{ needs.docker-script.outputs.script }}
+      DOCKER_BUILD_OS: linux
+
+  docker-copy:
+    name: docker-copy (build-number tag)
+    needs: [verify-parameters, docker-script, docker-build]
+    if: ${{ needs.verify-parameters.outputs.build-docker == 'build_docker_with_build_number_tag' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/docker-copy.yml
+    with:
+      SOURCE_IMAGE_REGISTRY: opensearchstaging
+      SOURCE_IMAGE: ${{ needs.docker-script.outputs.filename }}:${{ needs.docker-script.outputs.image-version }}
+      DESTINATION_IMAGE_REGISTRY: opensearchstaging
+      DESTINATION_IMAGE: ${{ needs.docker-script.outputs.filename }}:${{ needs.docker-script.outputs.image-version }}.${{ github.run_id }}
+
+  docker-scan:
+    name: docker-scan
+    needs: [docker-script, docker-build, docker-copy]
+    if: ${{ !cancelled() && needs.docker-build.result == 'success' && needs.docker-copy.result != 'failure' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/docker-scan.yml
+    with:
+      IMAGE_FULL_NAME: opensearchstaging/${{ needs.docker-script.outputs.filename }}:${{ needs.docker-script.outputs.image-version }}
+
+  # post { always }: publishDistributionBuildResults + updateBuildFailureIssues
+  publish-results:
+    name: publish build results
+    needs: [verify-parameters, build, build-results, docker-script, docker-build, docker-copy, docker-scan]
+    if: ${{ !cancelled() && needs.verify-parameters.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      issues: read
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download the build logs
+        continue-on-error: true
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          pattern: build-log-*
+          path: build-logs
+
+      - name: Overall build result
+        id: result
+        env:
+          DRY_RUN: ${{ needs.verify-parameters.outputs.dry-run }}
+          AUTOCUT_LIVE: ${{ vars.AUTOCUT_LIVE }}
+          HAS_METRICS: ${{ secrets.AWS_ROLE_METRICS != '' && secrets.METRICS_CLUSTER_ENDPOINT != '' }}
+          NEEDS_RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          set -euo pipefail
+          # Jenkins currentBuild.result: FAILURE when a stage failed, UNSTABLE when markStageUnstableIfPluginsFailedToBuild
+          # found "Failed plugins are" in a build stage log, SUCCESS otherwise.
+          if jq -e 'any(. == "failure")' <<< "${NEEDS_RESULTS}" > /dev/null; then
+            RESULT=FAILURE
+          elif grep -rqs 'Failed plugins are' build-logs; then
+            RESULT=UNSTABLE
+            echo "::warning::Some plugins failed to build. See the ./build.sh step for logs and more details"
+          else
+            RESULT=SUCCESS
+          fi
+          METRICS_DRY_RUN=false
+          if [ "${DRY_RUN}" = true ] || [ "${HAS_METRICS}" != true ]; then
+            METRICS_DRY_RUN=true
+            [ "${DRY_RUN}" = true ] || echo "::notice::Metrics not indexed: AWS_ROLE_METRICS / METRICS_CLUSTER_ENDPOINT are not configured."
+          fi
+          ISSUES_DRY_RUN=true
+          if [ "${DRY_RUN}" != true ] && [ "${AUTOCUT_LIVE}" = true ]; then ISSUES_DRY_RUN=false; fi
+          {
+            echo "result=${RESULT}"
+            echo "metrics-dry-run=${METRICS_DRY_RUN}"
+            echo "issues-dry-run=${ISSUES_DRY_RUN}"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Publish distribution build results
+        id: metrics
+        uses: ./.github/actions/publish-metrics
+        with:
+          kind: build
+          input-manifest: manifests/${{ needs.verify-parameters.outputs.input-manifest }}
+          build-logs-directory: build-logs
+          rc-number: ${{ needs.verify-parameters.outputs.rc-number }}
+          component-category: OpenSearch Dashboards
+          overall-build-result: ${{ steps.result.outputs.result }}
+          metrics-host-url: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+          role-to-assume: ${{ secrets.AWS_ROLE_METRICS }}
+          dry-run: ${{ steps.result.outputs.metrics-dry-run }}
+
+      - name: Failed and passed components
+        id: components
+        if: ${{ needs.verify-parameters.outputs.update-github-issue == 'true' }}
+        env:
+          RECORDS: ${{ steps.metrics.outputs.records-file }}
+        run: |
+          set -euo pipefail
+          # updateBuildFailureIssues read this build's records back from the metrics cluster; these are those records.
+          pick() { jq -r --arg r "$1" 'select(.component_build_result == $r) | .component' "${RECORDS}" | sort -u | paste -sd, -; }
+          {
+            echo "failed=$(pick failed)"
+            echo "passed=$(pick passed)"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Update AUTOCUT issues
+        if: ${{ steps.components.outcome == 'success' }}
+        uses: ./.github/actions/notify-failure
+        with:
+          kind: distribution-build
+          input-manifest: manifests/${{ needs.verify-parameters.outputs.input-manifest }}
+          failures: ${{ steps.components.outputs.failed }}
+          passed: ${{ steps.components.outputs.passed }}
+          dry-run: ${{ steps.result.outputs.issues-dry-run }}
+          app-id: ${{ secrets.GH_APP_ID }}
+          app-private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Fail the run like Jenkins
+        if: ${{ steps.result.outputs.result == 'FAILURE' }}
+        run: |
+          echo "::error::A build stage failed; see the jobs above."
+          exit 1
+
+  # post { success }: triggerDistributionValidationWorkflow (wait/propagate: true) for release candidates
+  distribution-validation:
+    name: distribution-validation
+    needs: [verify-parameters, publish-results]
+    if: ${{ !cancelled() && needs.publish-results.outputs.result == 'SUCCESS' && needs.verify-parameters.outputs.rc-number != '0' && needs.verify-parameters.outputs.dry-run != 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      actions: write
+    steps:
+      - name: Run validate-artifacts and wait for it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          REVISION: ${{ needs.verify-parameters.outputs.revision }}
+          BUILD_NUMBER: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          gh workflow run validate-artifacts.yml -R "${REPO}" --ref "${REF}" \
+            -f VERSION="${REVISION}" -f PROJECTS=Both -f ARTIFACT_TYPE=staging -f DOCKER_SOURCE=dockerhub \
+            -f OPTIONS="os-build-number=latest osd-build-number=${BUILD_NUMBER} optional-args=using-staging-artifact-only"
+          RUN_ID=''
+          for _ in $(seq 1 30); do
+            sleep 10
+            RUN_ID=$(gh run list -R "${REPO}" --workflow validate-artifacts.yml --event workflow_dispatch --limit 20 \
+              --json databaseId,createdAt --jq "[.[] | select(.createdAt >= \"${SINCE}\")] | sort_by(.createdAt) | .[0].databaseId // empty")
+            [ -n "${RUN_ID}" ] && break
+          done
+          [ -n "${RUN_ID}" ] || { echo "::error::validate-artifacts run not found after dispatch"; exit 1; }
+          echo "validate-artifacts run: ${GITHUB_SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"
+          gh run watch "${RUN_ID}" -R "${REPO}" --exit-status --interval 60
+
+  # post { success, unstable }: triggerNightlyPlayground() for release candidates
+  nightly-playground:
+    name: nightly playground
+    needs: [verify-parameters, publish-results]
+    if: >-
+      ${{ !cancelled() && needs.verify-parameters.outputs.rc-number != '0' && needs.verify-parameters.outputs.dry-run != 'true'
+      && (needs.publish-results.outputs.result == 'SUCCESS' || needs.publish-results.outputs.result == 'UNSTABLE') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Trigger nightly-playground-trigger.yml in opensearch-devops
+        env:
+          GH_TOKEN: ${{ secrets.OPENSEARCH_CI_BOT_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::notice::OPENSEARCH_CI_BOT_TOKEN is not configured; nightly playground not triggered."
+            exit 0
+          fi
+          gh workflow run nightly-playground-trigger.yml -R opensearch-project/opensearch-devops --ref main \
+            || echo "Error in triggering nightly playground workflow."
+
+  # Dry run only: diff the GitHub Actions build against the latest Jenkins build of the same version.
+  compare:
+    name: diff against Jenkins
+    needs: [verify-parameters, build]
+    if: ${{ !cancelled() && needs.verify-parameters.outputs.dry-run == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: build-record-linux-x64-tar
+          path: build-record
+      - name: Diff file names and manifest layout
+        env:
+          REVISION: ${{ needs.verify-parameters.outputs.revision }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          INDEX="${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${REVISION}/index/linux/x64/tar/index.json"
+          LATEST=$(curl -sSfL --retry 5 "${INDEX}" | python3 -c 'import json, sys; print(json.load(sys.stdin)["latest"])')
+          [[ "${LATEST}" =~ ^[0-9]+$ ]] || { echo "::error::unexpected latest build '${LATEST}' in ${INDEX}"; exit 1; }
+          JENKINS_ROOT="${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${REVISION}/${LATEST}/linux/x64/tar"
+          { echo "Jenkins: ${JENKINS_ROOT}"; echo; } | tee diff.txt
+          set +e
+          python3 .github/scripts/compare_build_layout.py --record build-record --jenkins-root "${JENKINS_ROOT}" | tee -a diff.txt
+          STATUS=${PIPESTATUS[0]}
+          set -e
+          { echo '```'; cat diff.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "${STATUS}"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        if: ${{ always() }}
+        with:
+          name: jenkins-layout-diff
+          path: diff.txt

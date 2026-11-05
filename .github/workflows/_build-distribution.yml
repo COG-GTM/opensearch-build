@@ -347,7 +347,18 @@ jobs:
             ARGS+=(--parallel "${PARALLEL}")
           fi
           echo "./build.sh ${ARGS[*]}"
-          bash ./build.sh "${ARGS[@]}"
+          # Tee-ed for publish-metrics / notify-failure, which read the "Error building" / "Successfully built" lines
+          # (buildMessage) and "Failed plugins are" (markStageUnstableIfPluginsFailedToBuild) from the log.
+          mkdir -p build-log
+          bash ./build.sh "${ARGS[@]}" 2>&1 | tee build-log/build.log
+
+      - name: Keep the build log in the run
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: build-log-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
+          path: build-log
+          if-no-files-found: warn
 
       - name: Stash the builds for assemble
         # buildArchive.groovy: stash includes: "<distribution>/builds/**"
