@@ -71,7 +71,7 @@ on:
         description: >-
           <Optional> Space-separated flags for the other Jenkins parameters, each starting from its Jenkins default;
           prefix a flag with no- to turn it off. Flags: update-github-issue (on), integ-test (on, INTEG_TEST_JOB_NAME),
-          min-snapshot (on), skip-artifact-check (off), sign-rpm (on; rpm uploads require it), upload (on), release-candidate-upload
+          min-snapshot (on), skip-artifact-check (off), sign-rpm (on when the run uploads; rpm uploads require it), upload (on), release-candidate-upload
           (on when RC_NUMBER > 0), compare-jenkins (off). Values: test-platform=<linux,windows>,
           test-distribution=<tar,rpm,deb,zip>, parallel=<n> (4), build-docker=<build_docker |
           build_docker_with_build_number_tag | do_not_build_docker> (build_docker), architecture=<x64,arm64>.
@@ -197,7 +197,7 @@ jobs:
               runs_on = json.dumps(labels, separators=(",", ":"))
 
           flags = {"update-github-issue": True, "integ-test": True, "min-snapshot": True, "skip-artifact-check": False,
-                   "sign-rpm": True, "upload": True, "release-candidate-upload": int(rc) > 0, "compare-jenkins": False}
+                   "sign-rpm": None, "upload": True, "release-candidate-upload": int(rc) > 0, "compare-jenkins": False}
           values = {"test-platform": "", "test-distribution": "", "parallel": "4", "build-docker": "build_docker", "architecture": "x64 arm64"}
           for option in env["OPTIONS"].split():
               key, sep, value = option.partition("=")
@@ -258,10 +258,13 @@ jobs:
                       tests.append(dict(c, **{"build-manifest-url": url}))
 
           upload = flags["upload"]
-          # assembleManifest() signed every rpm; an unsigned rpm must not reach the artifact bucket
-          if upload and not flags["sign-rpm"] and any(c["distribution"] == "rpm" for c in cells):
-              fail("no-sign-rpm needs no-upload (or no rpm in BUILD_DISTRIBUTION): Jenkins never uploaded unsigned rpm packages.")
           can_upload = upload and env["HAS_ARTIFACT_ROLE"] == "true"
+          # assembleManifest() signed every rpm: sign by default whenever the run really uploads, and never let an
+          # unsigned rpm reach the artifact bucket. Runs that cannot upload stay credential-free unless sign-rpm is set.
+          if flags["sign-rpm"] is None:
+              flags["sign-rpm"] = can_upload
+          if can_upload and not flags["sign-rpm"] and any(c["distribution"] == "rpm" for c in cells):
+              fail("no-sign-rpm needs no-upload (or no rpm in BUILD_DISTRIBUTION): Jenkins never uploaded unsigned rpm packages.")
           if upload and not can_upload:
               print("::notice::S3 upload skipped: AWS_ROLE_ARTIFACTS / ARTIFACT_BUCKET_NAME are not configured, so the integ-test, docker and validation follow-ups are skipped too.", file=sys.stderr)
           if test_manifest and flags["integ-test"]:
