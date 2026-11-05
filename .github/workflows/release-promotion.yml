@@ -45,7 +45,7 @@ on:
         default: true
         type: boolean
       production-docker-build-number-override:
-        description: '<Dry run only> Staging build number (e.g. latest) for the production docker digest gate instead of the RC numbers. Empty = Jenkins behavior.'
+        description: '<Dry run only> OpenSearch staging build number (e.g. latest) for the production docker digest gate instead of the RC; Dashboards keeps latest. Empty = Jenkins behavior.'
         required: false
         default: ''
         type: string

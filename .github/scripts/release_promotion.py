@@ -111,7 +111,7 @@ def plan(release_version: str, os_rc: str, osd_rc: str, projects: str, tag_docke
     # validate the production digest gate against another staging tag; empty keeps the Jenkins values above.
     production_options = validation_options
     if override:
-        production_options = [f"os-build-number={override}"] + ([] if only_opensearch else [f"osd-build-number={override}"])
+        production_options = [f"os-build-number={override}"] + ([] if only_opensearch else ["osd-build-number=latest"])
 
     # 'Promote Docker' SOURCE_IMAGES
     images = []

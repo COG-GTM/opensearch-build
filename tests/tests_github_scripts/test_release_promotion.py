@@ -82,6 +82,9 @@ class TestPlan(unittest.TestCase):
                          "os-build-number=12228 osd-build-number=latest optional-args=using-staging-artifact-only platform=linux,windows")
         self.assertEqual(result["source-images"], "opensearch:3.9.0.12228, opensearch-dashboards:3.9.0.9054")
         self.assertIn("Production docker digest gate checked against `latest`, not OpenSearch RC 12228", promotion.plan_markdown(result, True))
+        numeric = promotion.plan("3.9.0", "12228", "9054", "both", True, True, "12228.20261026")
+        self.assertEqual(numeric["production-validation-options"],
+                         "os-build-number=12228.20261026 osd-build-number=latest optional-args=validate-digest-only platform=linux,windows")
         only_os = promotion.plan("3.9.0", "12228", "", "opensearch", True, True, "latest")
         self.assertEqual(only_os["production-validation-options"], "os-build-number=latest optional-args=validate-digest-only platform=linux,windows")
         default = promotion.plan("3.9.0", "12228", "9054", "both", True, True, "")
