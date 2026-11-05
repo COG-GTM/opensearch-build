@@ -271,6 +271,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+      - name: Refresh the benchmark role for the cleanup
+        # the first session may have expired on a run longer than 12 h
+        if: ${{ cancelled() && !inputs.local-cluster && steps.params.outputs.cluster-endpoint == '' }}
+        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885  # v6.1.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_BENCHMARK }}
+          role-duration-seconds: 3600
+          aws-region: us-east-1
+
       - name: Delete the CloudFormation stack of a cancelled run
         # the Jenkins `aborted` post block: cfnDelete opensearch-infra-stack-<suffix>[-<build id>-<arch>]
         if: ${{ cancelled() && !inputs.local-cluster && steps.params.outputs.cluster-endpoint == '' }}
@@ -278,14 +287,17 @@ jobs:
           BUILD_ID: ${{ steps.params.outputs.build-id }}
           ARCHITECTURE: ${{ steps.params.outputs.architecture }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           for stack in $(python3 .github/scripts/benchmark_test.py stacks --suffix "$SUFFIX" --build-id "$BUILD_ID" --architecture "$ARCHITECTURE"); do
-            if aws cloudformation describe-stacks --stack-name "$stack" >/dev/null 2>&1; then
+            if err="$(aws cloudformation describe-stacks --stack-name "$stack" 2>&1 >/dev/null)"; then
               echo "Deleting stack '$stack'"
               aws cloudformation delete-stack --stack-name "$stack"
               aws cloudformation wait stack-delete-complete --stack-name "$stack"
-            else
+            elif [[ "$err" == *"does not exist"* ]]; then
               echo "Stack '$stack' does not exist, nothing to remove"
+            else
+              echo "::error::Could not check stack '$stack': $err"
+              exit 1
             fi
           done
 

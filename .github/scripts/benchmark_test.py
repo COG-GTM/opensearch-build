@@ -109,6 +109,7 @@ BOOLEAN_PARAMS = {
     "CAPTURE_NODE_STAT", "CAPTURE_SEGMENT_REPLICATION_STAT", "PRESERVE_CLUSTER", "SECURITY_ENABLED", "SIGV4",
     "TEST_MODE",
 }
+JSON_PARAMS = {"WORKLOAD_PARAMS", "TELEMETRY_PARAMS"}
 # GenericTrigger genericVariables that are not job parameters.
 PAYLOAD_FIELDS = ["pull_request_number", "repository", "baseline_cluster_config"]
 # Characters that would let a value escape the single-quoted / unquoted shell words the benchmark tooling builds
@@ -144,6 +145,14 @@ def normalize(suite: str, params: Dict[str, Any], strict: bool = True) -> Dict[s
             raise ValueError(f"{suite}: parameter '{key}' contains a character that is not allowed: {text!r}")
         if key in BOOLEAN_PARAMS:
             text = "true" if to_bool(text) else "false"
+        if key in JSON_PARAMS and text:
+            # run.sh forwards ${@:2} unquoted, so a space inside the JSON would split the argument
+            try:
+                text = json.dumps(json.loads(text), separators=(",", ":"), ensure_ascii=False)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{suite}: parameter '{key}' is not valid JSON: {e}")
+            if UNSAFE_VALUE.search(text) or " " in text:
+                raise ValueError(f"{suite}: parameter '{key}' contains a character that is not allowed: {text!r}")
         result[key] = text
     return {k: v for k, v in result.items() if v != ""}
 

@@ -171,7 +171,7 @@ jobs:
     # sent nothing for aborted builds
     needs: [setup, benchmark]
     if: >-
-      ${{ always() && needs.setup.result == 'success' && inputs.notify != false
+      ${{ always() && needs.setup.result == 'success' && (!inputs.params || inputs.notify)
       && (needs.benchmark.result == 'success' || needs.benchmark.result == 'failure') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10

@@ -129,6 +129,14 @@ class TestResolve(unittest.TestCase):
         self.assertLessEqual(len(payload), 10)
         self.assertEqual(resolve("benchmark-pull-request", "payload", payload)["dry-run"], "true")
 
+    def test_json_params_are_compacted(self) -> None:
+        row = resolve("benchmark-pull-request", "payload", {"DISTRIBUTION_URL": "https://a", "DISTRIBUTION_VERSION": "1",
+                                                            "WORKLOAD_PARAMS": '{"number_of_shards": 1, "k": "v"}'})["matrix"]["include"][0]
+        self.assertEqual(json.loads(row["params"])["WORKLOAD_PARAMS"], '{"number_of_shards":1,"k":"v"}')
+        for bad in ["{bad", '{"k": "a b"}']:
+            with self.assertRaises(ValueError, msg=bad):
+                resolve("benchmark-pull-request", "payload", {"DISTRIBUTION_URL": "https://a", "DISTRIBUTION_VERSION": "1", "WORKLOAD_PARAMS": bad})
+
     def test_payload_validation(self) -> None:
         base = {"DISTRIBUTION_URL": "https://a", "DISTRIBUTION_VERSION": "1"}
         for extra in [{"pull_request_number": "12a"}, {"repository": "not a repo"}, {"baseline_cluster_config": "a;b"}]:
