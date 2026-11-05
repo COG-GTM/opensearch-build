@@ -14,7 +14,9 @@ distribution-build-opensearch build. Versions (including -SNAPSHOT), build ids, 
 normalised, and only the components both builds contain are compared, so a component-scoped build can be checked
 against a full Jenkins build. Maven snapshot naming (timestamped file names and the per-version maven-metadata.xml a
 snapshot repository adds) is normalised too, so a --snapshot build can be checked against a release-style Jenkins
-build; the per-version metadata files are listed separately. Lists of plain values (artifact paths) are compared as
+build; the per-version metadata files are listed separately. Component `ref`s echo the input manifest (a Jenkins build
+from before a release-branch cut records `main` where the current manifest says `3.10`), so they are listed as input
+differences instead of failing the comparison. Lists of plain values (artifact paths) are compared as
 sorted sets because build.sh records them in filesystem order. Prints a unified diff per section; exits 1 when any
 section differs.
 """
@@ -31,8 +33,7 @@ import yaml
 SHA = re.compile(r"\b[0-9a-f]{40}\b")
 SNAPSHOT = re.compile(r"\{version\}(\.0)?-(?:SNAPSHOT|\d{8}\.\d{6}-\d+)")
 SNAPSHOT_METADATA = re.compile(r"/\{version\}(?:\.0)?/maven-metadata\.xml(\.\w+)?$")
-REF = re.compile(r"^components\[\d+\]\.ref: ")
-INFORMATIONAL = ("shared components", "snapshot-only files", "input manifest refs")
+INFORMATIONAL = ("shared components", "snapshot-only files", "input refs")
 
 
 def fetch(url: str) -> str:
@@ -80,6 +81,24 @@ def only_components(manifest: Dict[str, Any], names: Set[str]) -> Dict[str, Any]
     return scoped
 
 
+def without_refs(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    stripped = dict(manifest)
+    stripped["components"] = [{k: v for k, v in component.items() if k != "ref"} for component in manifest.get("components") or []]
+    return stripped
+
+
+def ref_differences(jenkins: Dict[str, Any], actions: Dict[str, Any]) -> List[str]:
+    jenkins_refs = {c["name"]: c.get("ref") for c in jenkins.get("components") or []}
+    return [f"{c['name']}: jenkins {jenkins_refs[c['name']]}, actions {c.get('ref')}"
+            for c in actions.get("components") or [] if c["name"] in jenkins_refs and jenkins_refs[c["name"]] != c.get("ref")]
+
+
+def bundle_ref_mismatches(build: Dict[str, Any], dist: Dict[str, Any]) -> List[str]:
+    build_refs = {c["name"]: c.get("ref") for c in build.get("components") or []}
+    return [f"{c['name']}: builds {build_refs.get(c['name'])}, dist {c.get('ref')}"
+            for c in dist.get("components") or [] if c.get("ref") is None or c.get("ref") != build_refs.get(c["name"])]
+
+
 def artifact_files(manifest: Dict[str, Any], filename: str) -> List[str]:
     files = [f"builds/{filename}/manifest.yml"]
     for component in manifest.get("components") or []:
@@ -116,27 +135,23 @@ def compare(record: str, jenkins_root: str, get: Callable[[str], str] = fetch) -
     def without_snapshot_only(lines: List[str]) -> List[str]:
         return [line for line in lines if not SNAPSHOT_METADATA.search(line)] if snapshot_vs_release else lines
 
-    def refs(lines: List[str]) -> List[str]:
-        return [line for line in lines if REF.match(line)]
-
-    def without_refs(lines: List[str]) -> List[str]:
-        # components[].ref is copied verbatim from the input manifest, so it differs whenever the manifest was edited
-        # (e.g. locked to tags) after the Jenkins build; it is listed separately instead of failing the comparison.
-        return [line for line in lines if not REF.match(line)]
-
     snapshot_vs_release = str(actions_build["build"]["version"]).endswith("-SNAPSHOT") and not str(jenkins_build["build"]["version"]).endswith("-SNAPSHOT")
     actions_names = sorted(norm_actions(f) for f in actions_files)
     package = jenkins_dist["build"]["location"].rsplit("/", 1)[1]
     jenkins_files = sorted({norm_jenkins(f) for f in artifact_files(jenkins_build, filename)} | {
         f"dist/{filename}/manifest.yml", f"dist/{filename}/{norm_jenkins(package)}"})
-    ref_diff = diff("refs", refs(layout(jenkins_build, norm_jenkins)), refs(layout(actions_build, norm_actions)))
+    refs = ref_differences(jenkins_build, actions_build)
+    bundle_refs = bundle_ref_mismatches(actions_build, actions_dist)
+    jenkins_build, jenkins_dist = without_refs(jenkins_build), without_refs(jenkins_dist)
+    actions_build, actions_dist = without_refs(actions_build), without_refs(actions_dist)
     return {
         "shared components": [", ".join(sorted(shared)) or "(none)"],
+        "input refs": refs or ["identical"],
         "snapshot-only files": [f"{len(snapshot_only(actions_names))} per-version maven-metadata.xml files" if snapshot_vs_release else "(none)"],
         "file names": diff("files", jenkins_files, without_snapshot_only(actions_names)),
-        "input manifest refs": ["identical" if ref_diff == [] else "\n".join(ref_diff[2:])],
-        "build manifest": diff("builds/manifest.yml", without_refs(layout(jenkins_build, norm_jenkins)), without_snapshot_only(without_refs(layout(actions_build, norm_actions)))),
-        "bundle manifest": diff("dist/manifest.yml", without_refs(layout(jenkins_dist, norm_jenkins)), without_refs(layout(actions_dist, norm_actions))),
+        "build manifest": diff("builds/manifest.yml", layout(jenkins_build, norm_jenkins), without_snapshot_only(layout(actions_build, norm_actions))),
+        "bundle refs": bundle_refs,
+        "bundle manifest": diff("dist/manifest.yml", layout(jenkins_dist, norm_jenkins), layout(actions_dist, norm_actions)),
     }
 
 
@@ -153,7 +168,7 @@ def main() -> int:
     for title, lines in sections.items():
         print(f"## {title}")
         if title in INFORMATIONAL:
-            print(lines[0])
+            print("\n".join(lines))
         elif lines:
             different = True
             print("\n".join(lines))

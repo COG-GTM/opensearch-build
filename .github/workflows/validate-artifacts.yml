@@ -8,6 +8,49 @@ name: Validate Artifacts
 run-name: Validate Artifacts ${{ inputs.VERSION }} ${{ inputs.OPTIONS }}
 
 on:
+  # distribution-build-opensearch.yml calls it for release candidates (Jenkins `build job: 'distribution-validation'`).
+  workflow_call:
+    inputs:
+      OPENSEARCH_ARTIFACT_URL:
+        required: false
+        default: ''
+        type: string
+      OPENSEARCH_DASHBOARDS_ARTIFACT_URL:
+        required: false
+        default: ''
+        type: string
+      VERSION:
+        required: false
+        default: ''
+        type: string
+      DISTRIBUTION:
+        required: false
+        default: tar rpm yum deb zip docker
+        type: string
+      ARCHITECTURE:
+        required: false
+        default: x64 arm64
+        type: string
+      PROJECTS:
+        description: 'opensearch or Both (workflow_call has no choice type; checked in verify-parameters)'
+        required: false
+        default: opensearch
+        type: string
+      ARTIFACT_TYPE:
+        description: 'production or staging'
+        required: false
+        default: production
+        type: string
+      DOCKER_SOURCE:
+        description: 'dockerhub, ecr or Both'
+        required: false
+        default: dockerhub
+        type: string
+      OPTIONS:
+        description: 'Same packed values as the workflow_dispatch OPTIONS input'
+        required: false
+        default: 'optional-args=using-staging-artifact-only skip-core-plugins=arrow-base,arrow-flight-rpc platform=linux,windows'
+        type: string
   workflow_dispatch:
     inputs:
       OPENSEARCH_ARTIFACT_URL:
@@ -162,6 +205,10 @@ jobs:
             echo "::error::Both VERSION and OPENSEARCH_ARTIFACT_URL cannot be empty. Please provide either value"
             exit 1
           fi
+          # workflow_call passes plain strings, so re-check the workflow_dispatch choices.
+          [[ "${PROJECTS}" =~ ^(opensearch|Both)$ ]] || { echo "::error::PROJECTS must be opensearch or Both"; exit 1; }
+          [[ "${ARTIFACT_TYPE}" =~ ^(production|staging)$ ]] || { echo "::error::ARTIFACT_TYPE must be production or staging"; exit 1; }
+          [[ "${DOCKER_SOURCE}" =~ ^(dockerhub|ecr|Both)$ ]] || { echo "::error::DOCKER_SOURCE must be dockerhub, ecr or Both"; exit 1; }
           projects="${PROJECTS}"
           [[ "${projects}" == Both ]] && projects='opensearch opensearch-dashboards'
           docker_source="${DOCKER_SOURCE}"
@@ -287,6 +334,8 @@ jobs:
     steps:
       - name: Checkout validation workspace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
 
       # docker and zip legs run directly on hosted runners without the ci-runner image, so
       # run.sh's python3/pip/pipenv prerequisites must be installed (setup-python also provides

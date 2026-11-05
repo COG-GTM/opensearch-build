@@ -188,11 +188,22 @@ def test_latest_rc_and_build_rc_dispatch(tmp_path: Any) -> None:
     assert not any("qualifier" in f["match_phrase"] for f in query["query"]["bool"]["filter"])
 
 
-def test_build_rc_fails_without_target_workflow_outside_dry_run() -> None:
+def test_build_rc_fails_without_target_workflow_outside_dry_run(monkeypatch: Any) -> None:
+    monkeypatch.setattr(release_chores.os.path, "isfile", lambda path: False)
     transport = FakeMetrics({release_chores.BUILD_RESULTS_INDEX: hits({"rc_number": 1})})
     chore, _ = chores(["build-rc", "--action", "opensearch", "--version", "3.9.0"], FakeGh(), transport)
     with pytest.raises(release_chores.ChoreError, match="distribution-build-opensearch.yml does not exist"):
         chore.run("build-rc")
+
+
+def test_build_rc_opensearch_inputs_match_the_workflow(capsys: Any) -> None:
+    transport = FakeMetrics({release_chores.BUILD_RESULTS_INDEX: hits({"rc_number": 1})})
+    chore, _ = chores(["build-rc", "--action", "opensearch", "--version", "3.9.0", "--dry-run"], FakeGh(), transport)
+    chore.run("build-rc")
+    out = capsys.readouterr().out
+    assert "-f RC_NUMBER=2 -f CONTINUE_ON_ERROR=false -f OPTIONS=test-platform=linux,windows test-distribution=tar,rpm,deb,zip " \
+           "build-docker=build_docker_with_build_number_tag update-github-issue" in out
+    assert "BUILD_DOCKER=" not in out and "TEST_PLATFORM=" not in out
 
 
 def test_latest_rc_number_zero_when_no_hits() -> None:
