@@ -4,8 +4,9 @@
 # (buildManifest(componentName: "OpenSearch", snapshot: true), as publish-min-snapshots.jenkinsfile does) for linux x64
 # tar inside the docker/ci image. The S3 upload is skipped with a notice while AWS_ROLE_ARTIFACTS is unset (and always
 # on pull requests). The build record (manifests + file list) is kept in the run and diffed against the latest Jenkins
-# distribution-build-opensearch build of the same version. The default is 3.8.0 because its OpenSearch ref is a tag:
-# manifests/3.9.0 still points at OpenSearch `main`, which is 3.10.0 now and fails build.sh's version check, in Jenkins too.
+# distribution-build-opensearch build of the same version. The default is 3.8.1 (OpenSearch ref `3.8`, at 3.8.1):
+# manifests/3.9.0 still points at OpenSearch `main`, which is 3.10.0 now and fails build.sh's version check (in Jenkins
+# too), and manifests/3.8.0 uses the AL2 image, whose glibc 2.26 can't run the runner's node24 inside a job container.
 # The integ-test leg runs one component against that Jenkins build's public artifacts.
 name: build-distribution-min-snapshot
 
@@ -23,7 +24,7 @@ on:
       input-manifest:
         description: 'Input manifest under manifests/'
         required: false
-        default: '3.8.0/opensearch-3.8.0.yml'
+        default: '3.8.1/opensearch-3.8.1.yml'
         type: string
       integ-test-component:
         description: 'Test-manifest component the integ-test leg runs against the Jenkins build'
@@ -44,7 +45,7 @@ jobs:
       contents: read
       id-token: write
     with:
-      input-manifest: ${{ inputs.input-manifest || '3.8.0/opensearch-3.8.0.yml' }}
+      input-manifest: ${{ inputs.input-manifest || '3.8.1/opensearch-3.8.1.yml' }}
       distribution: tar
       platform: linux
       architecture: x64
@@ -75,7 +76,7 @@ jobs:
       - name: Resolve the latest distribution-build-opensearch build
         id: latest
         env:
-          INPUT_MANIFEST: ${{ inputs.input-manifest || '3.8.0/opensearch-3.8.0.yml' }}
+          INPUT_MANIFEST: ${{ inputs.input-manifest || '3.8.1/opensearch-3.8.1.yml' }}
         run: |
           set -euo pipefail
           VERSION=$(python3 .github/scripts/manifest_paths.py input-manifest-info "manifests/${INPUT_MANIFEST}" | sed -n 's/^revision=//p')
