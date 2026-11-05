@@ -161,12 +161,14 @@ def component_names(manifest: Dict[str, Any]) -> List[str]:
 
 
 # docs/adr/0001-gha-runners-and-secrets.md, label map: Jenkins agent label -> full `runs-on` label array of the
-# ephemeral self-hosted pool. Only the Docker hosts are listed; single-host, benchmark and macOS pools are picked
-# by the workflows that need them.
+# ephemeral self-hosted pool. The Docker hosts and the macOS 14 hosts (publish-min-snapshots) are listed; single-host
+# and benchmark pools are picked by the workflows that need them.
 RUNS_ON = {
     "linux-x64": ["self-hosted", "linux", "x64", "al2023-x64-m5-4xlarge-docker-host"],
     "linux-arm64": ["self-hosted", "linux", "arm64", "al2023-arm64-m6g-4xlarge-docker-host"],
     "windows-x64": ["self-hosted", "windows", "x64", "windows2019-x64-m5-4xlarge-docker-host"],
+    "darwin-x64": ["self-hosted", "macos", "x64", "macos14-x64-mac1"],
+    "darwin-arm64": ["self-hosted", "macos", "arm64", "macos14-arm64-mac2"],
 }
 
 

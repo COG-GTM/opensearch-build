@@ -1,0 +1,671 @@
+---
+# GitHub Actions port of jenkins/opensearch/distribution-build.jenkinsfile (Jenkins job `distribution-build-opensearch`),
+# started from the s1.4 branch devin/1787177921-jenkins-to-actions and rebuilt on the reusable workflows on main.
+#
+#   parameters {}                      -> workflow_dispatch inputs; the Jenkins parameters past GitHub's ten-input limit
+#                                         are packed into OPTIONS (see its description)
+#   stage('verify-parameters')         -> verify-parameters
+#   stage('Trigger-min-snapshot-build')-> min-snapshot: workflow_call of publish-min-snapshots.yml (linux, macOS, windows)
+#   stage('build-and-test-<p>-<a>-<d>')-> build: matrix over linux x64/arm64 tar/rpm/deb and windows x64 zip, each cell
+#                                         one call of _build-distribution.yml (build.sh, assemble.sh, S3 upload and the
+#                                         index.json `latest` file under the same keys as Jenkins)
+#   triggerIntegrationTests()          -> integ-test: workflow_call of _integ-test.yml per tested cell
+#   stage('docker build')              -> docker-artifacts, docker-build, docker-copy, docker-scan
+#   post { always }                    -> build-results: publishDistributionBuildResults + updateBuildFailureIssues
+#                                         through the publish-metrics and notify-failure actions
+#   post { success / unstable }        -> distribution-validation (validate-artifacts.yml) and nightly-playground
+#
+# Jenkins BUILD_NUMBER is github.run_id here (build.id of the manifests and the <build> segment of the S3 keys), so the
+# artifact layout is distribution-build-opensearch/<revision>/<run_id>/<platform>/<arch>/<distribution>/{builds,dist}.
+# Not ported: INCREMENTAL / PREVIOUS_BUILD_ID (every build is a full build; the keys it writes are the same), and the
+# smoke-test / bwc-test triggers (s4.3 ports those jobs). Jenkins fired the downstream jobs with `propagate: false`;
+# a reusable-workflow job cannot set continue-on-error, so a failing min-snapshot or integ-test call shows on this run.
+#
+# pull_request runs are the evidence build: OpenSearch min + bundle of the current dev manifest for linux x64 tar on a
+# GitHub-hosted runner with every upload off, diffed against the latest Jenkins build of the same version.
+name: distribution-build-opensearch
+
+on:
+  workflow_dispatch:
+    inputs:
+      INPUT_MANIFEST:
+        description: '<Required> Input manifest under the manifests folder, e.g. 3.10.0/opensearch-3.10.0.yml.'
+        required: true
+        type: string
+      COMPONENT_NAME:
+        description: '<Optional> One or more component names (e.g. OpenSearch common-utils); empty builds everything in the INPUT_MANIFEST.'
+        required: false
+        default: ''
+        type: string
+      BUILD_PLATFORM:
+        description: '<Optional> Build selected platform: linux, windows, separated by spaces.'
+        required: false
+        default: 'linux windows'
+        type: string
+      BUILD_DISTRIBUTION:
+        description: '<Optional> Build selected distribution: tar, rpm, deb, zip, separated by spaces.'
+        required: false
+        default: 'tar rpm deb zip'
+        type: string
+      RC_NUMBER:
+        description: '<Optional> The RC build count. Default is 0 which means its not a Release Candidate.'
+        required: false
+        default: '0'
+        type: string
+      CONTINUE_ON_ERROR:
+        description: '<Optional> Continue building the distribution even if a one or more component fails'
+        required: false
+        default: true
+        type: boolean
+      UPDATE_LATEST_URL:
+        description: '<Optional> Update latest url so /latest/ is pointed to this build'
+        required: false
+        default: true
+        type: boolean
+      TEST_MANIFEST:
+        description: '<Optional> Test manifest under the manifests folder, e.g. 3.10.0/opensearch-3.10.0-test.yml.'
+        required: false
+        default: ''
+        type: string
+      OPTIONS:
+        description: >-
+          <Optional> Space-separated flags for the other Jenkins parameters, each starting from its Jenkins default;
+          prefix a flag with no- to turn it off. Flags: update-github-issue (on), integ-test (on, INTEG_TEST_JOB_NAME),
+          min-snapshot (on), skip-artifact-check (off), sign-rpm (on when the run uploads; rpm uploads require it), upload (on), release-candidate-upload
+          (on when RC_NUMBER > 0), compare-jenkins (off). Values: test-platform=<linux,windows>,
+          test-distribution=<tar,rpm,deb,zip>, parallel=<n> (4), build-docker=<build_docker |
+          build_docker_with_build_number_tag | do_not_build_docker> (build_docker), architecture=<x64,arm64>.
+        required: false
+        default: ''
+        type: string
+      RUNS_ON:
+        description: '<Optional> JSON runner label array for every cell instead of the ADR 0001 pools, e.g. ["ubuntu-24.04"].'
+        required: false
+        default: ''
+        type: string
+  pull_request:
+    paths:
+      - .github/workflows/distribution-build-opensearch.yml
+      - .github/workflows/publish-min-snapshots.yml
+      - .github/scripts/min_snapshots.py
+
+permissions: {}
+
+concurrency:
+  group: distribution-build-opensearch-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify-parameters:
+    name: verify-parameters
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      input-manifest: ${{ steps.params.outputs.input-manifest }}
+      component-name: ${{ steps.params.outputs.component-name }}
+      rc-number: ${{ steps.params.outputs.rc-number }}
+      continue-on-error: ${{ steps.params.outputs.continue-on-error }}
+      update-latest-url: ${{ steps.params.outputs.update-latest-url }}
+      test-manifest: ${{ steps.params.outputs.test-manifest }}
+      runs-on: ${{ steps.params.outputs.runs-on }}
+      matrix: ${{ steps.params.outputs.matrix }}
+      build-count: ${{ steps.params.outputs.build-count }}
+      test-matrix: ${{ steps.params.outputs.test-matrix }}
+      test-count: ${{ steps.params.outputs.test-count }}
+      min-snapshot: ${{ steps.params.outputs.min-snapshot }}
+      min-snapshot-targets: ${{ steps.params.outputs.min-snapshot-targets }}
+      parallel: ${{ steps.params.outputs.parallel }}
+      skip-artifact-check: ${{ steps.params.outputs.skip-artifact-check }}
+      sign-rpm: ${{ steps.params.outputs.sign-rpm }}
+      upload: ${{ steps.params.outputs.upload }}
+      can-upload: ${{ steps.params.outputs.can-upload }}
+      release-candidate-upload: ${{ steps.params.outputs.release-candidate-upload }}
+      update-github-issue: ${{ steps.params.outputs.update-github-issue }}
+      build-docker: ${{ steps.params.outputs.build-docker }}
+      docker-eligible: ${{ steps.params.outputs.docker-eligible }}
+      compare-jenkins: ${{ steps.params.outputs.compare-jenkins }}
+      revision: ${{ steps.params.outputs.revision }}
+      build-start-time: ${{ steps.params.outputs.build-start-time }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify the parameters and build the matrix
+        id: params
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_MANIFEST: ${{ inputs.INPUT_MANIFEST }}
+          COMPONENT_NAME: ${{ inputs.COMPONENT_NAME }}
+          BUILD_PLATFORM: ${{ inputs.BUILD_PLATFORM }}
+          BUILD_DISTRIBUTION: ${{ inputs.BUILD_DISTRIBUTION }}
+          RC_NUMBER: ${{ inputs.RC_NUMBER }}
+          CONTINUE_ON_ERROR: ${{ inputs.CONTINUE_ON_ERROR }}
+          UPDATE_LATEST_URL: ${{ inputs.UPDATE_LATEST_URL }}
+          TEST_MANIFEST: ${{ inputs.TEST_MANIFEST }}
+          OPTIONS: ${{ inputs.OPTIONS }}
+          RUNS_ON: ${{ inputs.RUNS_ON }}
+          RUN_ID: ${{ github.run_id }}
+          HAS_ARTIFACT_ROLE: ${{ secrets.AWS_ROLE_ARTIFACTS != '' && secrets.ARTIFACT_BUCKET_NAME != '' }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT}" = pull_request ]; then
+            # Evidence build (see the header): min snapshot + bundle of OpenSearch, linux x64 tar, nothing uploaded.
+            export INPUT_MANIFEST=3.10.0/opensearch-3.10.0.yml
+            export COMPONENT_NAME=OpenSearch
+            export BUILD_PLATFORM=linux
+            export BUILD_DISTRIBUTION=tar
+            export RC_NUMBER=0
+            export CONTINUE_ON_ERROR=true
+            export UPDATE_LATEST_URL=false
+            export TEST_MANIFEST=''
+            export OPTIONS='architecture=x64 no-upload no-update-github-issue build-docker=do_not_build_docker compare-jenkins'
+            export RUNS_ON='["ubuntu-24.04"]'
+          fi
+          bash .github/scripts/ensure-pyyaml.sh
+          python3 - <<'PY' | tee -a "$GITHUB_OUTPUT"
+          import json, os, re, sys, time
+
+          env = os.environ
+
+          def fail(message):
+              print(f"::error::{message}", file=sys.stderr)
+              sys.exit(1)
+
+          manifest = env["INPUT_MANIFEST"].strip()
+          if not manifest or not re.fullmatch(r"[A-Za-z0-9._/-]+\.yml", manifest) or ".." in manifest or not os.path.isfile(f"manifests/{manifest}"):
+              fail(f"Input manifest was not provided or not found at manifests/{manifest}.")
+          component = " ".join(env["COMPONENT_NAME"].split())
+          if not re.fullmatch(r"[A-Za-z0-9 ._-]*", component):
+              fail(f"COMPONENT_NAME is not valid: '{component}'")
+          rc = env["RC_NUMBER"].strip() or "0"
+          if not rc.isdigit():
+              fail(f"RC_NUMBER must be a number, got '{rc}'")
+          test_manifest = env["TEST_MANIFEST"].strip()
+          if test_manifest and (not re.fullmatch(r"[A-Za-z0-9._/-]+\.yml", test_manifest) or ".." in test_manifest or not os.path.isfile(f"manifests/{test_manifest}")):
+              fail(f"Test manifest not found at manifests/{test_manifest}.")
+          runs_on = env["RUNS_ON"].strip()
+          if runs_on:
+              try:
+                  labels = json.loads(runs_on)
+              except ValueError:
+                  labels = None
+              if not (isinstance(labels, list) and labels and all(isinstance(l, str) and re.fullmatch(r"[A-Za-z0-9._-]+", l) for l in labels)):
+                  fail(f"RUNS_ON must be a JSON array of runner labels, got '{runs_on}'")
+              runs_on = json.dumps(labels, separators=(",", ":"))
+
+          flags = {"update-github-issue": True, "integ-test": True, "min-snapshot": True, "skip-artifact-check": False,
+                   "sign-rpm": None, "upload": True, "release-candidate-upload": int(rc) > 0, "compare-jenkins": False}
+          values = {"test-platform": "", "test-distribution": "", "parallel": "4", "build-docker": "build_docker", "architecture": "x64 arm64"}
+          for option in env["OPTIONS"].split():
+              key, sep, value = option.partition("=")
+              if sep:
+                  if key not in values:
+                      fail(f"unknown OPTIONS value '{key}' (known: {', '.join(sorted(values))})")
+                  values[key] = value.replace(",", " ")
+              elif key in flags:
+                  flags[key] = True
+              elif key.startswith("no-") and key[3:] in flags:
+                  flags[key[3:]] = False
+              else:
+                  fail(f"unknown OPTIONS flag '{key}' (known: {', '.join(sorted(flags))}, each with a no- form)")
+          if not re.fullmatch(r"[0-9]*", values["parallel"]):
+              fail(f"parallel must be a number, got '{values['parallel']}'")
+          if values["build-docker"] not in ("build_docker", "build_docker_with_build_number_tag", "do_not_build_docker"):
+              fail(f"unknown build-docker value '{values['build-docker']}'")
+          build_docker = values["build-docker"]
+          if int(rc) > 0:
+              print("This is a release candidate build, enforcing build_docker_with_build_number_tag", file=sys.stderr)
+              build_docker = "build_docker_with_build_number_tag"
+
+          # verifyParameterPlatformDistribution(): BUILD_* are required, TEST_* are checked when set
+          allowed = {"BUILD_PLATFORM": "linux windows", "BUILD_DISTRIBUTION": "tar rpm deb zip",
+                     "test-platform": "linux windows", "test-distribution": "tar rpm deb zip"}
+          given = {"BUILD_PLATFORM": env["BUILD_PLATFORM"], "BUILD_DISTRIBUTION": env["BUILD_DISTRIBUTION"],
+                   "test-platform": values["test-platform"], "test-distribution": values["test-distribution"]}
+          for name, value in given.items():
+              if not value.split():
+                  if name.startswith("BUILD_"):
+                      fail(f"Missing parameter '{name}' (possible entries: {allowed[name]}).")
+                  continue
+              for entry in value.split():
+                  if entry not in allowed[name].split():
+                      fail(f"Error parameter '{name}': {value} (possible entries: {allowed[name]}).")
+          architectures = values["architecture"].split()
+          if not architectures or any(a not in ("x64", "arm64") for a in architectures):
+              fail(f"architecture must be x64 and/or arm64, got '{values['architecture']}'")
+
+          platforms, distributions = given["BUILD_PLATFORM"].split(), given["BUILD_DISTRIBUTION"].split()
+          # Stage order of the Jenkinsfile: linux x64 tar/rpm/deb, linux arm64 tar/rpm/deb, windows x64 zip
+          cells = [{"platform": "linux", "architecture": a, "distribution": d} for a in ("x64", "arm64") for d in ("tar", "rpm", "deb")]
+          cells.append({"platform": "windows", "architecture": "x64", "distribution": "zip"})
+          cells = [c for c in cells if c["platform"] in platforms and c["distribution"] in distributions and c["architecture"] in architectures]
+
+          with open(f"manifests/{manifest}") as f:
+              import yaml
+              build = yaml.safe_load(f)["build"]
+          revision = f"{build['version']}-{build['qualifier']}" if build.get("qualifier") else str(build["version"])
+          filename = build["name"].lower().replace(" ", "-")
+
+          root = "https://ci.opensearch.org/ci/dbc/distribution-build-opensearch"
+          tests = []
+          if test_manifest and flags["integ-test"]:
+              for c in cells:
+                  if c["platform"] in values["test-platform"].split() and c["distribution"] in values["test-distribution"].split():
+                      url = f"{root}/{revision}/{env['RUN_ID']}/{c['platform']}/{c['architecture']}/{c['distribution']}/builds/{filename}/manifest.yml"
+                      tests.append(dict(c, **{"build-manifest-url": url}))
+
+          upload = flags["upload"]
+          can_upload = upload and env["HAS_ARTIFACT_ROLE"] == "true"
+          # assembleManifest() signed every rpm: sign by default whenever the run really uploads, and never let an
+          # unsigned rpm reach the artifact bucket. Runs that cannot upload stay credential-free unless sign-rpm is set.
+          if flags["sign-rpm"] is None:
+              flags["sign-rpm"] = can_upload
+          if can_upload and not flags["sign-rpm"] and any(c["distribution"] == "rpm" for c in cells):
+              fail("no-sign-rpm needs no-upload (or no rpm in BUILD_DISTRIBUTION): Jenkins never uploaded unsigned rpm packages.")
+          if upload and not can_upload:
+              print("::notice::S3 upload skipped: AWS_ROLE_ARTIFACTS / ARTIFACT_BUCKET_NAME are not configured, so the integ-test, docker and validation follow-ups are skipped too.", file=sys.stderr)
+          if test_manifest and flags["integ-test"]:
+              print("::notice::smoke-test and bwc-test are not triggered from GitHub Actions yet (Port integration, BWC and smoke tests).", file=sys.stderr)
+          tar_cells = {c["architecture"] for c in cells if c["platform"] == "linux" and c["distribution"] == "tar"}
+          min_targets = "linux-x64-tar linux-arm64-tar darwin-x64-tar darwin-arm64-tar windows-x64-zip"
+          if env["EVENT"] == "pull_request":
+              min_targets = "linux-x64-tar"
+
+          def b(value):
+              return "true" if value else "false"
+
+          out = {
+              "input-manifest": manifest,
+              "component-name": component,
+              "rc-number": rc,
+              "continue-on-error": b(env["CONTINUE_ON_ERROR"] == "true"),
+              "update-latest-url": b(env["UPDATE_LATEST_URL"] == "true"),
+              "test-manifest": test_manifest,
+              "runs-on": runs_on,
+              "matrix": json.dumps({"include": cells}, separators=(",", ":")),
+              "build-count": str(len(cells)),
+              "test-matrix": json.dumps({"include": tests}, separators=(",", ":")),
+              "test-count": str(len(tests)),
+              "min-snapshot": b(flags["min-snapshot"]),
+              "min-snapshot-targets": min_targets,
+              "parallel": values["parallel"],
+              "skip-artifact-check": b(flags["skip-artifact-check"]),
+              "sign-rpm": b(flags["sign-rpm"]),
+              "upload": b(upload),
+              "can-upload": b(can_upload),
+              "release-candidate-upload": b(flags["release-candidate-upload"]),
+              "update-github-issue": b(flags["update-github-issue"]),
+              "build-docker": build_docker,
+              # Jenkins waited for both ARTIFACT_URL_LINUX_<ARCH>_TAR; without both tar cells it could never start
+              "docker-eligible": b(build_docker != "do_not_build_docker" and tar_cells == {"x64", "arm64"} and can_upload),
+              "compare-jenkins": b(flags["compare-jenkins"]),
+              "revision": revision,
+              "build-start-time": str(int(time.time() * 1000)),
+          }
+          for key, value in out.items():
+              print(f"{key}={value}")
+          PY
+
+  min-snapshot:
+    # stage('Trigger-min-snapshot-build'): build job: 'publish-opensearch-min-snapshots', wait: false
+    needs: verify-parameters
+    if: ${{ needs.verify-parameters.outputs.min-snapshot == 'true' }}
+    uses: ./.github/workflows/publish-min-snapshots.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      input-manifest: ${{ needs.verify-parameters.outputs.input-manifest }}
+      targets: ${{ needs.verify-parameters.outputs.min-snapshot-targets }}
+      runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
+      # No secrets block: the promotion and signing secrets are `release` environment secrets, which the called
+      # workflow's publish job reads in that environment.
+      publish: ${{ github.event_name != 'pull_request' }}
+
+  build:
+    needs: verify-parameters
+    if: ${{ needs.verify-parameters.outputs.build-count != '0' }}
+    strategy:
+      # The Jenkins build stages ran inside `parallel { }` without failing their siblings.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.verify-parameters.outputs.matrix) }}
+    uses: ./.github/workflows/_build-distribution.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      input-manifest: ${{ needs.verify-parameters.outputs.input-manifest }}
+      platform: ${{ matrix.platform }}
+      architecture: ${{ matrix.architecture }}
+      distribution: ${{ matrix.distribution }}
+      component-name: ${{ needs.verify-parameters.outputs.component-name }}
+      rc-number: ${{ needs.verify-parameters.outputs.rc-number }}
+      job-name: distribution-build-opensearch
+      continue-on-error: ${{ needs.verify-parameters.outputs.continue-on-error == 'true' }}
+      skip-artifact-check: ${{ needs.verify-parameters.outputs.skip-artifact-check == 'true' }}
+      parallel: ${{ needs.verify-parameters.outputs.parallel }}
+      upload: ${{ needs.verify-parameters.outputs.upload == 'true' }}
+      update-latest-url: ${{ needs.verify-parameters.outputs.update-latest-url == 'true' }}
+      release-candidate-upload: ${{ needs.verify-parameters.outputs.release-candidate-upload == 'true' }}
+      sign-rpm: ${{ needs.verify-parameters.outputs.sign-rpm == 'true' && matrix.distribution == 'rpm' }}
+      runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
+    secrets:
+      AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+      AWS_ROLE_PROMOTION: ${{ secrets.AWS_ROLE_PROMOTION }}
+      ARTIFACT_PRODUCTION_BUCKET_NAME: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+      AWS_ROLE_RPM_SIGNING: ${{ secrets.AWS_ROLE_RPM_SIGNING }}
+      RPM_SIGNING_KEY_ID: ${{ secrets.RPM_SIGNING_KEY_ID }}
+      RPM_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_SIGNING_PASSPHRASE_SECRETS_ARN }}
+      RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+      RPM_RELEASE_SIGNING_KEY_ID: ${{ secrets.RPM_RELEASE_SIGNING_KEY_ID }}
+      RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_PASSPHRASE_SECRETS_ARN }}
+      RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN: ${{ secrets.RPM_RELEASE_SIGNING_SECRET_KEY_ID_SECRETS_ARN }}
+
+  integ-test:
+    # triggerIntegrationTests(): only for cells in TEST_PLATFORM x TEST_DISTRIBUTION, with a TEST_MANIFEST and an
+    # uploaded build manifest (buildManifestUrl != '').
+    needs: [verify-parameters, build]
+    if: ${{ always() && needs.verify-parameters.outputs.test-count != '0' && needs.verify-parameters.outputs.can-upload == 'true' && needs.build.result != 'cancelled' && needs.build.result != 'skipped' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.verify-parameters.outputs.test-matrix) }}
+    uses: ./.github/workflows/_integ-test.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      test-manifest: ${{ needs.verify-parameters.outputs.test-manifest }}
+      build-manifest-url: ${{ matrix.build-manifest-url }}
+      rc-number: ${{ needs.verify-parameters.outputs.rc-number }}
+      runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
+    secrets:
+      AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+      AWS_ROLE_TEST_RESULTS: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+
+  docker-artifacts:
+    # stage('docker build') polled ARTIFACT_URL_LINUX_X64_TAR / ARM64 every 120 s; `needs: build` replaces the polling
+    # and the URLs are checked for presence, as both stages had to have published their tarball.
+    name: docker build
+    needs: [verify-parameters, build]
+    if: ${{ always() && needs.verify-parameters.outputs.docker-eligible == 'true' && needs.build.result != 'cancelled' && needs.build.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      ready: ${{ steps.urls.outputs.ready }}
+      script: ${{ steps.urls.outputs.script }}
+    steps:
+      - name: Resolve the tarball URLs
+        id: urls
+        env:
+          REVISION: ${{ needs.verify-parameters.outputs.revision }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          ROOT="https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/${REVISION}/${RUN_ID}/linux"
+          X64="${ROOT}/x64/tar/dist/opensearch/opensearch-${REVISION}-linux-x64.tar.gz"
+          ARM64="${ROOT}/arm64/tar/dist/opensearch/opensearch-${REVISION}-linux-arm64.tar.gz"
+          if ! curl -sSfIL --retry 3 "${X64}" > /dev/null || ! curl -sSfIL --retry 3 "${ARM64}" > /dev/null; then
+            echo "::notice::Skipping docker build, one of x64 or arm64 artifacts was not built."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # buildDockerImage.groovy (jenkins@12.0.0), DOCKER_BUILD_SCRIPT_WITH_COMMANDS
+          MAJOR="${REVISION%%.*}"
+          BASE_OS=al2023
+          [ "${MAJOR}" = 1 ] && BASE_OS=al2
+          SCRIPT="id && pwd && cd docker/release && curl -sSL ${X64} -o opensearch-x64.tgz && curl -sSL ${ARM64} -o opensearch-arm64.tgz && bash build-image-multi-arch.sh -v ${REVISION} -f ./dockerfiles/opensearch.${BASE_OS}.dockerfile -p opensearch -a 'x64,arm64' -r opensearchstaging/opensearch -t 'opensearch-x64.tgz,opensearch-arm64.tgz' -n ${RUN_ID}"
+          {
+            echo "ready=true"
+            echo "script=${SCRIPT}"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  docker-build:
+    needs: [verify-parameters, docker-artifacts]
+    if: ${{ always() && needs.docker-artifacts.outputs.ready == 'true' }}
+    uses: ./.github/workflows/docker-build.yml
+    permissions:
+      contents: read
+    with:
+      DOCKER_BUILD_GIT_REPOSITORY: https://github.com/opensearch-project/opensearch-build
+      DOCKER_BUILD_GIT_REPOSITORY_REFERENCE: main
+      DOCKER_BUILD_SCRIPT_WITH_COMMANDS: ${{ needs.docker-artifacts.outputs.script }}
+    secrets: inherit  # zizmor: ignore[secrets-inherit] docker-build.yml declares no workflow_call secrets
+
+  docker-copy:
+    needs: [verify-parameters, docker-build]
+    if: ${{ always() && needs.docker-build.result == 'success' && needs.verify-parameters.outputs.build-docker == 'build_docker_with_build_number_tag' }}
+    uses: ./.github/workflows/docker-copy.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      SOURCE_IMAGE_REGISTRY: opensearchstaging
+      SOURCE_IMAGE: opensearch:${{ needs.verify-parameters.outputs.revision }}
+      DESTINATION_IMAGE_REGISTRY: opensearchstaging
+      DESTINATION_IMAGE: opensearch:${{ needs.verify-parameters.outputs.revision }}.${{ github.run_id }}
+    secrets: inherit  # zizmor: ignore[secrets-inherit] docker-copy.yml declares no workflow_call secrets
+
+  docker-scan:
+    needs: [verify-parameters, docker-build, docker-copy]
+    if: ${{ always() && needs.docker-build.result == 'success' && (needs.docker-copy.result == 'success' || needs.docker-copy.result == 'skipped') }}
+    uses: ./.github/workflows/docker-scan.yml
+    permissions:
+      contents: read
+    with:
+      IMAGE_FULL_NAME: opensearchstaging/opensearch:${{ needs.verify-parameters.outputs.revision }}
+    secrets: inherit  # zizmor: ignore[secrets-inherit] docker-scan.yml declares no workflow_call secrets
+
+  build-results:
+    # post { always }: publishDistributionBuildResults() and, with UPDATE_GITHUB_ISSUE, updateBuildFailureIssues()
+    name: publish-build-results
+    needs: [verify-parameters, build]
+    if: ${{ always() && needs.verify-parameters.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      issues: read
+    outputs:
+      failed: ${{ steps.classify.outputs.failed }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download the build logs
+        continue-on-error: true
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          pattern: build-log-*
+          path: build-logs
+
+      - name: Classify the components
+        # buildMessage(search: 'Error building' / 'Successfully built') over the build logs of this run's cells
+        id: classify
+        env:
+          INPUT_MANIFEST: manifests/${{ needs.verify-parameters.outputs.input-manifest }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-logs
+          # publish-min-snapshots.yml's logs (-min) belong to the publish-opensearch-min-snapshots job, not this one
+          find build-logs -mindepth 1 -maxdepth 1 -type d -name 'build-log-*-min' -exec rm -rf {} +
+          python3 - <<'PY' | tee -a "$GITHUB_OUTPUT"
+          import glob, importlib.util, os, yaml
+          spec = importlib.util.spec_from_file_location("metrics_records", ".github/scripts/metrics_records.py")
+          records = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(records)
+          text = ""
+          for path in glob.glob("build-logs/**/*.log", recursive=True):
+              with open(path, errors="replace") as f:
+                  text += f.read() + "\n"
+          with open(os.environ["INPUT_MANIFEST"]) as f:
+              names = [c["name"] for c in yaml.safe_load(f).get("components") or []]
+          failed = [c for c in records.extract_components(text, r"(?<=\bError building\s).*") if c in names]
+          passed = [c for c in records.extract_components(text, r"(?<=\bSuccessfully built\s).*") if c in names and c not in failed]
+          print("failed=" + ",".join(failed))
+          print("passed=" + ",".join(passed))
+          PY
+
+      - name: Check the credentials
+        id: creds
+        env:
+          EVENT: ${{ github.event_name }}
+          METRICS: ${{ secrets.METRICS_CLUSTER_ENDPOINT != '' && secrets.AWS_ROLE_METRICS != '' }}
+          APP: ${{ secrets.GH_APP_ID != '' && secrets.GH_APP_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          METRICS_DRY_RUN=true
+          ISSUES_DRY_RUN=true
+          if [ "${EVENT}" != pull_request ]; then
+            [ "${METRICS}" = true ] && METRICS_DRY_RUN=false
+            [ "${APP}" = true ] && ISSUES_DRY_RUN=false
+          fi
+          [ "${METRICS_DRY_RUN}" = true ] && echo "::notice::Metrics indexing is a dry run (METRICS_CLUSTER_ENDPOINT / AWS_ROLE_METRICS not configured or pull request)."
+          [ "${ISSUES_DRY_RUN}" = true ] && echo "::notice::AUTOCUT issue updates are a dry run (GH_APP_ID / GH_APP_PRIVATE_KEY not configured or pull request)."
+          {
+            echo "metrics-dry-run=${METRICS_DRY_RUN}"
+            echo "issues-dry-run=${ISSUES_DRY_RUN}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish the distribution build results
+        uses: ./.github/actions/publish-metrics
+        with:
+          kind: build
+          input-manifest: manifests/${{ needs.verify-parameters.outputs.input-manifest }}
+          build-logs-directory: build-logs
+          rc-number: ${{ needs.verify-parameters.outputs.rc-number }}
+          component-category: OpenSearch
+          # currentBuild.result: ABORTED for a cancelled matrix, UNSTABLE when components failed under CONTINUE_ON_ERROR (markStageUnstableIfPluginsFailedToBuild)
+          overall-build-result: >-
+            ${{ needs.build.result == 'failure' && 'FAILURE'
+            || needs.build.result == 'success' && steps.classify.outputs.failed != '' && 'UNSTABLE'
+            || needs.build.result == 'success' && 'SUCCESS'
+            || 'ABORTED' }}
+          build-number: ${{ github.run_id }}
+          build-start-time: ${{ needs.verify-parameters.outputs.build-start-time }}
+          metrics-host-url: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+          role-to-assume: ${{ secrets.AWS_ROLE_METRICS }}
+          dry-run: ${{ steps.creds.outputs.metrics-dry-run }}
+
+      - name: Update the build failure issues
+        if: ${{ needs.verify-parameters.outputs.update-github-issue == 'true' }}
+        uses: ./.github/actions/notify-failure
+        with:
+          kind: distribution-build
+          input-manifest: manifests/${{ needs.verify-parameters.outputs.input-manifest }}
+          failures: ${{ steps.classify.outputs.failed }}
+          passed: ${{ steps.classify.outputs.passed }}
+          dry-run: ${{ steps.creds.outputs.issues-dry-run }}
+          app-id: ${{ secrets.GH_APP_ID }}
+          app-private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+  distribution-validation:
+    # post { success }: triggerDistributionValidationWorkflow(revision) for release candidates. A build with failed
+    # components was UNSTABLE in Jenkins, not SUCCESS, so it skips validation.
+    needs: [verify-parameters, build, build-results]
+    if: ${{ always() && needs.verify-parameters.outputs.rc-number != '0' && needs.verify-parameters.outputs.can-upload == 'true' && needs.build.result == 'success' && needs.build-results.result == 'success' && needs.build-results.outputs.failed == '' }}
+    uses: ./.github/workflows/validate-artifacts.yml
+    permissions:
+      contents: read
+    with:
+      VERSION: ${{ needs.verify-parameters.outputs.revision }}
+      OPTIONS: os-build-number=${{ github.run_id }} optional-args=using-staging-artifact-only
+      DOCKER_SOURCE: dockerhub
+      PROJECTS: opensearch
+      ARTIFACT_TYPE: staging
+
+  nightly-playground:
+    # post { success } and post { unstable }: triggerNightlyPlayground() for release candidates; errors are only logged.
+    needs: [verify-parameters, build]
+    if: ${{ always() && needs.verify-parameters.outputs.rc-number != '0' && needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Trigger the nightly playground workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_BOT_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::notice::GITHUB_BOT_TOKEN is not configured; nightly-playground-trigger.yml was not triggered."
+            exit 0
+          fi
+          echo "Triggering nightly playground workflow."
+          gh workflow run nightly-playground-trigger.yml -R opensearch-project/opensearch-devops --ref main \
+            || echo "Error in triggering nightly playground workflow."
+
+  compare-jenkins:
+    # Evidence: diff the build manifests / file layout of the bundle and min-snapshot builds against the latest
+    # Jenkins distribution-build-opensearch build of the same version, and check the snapshot keys against the
+    # public snapshots the Jenkins publish-opensearch-min-snapshots job wrote.
+    name: diff against Jenkins
+    needs: [verify-parameters, build, min-snapshot]
+    if: ${{ always() && needs.verify-parameters.outputs.compare-jenkins == 'true' && needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          pattern: build-record-linux-x64-tar*
+          path: records
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        continue-on-error: true
+        with:
+          name: snapshot-keys-linux-x64-tar
+          path: snapshot-keys
+
+      - name: Diff against Jenkins
+        env:
+          REVISION: ${{ needs.verify-parameters.outputs.revision }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/ensure-pyyaml.sh
+          INDEX="https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/${REVISION}/index/linux/x64/tar/index.json"
+          LATEST=$(curl -sSfL --retry 5 "${INDEX}" | python3 -c 'import json, sys; print(json.load(sys.stdin)["latest"])')
+          [[ "${LATEST}" =~ ^[0-9]+$ ]] || { echo "::error::unexpected latest build '${LATEST}' in ${INDEX}"; exit 1; }
+          JENKINS_ROOT="https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/${REVISION}/${LATEST}/linux/x64/tar"
+          STATUS=0
+          for RECORD in records/build-record-linux-x64-tar records/build-record-linux-x64-tar-min; do
+            [ -d "${RECORD}" ] || continue
+            {
+              echo "=== ${RECORD##*/} vs Jenkins ${JENKINS_ROOT}"
+              python3 .github/scripts/compare_build_layout.py --record "${RECORD}" --jenkins-root "${JENKINS_ROOT}" || STATUS=1
+              echo
+            } > section.txt 2>&1
+            tee -a diff.txt < section.txt
+          done
+          if [ -f snapshot-keys/snapshot-keys.txt ]; then
+            echo "=== snapshot keys vs https://artifacts.opensearch.org/snapshots/ (Jenkins publish-opensearch-min-snapshots)" | tee -a diff.txt
+            while read -r KEY; do
+              if curl -sSfIL --retry 3 "https://artifacts.opensearch.org/snapshots/${KEY}" > /dev/null 2>&1; then
+                echo "present  ${KEY}"
+              else
+                echo "MISSING  ${KEY}"
+                STATUS=1
+              fi
+            done < snapshot-keys/snapshot-keys.txt > section.txt
+            tee -a diff.txt < section.txt
+          fi
+          { echo '```'; cat diff.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "${STATUS}"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        if: ${{ always() }}
+        with:
+          name: jenkins-layout-diff
+          path: diff.txt

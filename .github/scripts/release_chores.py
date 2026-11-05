@@ -533,6 +533,18 @@ class Chores:
             "CONTINUE_ON_ERROR": "false",
             "UPDATE_GITHUB_ISSUE": "true",
         }
+        if product == "opensearch":
+            # distribution-build-opensearch.yml packs the parameters past the ten-input limit into OPTIONS
+            fields = {
+                "INPUT_MANIFEST": fields["INPUT_MANIFEST"],
+                "TEST_MANIFEST": fields["TEST_MANIFEST"],
+                "BUILD_PLATFORM": fields["BUILD_PLATFORM"],
+                "BUILD_DISTRIBUTION": fields["BUILD_DISTRIBUTION"],
+                "RC_NUMBER": rc_number,
+                "CONTINUE_ON_ERROR": "false",
+                "OPTIONS": "test-platform=linux,windows test-distribution=tar,rpm,deb,zip "
+                           "build-docker=build_docker_with_build_number_tag update-github-issue",
+            }
         args = ["workflow", "run", workflow, "-R", self.args.repository]
         for key, value in fields.items():
             args += ["-f", f"{key}={value}"]

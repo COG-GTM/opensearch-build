@@ -21,7 +21,7 @@ on:
         default: 'tar'
         type: string
       platform:
-        description: 'linux or windows'
+        description: 'linux, windows or darwin (darwin: tar on the macOS pool, no job container)'
         required: false
         default: 'linux'
         type: string
@@ -89,6 +89,21 @@ on:
         required: false
         default: false
         type: boolean
+      keep-min-artifact:
+        description: >-
+          Keep <distribution>/builds/<filename>/{dist,core-plugins,manifest.yml} in the run as the
+          min-snapshot-<platform>-<architecture>-<distribution> artifact, for publish-min-snapshots.yml
+          (uploadMinSnapshotsToS3). tar and zip only.
+        required: false
+        default: false
+        type: boolean
+      artifact-suffix:
+        description: >-
+          Appended to the names of the run artifacts (builds-, build-log-, build-record-, min-snapshot-) so two calls
+          for the same platform/architecture/distribution in one run do not collide, e.g. '-min'.
+        required: false
+        default: ''
+        type: string
       runs-on:
         description: 'JSON label array overriding the ADR 0001 label map, e.g. ["ubuntu-24.04"]. Empty uses the map.'
         required: false
@@ -163,7 +178,7 @@ jobs:
       build-args: ${{ steps.images.outputs.build-args }}
       assemble-image: ${{ steps.images.outputs.assemble-image }}
       assemble-args: ${{ steps.images.outputs.assemble-args }}
-      java-version: ${{ steps.manifest.outputs.java-version }}
+      java-version: ${{ steps.darwin-java.outputs.java-version || steps.manifest.outputs.java-version }}
       filename: ${{ steps.manifest.outputs.filename }}
       manifest-path: ${{ steps.manifest.outputs.manifest-path }}
       build-manifest: ${{ steps.params.outputs.distribution }}/builds/${{ steps.manifest.outputs.filename }}/manifest.yml
@@ -184,6 +199,7 @@ jobs:
           JOB_NAME: ${{ inputs.job-name }}
           RUNS_ON: ${{ inputs.runs-on }}
           PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+          ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix }}
         run: |
           set -euo pipefail
           [ "${DISTRIBUTION}" = windows ] && DISTRIBUTION=zip
@@ -195,16 +211,17 @@ jobs:
           }
           # verify-parameters / verifyParameterPlatformDistribution in distribution-build.jenkinsfile
           check distribution "${DISTRIBUTION}" '^(tar|rpm|deb|zip)$'
-          check platform "${PLATFORM}" '^(linux|windows)$'
+          check platform "${PLATFORM}" '^(linux|windows|darwin)$'
           check architecture "${ARCHITECTURE}" '^(x64|arm64)$'
           check rc-number "${RC_NUMBER}" '^[0-9]+$'
           check parallel "${PARALLEL}" '^[0-9]*$'
           check component-name "${COMPONENT_NAME}" '^[A-Za-z0-9 ._-]*$'
           check job-name "${JOB_NAME}" '^[A-Za-z0-9._-]+$'
+          check artifact-suffix "${ARTIFACT_SUFFIX}" '^[A-Za-z0-9._-]*$'
           check public-artifact-url "${PUBLIC_ARTIFACT_URL}" '^https://[A-Za-z0-9._~/-]+$'
           case "${PLATFORM}-${DISTRIBUTION}" in
-            linux-tar|linux-rpm|linux-deb|windows-zip) ;;
-            *) echo "::error::${DISTRIBUTION} is not built on ${PLATFORM} (Jenkins: linux tar/rpm/deb, windows zip)."; exit 1 ;;
+            linux-tar|linux-rpm|linux-deb|windows-zip|darwin-tar) ;;
+            *) echo "::error::${DISTRIBUTION} is not built on ${PLATFORM} (Jenkins: linux tar/rpm/deb, windows zip, darwin tar)."; exit 1 ;;
           esac
           if [ -n "${RUNS_ON}" ]; then
             python3 -c 'import json, re, sys
@@ -227,6 +244,18 @@ jobs:
           checkout: 'false'
           platform: ${{ inputs.platform }}
           distribution: ${{ steps.params.outputs.distribution }}
+
+      - name: Resolve the macOS JDK
+        # publish-min-snapshots.jenkinsfile: the macOS stages switch to the Java version of the windows zip image
+        # (dockerAgentWindowsZip.javaVersion); input manifests carry no darwin image entry.
+        id: darwin-java
+        if: ${{ inputs.platform == 'darwin' }}
+        env:
+          MANIFEST_FILE: ${{ steps.manifest.outputs.manifest-file }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/manifest_paths.py ci-image "${MANIFEST_FILE}" --platform windows --distribution zip \
+            | sed -n 's/^java-version=/java-version=/p' | tee -a "$GITHUB_OUTPUT"
 
       - name: Resolve the CI-runner images
         id: images
@@ -319,6 +348,34 @@ jobs:
           echo "Switching to Java ${JAVA_VERSION_NUMBER} on Windows"
           scoop reset "$(scoop list jdk | cut -d ' ' -f1 | grep "${JAVA_VERSION_NUMBER}" | head -1)"
 
+      - name: Switch the macOS JDK
+        # publish-min-snapshots.jenkinsfile macos stages: update-alternatives on the Mac hosts. GitHub-hosted macOS
+        # images have no update-alternatives and export JAVA_HOME_<N>_<ARCH> instead.
+        if: ${{ inputs.platform == 'darwin' }}
+        env:
+          JAVA_VERSION: ${{ needs.setup.outputs.java-version }}
+        run: |
+          set -euo pipefail
+          JAVA_VERSION_NUMBER="${JAVA_VERSION//[^0-9]/}"
+          echo "Switching to Java ${JAVA_VERSION_NUMBER} on macOS"
+          for UA in /usr/local/bin/update-alternatives /opt/homebrew/bin/update-alternatives; do
+            if [ -x "${UA}" ] && "${UA}" --list java 2>/dev/null | grep -q "openjdk-${JAVA_VERSION_NUMBER}"; then
+              "${UA}" --set java "$("${UA}" --list java | grep "openjdk-${JAVA_VERSION_NUMBER}" | head -1)"
+              java -version
+              exit 0
+            fi
+          done
+          for VAR in "JAVA_HOME_${JAVA_VERSION_NUMBER}_X64" "JAVA_HOME_${JAVA_VERSION_NUMBER}_arm64" "JAVA_HOME_${JAVA_VERSION_NUMBER}_ARM64"; do
+            if [ -n "${!VAR:-}" ]; then
+              echo "JAVA_HOME=${!VAR}" >> "$GITHUB_ENV"
+              echo "${!VAR}/bin" >> "$GITHUB_PATH"
+              "${!VAR}/bin/java" -version
+              exit 0
+            fi
+          done
+          echo "::error::No openjdk-${JAVA_VERSION_NUMBER} found on this macOS runner."
+          exit 1
+
       - name: Build
         env:
           MANIFEST_PATH: ${{ needs.setup.outputs.manifest-path }}
@@ -347,14 +404,38 @@ jobs:
             ARGS+=(--parallel "${PARALLEL}")
           fi
           echo "./build.sh ${ARGS[*]}"
-          bash ./build.sh "${ARGS[@]}"
+          # Tee-ed for publish-metrics / notify-failure, which read the "Error building" / "Successfully built" lines
+          # (buildMessage) and "Failed plugins are" (markStageUnstableIfPluginsFailedToBuild) from the log.
+          mkdir -p build-log
+          bash ./build.sh "${ARGS[@]}" 2>&1 | tee build-log/build.log
+
+      - name: Keep the build log in the run
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: build-log-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}${{ inputs.artifact-suffix }}
+          path: build-log
+          if-no-files-found: warn
+
+      - name: Keep the min artifact in the run
+        # uploadMinSnapshotsToS3 reads <distribution>/builds/<filename>/{dist,core-plugins,manifest.yml}
+        if: ${{ inputs.keep-min-artifact && needs.setup.outputs.package != 'true' }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: min-snapshot-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}${{ inputs.artifact-suffix }}
+          path: |
+            ${{ needs.setup.outputs.distribution }}/builds/${{ needs.setup.outputs.filename }}/dist
+            ${{ needs.setup.outputs.distribution }}/builds/${{ needs.setup.outputs.filename }}/core-plugins
+            ${{ needs.setup.outputs.distribution }}/builds/${{ needs.setup.outputs.filename }}/manifest.yml
+          if-no-files-found: error
+          retention-days: 3
 
       - name: Stash the builds for assemble
         # buildArchive.groovy: stash includes: "<distribution>/builds/**"
         if: ${{ needs.setup.outputs.package == 'true' }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          name: builds-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
+          name: builds-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}${{ inputs.artifact-suffix }}
           path: ${{ needs.setup.outputs.distribution }}/builds
           if-no-files-found: error
           retention-days: 1
@@ -405,7 +486,7 @@ jobs:
         if: ${{ always() && needs.setup.outputs.package != 'true' }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          name: build-record-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
+          name: build-record-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}${{ inputs.artifact-suffix }}
           path: build-record
           if-no-files-found: warn
 
@@ -449,7 +530,7 @@ jobs:
       - name: Unstash the builds
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
         with:
-          name: builds-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
+          name: builds-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}${{ inputs.artifact-suffix }}
           path: ${{ needs.setup.outputs.distribution }}/builds
 
       - name: Check the upload credentials
@@ -499,7 +580,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          name: build-record-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
+          name: build-record-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}${{ inputs.artifact-suffix }}
           path: build-record
           if-no-files-found: warn
 

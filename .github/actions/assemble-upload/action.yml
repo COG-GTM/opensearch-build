@@ -209,7 +209,8 @@ runs:
       run: |
         set -euo pipefail
         # uploadIndexFile.groovy: writeJSON file: 'index.json', json: ['latest': "${BUILD_NUMBER}"]
-        python3 -c 'import json, sys; open("index.json", "w").write(json.dumps({"latest": sys.argv[1]}))' "${BUILD_NUMBER}"
+        # writeJSON writes compact JSON ({"latest":"12228"}), so no spaces after the separators.
+        python3 -c 'import json, sys; open("index.json", "w").write(json.dumps({"latest": sys.argv[1]}, separators=(",", ":")))' "${BUILD_NUMBER}"
 
     - name: Upload index.json
       if: ${{ inputs.upload == 'true' && inputs.update-latest-url == 'true' }}

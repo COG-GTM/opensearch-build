@@ -1,0 +1,275 @@
+---
+# GitHub Actions port of jenkins/opensearch/publish-min-snapshots.jenkinsfile (Jenkins job
+# `publish-opensearch-min-snapshots`): build the OpenSearch min snapshot (buildManifest(componentName: "OpenSearch",
+# snapshot: true)) for linux x64/arm64 tar, macOS x64/arm64 tar and windows x64 zip through the reusable
+# _build-distribution.yml, then publish it with uploadMinSnapshotsToS3() semantics: .sha512 for the min artifact,
+# -latest copies plus the build manifest under snapshots/core/<filename>/<version>/ in the production bucket, and for
+# linux x64 tar the signed core plugins under snapshots/plugins/<plugin>/<revision>/.
+#
+# distribution-build-opensearch.yml calls it (Jenkins `build job: 'publish-opensearch-min-snapshots'`). The Jenkins
+# parameterizedCron schedule (4 manifests every 4 hours) belongs to the scheduled-builds port (s4.4). When the
+# promotion role or bucket is not configured the publish job only prints the S3 keys it would write.
+name: publish-min-snapshots
+
+on:
+  workflow_call:
+    inputs:
+      input-manifest:
+        description: 'Input manifest under manifests/ (Jenkins INPUT_MANIFEST)'
+        required: true
+        type: string
+      targets:
+        description: 'Space-separated <platform>-<architecture>-<distribution> cells to build'
+        required: false
+        default: 'linux-x64-tar linux-arm64-tar darwin-x64-tar darwin-arm64-tar windows-x64-zip'
+        type: string
+      runs-on:
+        description: 'JSON label array overriding the ADR 0001 label map for every cell, e.g. ["ubuntu-24.04"]'
+        required: false
+        default: ''
+        type: string
+      publish:
+        description: 'Upload to snapshots/ in the production bucket; false only prints the keys'
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      # `release` environment secrets (ADR 0001): the publish job runs in that environment and reads them even
+      # when the caller passes nothing
+      AWS_ROLE_PROMOTION:
+        required: false
+      ARTIFACT_PRODUCTION_BUCKET_NAME:
+        required: false
+      AWS_ROLE_SIGNING_BASE:
+        required: false
+      SIGNER_CLIENT_ROLE:
+        required: false
+      SIGNER_CLIENT_EXTERNAL_ID:
+        required: false
+      SIGNER_CLIENT_UNSIGNED_BUCKET:
+        required: false
+      SIGNER_CLIENT_SIGNED_BUCKET:
+        required: false
+  workflow_dispatch:
+    inputs:
+      INPUT_MANIFEST:
+        description: '<Required> Input manifest under the manifests folder, e.g. 3.10.0/opensearch-3.10.0.yml.'
+        required: true
+        type: string
+      TARGETS:
+        description: '<Optional> Space-separated <platform>-<architecture>-<distribution> cells.'
+        required: false
+        default: 'linux-x64-tar linux-arm64-tar darwin-x64-tar darwin-arm64-tar windows-x64-zip'
+        type: string
+      PUBLISH:
+        description: '<Optional> Upload to snapshots/ in the production bucket; off only lists the keys.'
+        required: false
+        default: true
+        type: boolean
+
+permissions: {}
+
+jobs:
+  setup:
+    name: detect-docker-images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      input-manifest: ${{ steps.matrix.outputs.input-manifest }}
+    steps:
+      - name: Build the matrix
+        id: matrix
+        env:
+          INPUT_MANIFEST: ${{ inputs.input-manifest || inputs.INPUT_MANIFEST }}
+          TARGETS: ${{ inputs.targets || inputs.TARGETS }}
+        run: |
+          set -euo pipefail
+          [[ "${INPUT_MANIFEST}" =~ ^[A-Za-z0-9._/-]+\.yml$ && "${INPUT_MANIFEST}" != *..* ]] \
+            || { echo "::error::input-manifest is not valid: '${INPUT_MANIFEST}'"; exit 1; }
+          python3 - <<'PY' | tee -a "$GITHUB_OUTPUT"
+          import json, os, re
+          allowed = {"linux-x64-tar", "linux-arm64-tar", "darwin-x64-tar", "darwin-arm64-tar", "windows-x64-zip"}
+          cells = []
+          for target in os.environ["TARGETS"].split():
+              if target not in allowed:
+                  raise SystemExit(f"::error::unknown target '{target}' (known: {' '.join(sorted(allowed))})")
+              platform, architecture, distribution = target.split("-")
+              cells.append({"platform": platform, "architecture": architecture, "distribution": distribution})
+          if not cells:
+              raise SystemExit("::error::no targets selected")
+          print("matrix=" + json.dumps({"include": cells}, separators=(",", ":")))
+          print("input-manifest=" + os.environ["INPUT_MANIFEST"])
+          PY
+
+  build:
+    needs: setup
+    strategy:
+      # The Jenkins stages ran inside `parallel { }` without failing their siblings.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    uses: ./.github/workflows/_build-distribution.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      input-manifest: ${{ needs.setup.outputs.input-manifest }}
+      platform: ${{ matrix.platform }}
+      architecture: ${{ matrix.architecture }}
+      distribution: ${{ matrix.distribution }}
+      component-name: OpenSearch
+      snapshot: true
+      # buildManifest() defaults: no --continue-on-error, no --parallel
+      continue-on-error: false
+      parallel: ''
+      job-name: publish-opensearch-min-snapshots
+      # Jenkins never uploaded these builds to the artifact bucket; only uploadMinSnapshotsToS3 below writes S3.
+      upload: false
+      update-latest-url: false
+      keep-min-artifact: true
+      # distribution-build-opensearch.yml builds the same cells in the same run
+      artifact-suffix: '-min'
+      runs-on: ${{ inputs.runs-on }}
+
+  publish:
+    name: upload-min-snapshots-${{ matrix.platform }}-${{ matrix.architecture }}-${{ matrix.distribution }}
+    needs: [setup, build]
+    if: ${{ always() && needs.setup.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The production bucket and signing roles are `release` environment secrets; pull requests and publish: false
+    # only list the keys, so they stay out of the environment (and its reviewer gate).
+    environment: ${{ (github.event_name != 'pull_request' && (inputs.publish || inputs.PUBLISH)) && 'release' || '' }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DISTRIBUTION: ${{ matrix.distribution }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download the min artifact
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: min-snapshot-${{ matrix.platform }}-${{ matrix.architecture }}-${{ matrix.distribution }}-min
+          path: ${{ matrix.distribution }}/builds/opensearch
+
+      - name: Skip a cell that did not build
+        if: ${{ steps.download.outcome != 'success' }}
+        env:
+          CELL: ${{ matrix.platform }}-${{ matrix.architecture }}-${{ matrix.distribution }}
+        run: echo "::warning::No min snapshot for ${CELL}; its build failed, nothing to publish."
+
+      - name: Check the publish credentials
+        id: creds
+        if: ${{ steps.download.outcome == 'success' }}
+        env:
+          PUBLISH: ${{ (inputs.publish || inputs.PUBLISH) && 'true' || 'false' }}
+          ROLE: ${{ secrets.AWS_ROLE_PROMOTION }}
+          BUCKET: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+          SIGNING: ${{ secrets.AWS_ROLE_SIGNING_BASE != '' && secrets.SIGNER_CLIENT_ROLE != '' && secrets.SIGNER_CLIENT_EXTERNAL_ID != '' && secrets.SIGNER_CLIENT_UNSIGNED_BUCKET != '' && secrets.SIGNER_CLIENT_SIGNED_BUCKET != '' }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT}" = pull_request ] || [ "${PUBLISH}" != true ]; then
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "${ROLE}" ] || [ -z "${BUCKET}" ]; then
+            echo "::notice::Snapshot upload skipped: AWS_ROLE_PROMOTION / ARTIFACT_PRODUCTION_BUCKET_NAME are not configured. The keys it would write are listed below."
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sign=${SIGNING}" >> "$GITHUB_OUTPUT"
+
+      - name: Find the core plugins
+        # uploadMinSnapshotsToS3: core plugins are checksummed, signed and published for linux x64 tar only
+        id: plugins
+        if: ${{ steps.download.outcome == 'success' }}
+        env:
+          CELL: ${{ matrix.platform }}-${{ matrix.architecture }}-${{ matrix.distribution }}
+        run: |
+          set -euo pipefail
+          if [ "${CELL}" = linux-x64-tar ] && [ -d "${DISTRIBUTION}/builds/opensearch/core-plugins" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+          # uploadMinSnapshotsToS3: release@opensearch.org from major version 3, opensearch@amazon.com before
+          MAJOR=$(sed -n 's/^  version: *.\{0,1\}\([0-9][0-9]*\)\..*/\1/p' "${DISTRIBUTION}/builds/opensearch/manifest.yml" | head -1)
+          if [ "${MAJOR:-3}" -gt 2 ]; then
+            echo "signing-email=release@opensearch.org" >> "$GITHUB_OUTPUT"
+          else
+            echo "signing-email=opensearch@amazon.com" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Refuse to publish unsigned core plugins
+        # uploadMinSnapshotsToS3 always signed them before the upload
+        if: ${{ steps.plugins.outputs.present == 'true' && steps.creds.outputs.upload == 'true' && steps.creds.outputs.sign != 'true' }}
+        run: |
+          echo "::error::Core plugins would be published unsigned: AWS_ROLE_SIGNING_BASE / SIGNER_CLIENT_* are not configured in the release environment."
+          exit 1
+
+      - name: Create .sha512 for the core plugins
+        if: ${{ steps.plugins.outputs.present == 'true' }}
+        uses: ./.github/actions/checksums
+        with:
+          artifact-path: ${{ matrix.distribution }}/builds/opensearch/core-plugins
+
+      - name: Sign the core plugins
+        # Without the signing secrets (pull requests, listing-only runs) the step only prints the sign.sh command.
+        if: ${{ steps.plugins.outputs.present == 'true' }}
+        uses: ./.github/actions/sign-artifacts
+        env:
+          SIGNER_CLIENT_ROLE: ${{ secrets.SIGNER_CLIENT_ROLE }}
+          SIGNER_CLIENT_EXTERNAL_ID: ${{ secrets.SIGNER_CLIENT_EXTERNAL_ID }}
+          SIGNER_CLIENT_UNSIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_UNSIGNED_BUCKET }}
+          SIGNER_CLIENT_SIGNED_BUCKET: ${{ secrets.SIGNER_CLIENT_SIGNED_BUCKET }}
+        with:
+          artifact-path: ${{ matrix.distribution }}/builds/opensearch/core-plugins
+          sigtype: '.sig'
+          platform: linux
+          email: ${{ steps.plugins.outputs.signing-email }}
+          role-to-assume: ${{ secrets.AWS_ROLE_SIGNING_BASE }}
+          dry-run: ${{ steps.creds.outputs.sign != 'true' && 'true' || 'false' }}
+
+      - name: Stage the snapshot files
+        if: ${{ steps.download.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/ensure-pyyaml.sh
+          python3 .github/scripts/min_snapshots.py prepare \
+            --build-manifest "${DISTRIBUTION}/builds/opensearch/manifest.yml" \
+            --staging snapshot-upload
+
+      - name: List the snapshot keys
+        if: ${{ steps.download.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          (cd snapshot-upload && find . -type f | sed 's|^\./||' | LC_ALL=C sort) | tee snapshot-keys.txt
+          { echo '```'; cat snapshot-keys.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the key listing in the run
+        if: ${{ steps.download.outcome == 'success' }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: snapshot-keys-${{ matrix.platform }}-${{ matrix.architecture }}-${{ matrix.distribution }}
+          path: snapshot-keys.txt
+
+      - name: Upload the snapshots
+        if: ${{ steps.creds.outputs.upload == 'true' }}
+        uses: ./.github/actions/s3-sync
+        with:
+          direction: upload
+          role-to-assume: ${{ secrets.AWS_ROLE_PROMOTION }}
+          bucket: ${{ secrets.ARTIFACT_PRODUCTION_BUCKET_NAME }}
+          remote-path: snapshots/
+          local-path: snapshot-upload
