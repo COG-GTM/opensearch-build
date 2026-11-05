@@ -228,11 +228,10 @@ jobs:
               "zip": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-windows2019-opensearch-build-v1@sha256:cdd822332b3a5fdbe89b6e40c9483325913a1801817131f472d7e303425a40fc",
               "deb": "public.ecr.aws/opensearchorg/opensearchstaging/ci-runner:ci-runner-ubuntu2404-systemd-base-integtest-v1@sha256:72879a69678bb2b9970c68d6b13b8d71f6ad804ef6fcbfde9117fd3875f06bbb",
           }
-          # Job containers cannot override --entrypoint, so rpm/yum/deb run systemd via
-          # `docker run` in a dedicated step instead of a job container.
-          options = {
-              "tar": "-u 1000",
-          }
+          # Every ci-runner leg is started with `docker run` and validation.sh runs via `docker exec`
+          # (port of docker.image().inside(docker_args)): job containers cannot override the
+          # entrypoint (rpm/yum/deb need systemd as PID 1) and cannot run as uid 1000 because the
+          # runner's file-command directory is owned by the runner user.
           systemd_distributions = ("rpm", "yum", "deb")
           matrix = []
           for distribution in os.environ["DISTRIBUTION"].split():
@@ -245,15 +244,16 @@ jobs:
                   runner = "windows-2022" if platform == "windows" else (
                       "ubuntu-24.04-arm" if architecture == "arm64" else "ubuntu-24.04"
                   )
-                  container = "" if distribution in ("docker", "zip") or distribution in systemd_distributions else images[distribution]
+                  # docker validates on the host daemon (Jenkins agent_nodes_docker); zip has no Windows
+                  # container support on hosted runners, so both run directly on the runner.
+                  image = "" if distribution in ("docker", "zip") else images[distribution]
                   matrix.append({
                       "distribution": distribution,
                       "architecture": architecture,
                       "platform": platform,
                       "runner": runner,
-                      "container": container,
-                      "container_options": options.get(distribution, ""),
-                      "systemd_image": images[distribution] if distribution in systemd_distributions else "",
+                      "image": image,
+                      "systemd": "true" if distribution in systemd_distributions else "false",
                   })
           print(json.dumps(matrix, separators=(",", ":")))
           PY
@@ -262,7 +262,7 @@ jobs:
             echo "::warning::Validation matrix is empty; matching Jenkins, validation completes with no legs."
             echo "### Artifact validation ran with NO legs (empty matrix); nothing was validated." >> "${GITHUB_STEP_SUMMARY}"
             # Keep matrix expansion valid even if GitHub evaluates it before the job-level guard.
-            matrix_json='[{"distribution":"none","architecture":"none","platform":"linux","runner":"ubuntu-24.04","container":"","container_options":"","systemd_image":""}]'
+            matrix_json='[{"distribution":"none","architecture":"none","platform":"linux","runner":"ubuntu-24.04","image":"","systemd":"false"}]'
             printf 'has-legs=false\n' >> "${GITHUB_OUTPUT}"
           else
             printf 'has-legs=true\n' >> "${GITHUB_OUTPUT}"
@@ -282,13 +282,6 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
-    # docker and zip intentionally have no job container. Jenkins used a Windows ci-runner container for zip,
-    # but GitHub Actions cannot run Windows job containers with that Docker setup.
-    # rpm/yum/deb also have no job container: job containers cannot override the entrypoint, so those
-    # legs start a systemd container with `docker run` below (the port of Jenkins docker.image().inside
-    # with the systemd/privileged args) and run validation inside it via docker exec.
-    # zizmor cannot resolve the matrix expression; every image above is pinned by digest in the matrix generator.
-    container: ${{ matrix.container != '' && fromJSON(format('{{"image":"{0}","options":"{1}"}}', matrix.container, matrix.container_options)) || null }}  # zizmor: ignore[unpinned-images]
     steps:
       - name: Checkout validation workspace
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -297,13 +290,13 @@ jobs:
       # run.sh's python3/pip/pipenv prerequisites must be installed (setup-python also provides
       # a python3 shim on windows-2022 for the bash invocation).
       - name: Set up Python for container-less runners
-        if: ${{ matrix.container == '' && matrix.systemd_image == '' }}
+        if: ${{ matrix.image == '' }}
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: '3.9'
 
       - name: Install pipenv for container-less runners
-        if: ${{ matrix.container == '' && matrix.systemd_image == '' }}
+        if: ${{ matrix.image == '' }}
         run: python -m pip install pipenv
 
       # validation_docker.py shells out to the standalone `docker-compose` binary that the Jenkins
@@ -320,30 +313,39 @@ jobs:
           fi
           sudo sysctl -w vm.max_map_count=262144
 
-      # Port of Jenkins docker.image().inside('--entrypoint=/usr/lib/systemd/systemd -u root --privileged
-      # -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host') for rpm/yum/deb: systemd must be PID 1 for
-      # systemctl-based validation, which a GitHub Actions job container cannot provide.
-      - name: Start systemd validation container
-        if: ${{ matrix.systemd_image != '' }}
+      # Port of Jenkins docker.image(image).inside(docker_args). tar keeps `-u 1000` (OpenSearch refuses
+      # to start as root), so the checkout is handed to uid 1000 for the container's lifetime.
+      # rpm/yum/deb keep '--entrypoint=/usr/lib/systemd/systemd -u root --privileged
+      # -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host' so systemctl-based validation works.
+      - name: Start ci-runner validation container
+        if: ${{ matrix.image != '' }}
         env:
-          SYSTEMD_IMAGE: ${{ matrix.systemd_image }}
+          IMAGE: ${{ matrix.image }}
+          SYSTEMD: ${{ matrix.systemd }}
         run: |
           set -euo pipefail
-          docker pull "${SYSTEMD_IMAGE}"
-          docker run -d --name validate --privileged -u root \
-            -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host \
-            -v "${GITHUB_WORKSPACE}:/work" -w /work \
-            "${SYSTEMD_IMAGE}" /usr/lib/systemd/systemd
-
-      - name: Wait for systemd in validation container
-        if: ${{ matrix.systemd_image != '' }}
-        run: |
-          set -euo pipefail
+          docker pull "${IMAGE}"
+          if [[ "${SYSTEMD}" == 'true' ]]; then
+            docker run -d --name validate --privileged -u root \
+              -v /sys/fs/cgroup:/sys/fs/cgroup:rw --cgroupns=host \
+              -v "${GITHUB_WORKSPACE}:/work" -w /work \
+              --entrypoint /usr/lib/systemd/systemd "${IMAGE}"
+          else
+            sudo chown -R 1000:1000 "${GITHUB_WORKSPACE}"
+            docker run -d --name validate -u 1000 \
+              -v "${GITHUB_WORKSPACE}:/work" -w /work \
+              --entrypoint tail "${IMAGE}" -f /dev/null
+          fi
           if [[ "$(docker inspect --format '{{.State.Running}}' validate)" != 'true' ]]; then
-            echo "::error::systemd validation container failed to start"
+            echo "::error::validation container failed to start"
             docker logs validate || true
             exit 1
           fi
+
+      - name: Wait for systemd in validation container
+        if: ${{ matrix.systemd == 'true' }}
+        run: |
+          set -euo pipefail
           # A degraded state is acceptable: some units may fail inside a container,
           # but systemd is up as PID 1 and systemctl is usable.
           timeout 180 docker exec validate systemctl is-system-running --wait || true
@@ -365,8 +367,10 @@ jobs:
           allow-http: ${{ matrix.distribution != 'docker' && needs.verify-parameters.outputs.allow-http || '' }}
           docker-args: ${{ matrix.distribution == 'docker' && needs.verify-parameters.outputs.optional-args || '' }}
           skip-core-plugins: ${{ (matrix.distribution == 'docker' || needs.verify-parameters.outputs.version != '') && needs.verify-parameters.outputs.skip-core-plugins || '' }}
-          docker-exec-container: ${{ matrix.systemd_image != '' && 'validate' || '' }}
+          docker-exec-container: ${{ matrix.image != '' && 'validate' || '' }}
 
-      - name: Cleanup systemd validation container
-        if: ${{ always() && matrix.systemd_image != '' }}
-        run: docker rm -f validate || true
+      - name: Cleanup validation container
+        if: ${{ always() && matrix.image != '' }}
+        run: |
+          docker rm -f validate || true
+          sudo chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" || true
