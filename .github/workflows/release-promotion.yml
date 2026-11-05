@@ -44,6 +44,11 @@ on:
         required: false
         default: true
         type: boolean
+      production-docker-build-number-override:
+        description: '<Dry run only> Staging build number (e.g. latest) for the production docker digest gate instead of the RC numbers. Empty = Jenkins behavior.'
+        required: false
+        default: ''
+        type: string
   workflow_call:
     inputs:
       RELEASE_VERSION:
@@ -69,6 +74,10 @@ on:
         required: false
         default: true
         type: boolean
+      production-docker-build-number-override:
+        required: false
+        default: ''
+        type: string
     secrets:
       # repository secrets come from the caller; AWS_ROLE_PROMOTION and CLOUDFRONT_DISTRIBUTION_ID are `release`-environment
       # secrets (ADR 0001), which the environment job reads even when the caller passes nothing
@@ -124,12 +133,14 @@ jobs:
           TAG_DOCKER_LATEST: ${{ inputs.TAG_DOCKER_LATEST }}
           PROJECTS: ${{ inputs.PROJECTS }}
           DRY_RUN: ${{ inputs.dry-run }}
+          PRODUCTION_DOCKER_BUILD_NUMBER_OVERRIDE: ${{ inputs.production-docker-build-number-override }}
         run: |
           set -euo pipefail
           python3 .github/scripts/release_promotion.py plan \
             --release-version "${RELEASE_VERSION}" --opensearch-rc "${OPENSEARCH_RC_BUILD_NUMBER}" \
             --opensearch-dashboards-rc "${OPENSEARCH_DASHBOARDS_RC_BUILD_NUMBER}" --projects "${PROJECTS}" \
             --tag-docker-latest "${TAG_DOCKER_LATEST}" --dry-run "${DRY_RUN}" \
+            --production-docker-build-number-override "${PRODUCTION_DOCKER_BUILD_NUMBER_OVERRIDE}" \
             --github-output "${GITHUB_OUTPUT}" --summary "${GITHUB_STEP_SUMMARY}"
 
   validate-staging:

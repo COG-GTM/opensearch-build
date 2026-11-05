@@ -38,6 +38,10 @@ jobs:
       TAG_DOCKER_LATEST: true
       PROJECTS: both
       dry-run: true
+      # opensearchproject/opensearch:3.9.0 was re-released on 2026-10-26 (docker-re-release builds 160/161), so its digest no
+      # longer matches opensearchstaging/opensearch:3.9.0.12228 and the exact Jenkins gate fails, as Jenkins would today
+      # (run 42110979828). Every release still in manifests/ was re-released, so check against `latest`, which follows them.
+      production-docker-build-number-override: latest
 
   promote-artifacts:
     name: artifacts ${{ matrix.job }} ${{ matrix.platform }} ${{ matrix.architecture }} ${{ matrix.distribution }}

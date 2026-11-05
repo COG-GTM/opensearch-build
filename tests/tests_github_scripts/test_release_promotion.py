@@ -74,6 +74,30 @@ class TestPlan(unittest.TestCase):
         self.assertLessEqual({"Invalidate Cloudfront", "Promote Docker", "${{ matrix.target.stage }}"}, names)
         self.assertIn(promotion.SUMMARY_JOB, names)
 
+    def test_production_docker_override(self) -> None:
+        result = promotion.plan("3.9.0", "12228", "9054", "both", True, True, " latest ")
+        self.assertEqual(result["production-validation-options"],
+                         "os-build-number=latest osd-build-number=latest optional-args=validate-digest-only platform=linux,windows")
+        self.assertEqual(result["staging-validation-options"],
+                         "os-build-number=12228 osd-build-number=latest optional-args=using-staging-artifact-only platform=linux,windows")
+        self.assertEqual(result["source-images"], "opensearch:3.9.0.12228, opensearch-dashboards:3.9.0.9054")
+        self.assertIn("Production docker digest gate checked against `latest`, not OpenSearch RC 12228", promotion.plan_markdown(result, True))
+        only_os = promotion.plan("3.9.0", "12228", "", "opensearch", True, True, "latest")
+        self.assertEqual(only_os["production-validation-options"], "os-build-number=latest optional-args=validate-digest-only platform=linux,windows")
+        default = promotion.plan("3.9.0", "12228", "9054", "both", True, True, "")
+        self.assertEqual(default["production-validation-options"],
+                         "os-build-number=12228 osd-build-number=latest optional-args=validate-digest-only platform=linux,windows")
+        self.assertNotIn("Production docker digest gate", promotion.plan_markdown(default, True))
+
+    def test_production_docker_override_requires_dry_run(self) -> None:
+        with self.assertRaisesRegex(promotion.ParameterError, "only allowed with dry-run: true"):
+            promotion.plan("3.9.0", "12228", "9054", "both", True, False, "latest")
+        self.assertEqual(promotion.plan("3.9.0", "12228", "9054", "both", True, False, "")["production-docker-build-number-override"], "")
+        args = ["plan", "--release-version", "3.9.0", "--opensearch-rc", "12228", "--opensearch-dashboards-rc", "9054",
+                "--production-docker-build-number-override", "latest"]
+        self.assertEqual(promotion.main(args + ["--dry-run", "false"]), 1)
+        self.assertEqual(promotion.main(args + ["--dry-run", "true"]), 0)
+
     def test_main_plan_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output, summary = os.path.join(tmp, "out"), os.path.join(tmp, "summary")

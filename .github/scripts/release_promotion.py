@@ -63,7 +63,8 @@ class ParameterError(Exception):
     pass
 
 
-def plan(release_version: str, os_rc: str, osd_rc: str, projects: str, tag_docker_latest: bool) -> Dict[str, Any]:
+def plan(release_version: str, os_rc: str, osd_rc: str, projects: str, tag_docker_latest: bool,
+         dry_run: bool = True, production_docker_build_number_override: str = "") -> Dict[str, Any]:
     release_version, os_rc, osd_rc = release_version.strip(), os_rc.strip(), osd_rc.strip()  # string(trim: true)
     if projects not in PROJECTS:
         raise ParameterError(f"PROJECTS must be one of {', '.join(PROJECTS)}, not {projects!r}")
@@ -75,6 +76,9 @@ def plan(release_version: str, os_rc: str, osd_rc: str, projects: str, tag_docke
         raise ParameterError("Please enter OpenSearch RC Build Number")
     if dashboards and not osd_rc:
         raise ParameterError("Please enter OpenSearch-Dashboards RC Build Number")
+    override = production_docker_build_number_override.strip()
+    if override and not dry_run:
+        raise ParameterError("production-docker-build-number-override is only allowed with dry-run: true")
 
     def selected(job: str) -> bool:
         return opensearch if job == OS_JOB else dashboards
@@ -103,6 +107,12 @@ def plan(release_version: str, os_rc: str, osd_rc: str, projects: str, tag_docke
     if not only_opensearch:
         validation_options.append("osd-build-number=latest")
 
+    # Not in Jenkins: lets a dry run of an already released version whose Docker images were re-released since RC
+    # validate the production digest gate against another staging tag; empty keeps the Jenkins values above.
+    production_options = validation_options
+    if override:
+        production_options = [f"os-build-number={override}"] + ([] if only_opensearch else [f"osd-build-number={override}"])
+
     # 'Promote Docker' SOURCE_IMAGES
     images = []
     if opensearch:
@@ -125,10 +135,11 @@ def plan(release_version: str, os_rc: str, osd_rc: str, projects: str, tag_docke
         "os-manifest": manifest(OS_JOB),
         "validation-projects": "opensearch" if only_opensearch else "Both",
         "staging-validation-options": " ".join(validation_options + ["optional-args=using-staging-artifact-only", "platform=linux,windows"]),
-        "production-validation-options": " ".join(validation_options + ["optional-args=validate-digest-only", "platform=linux,windows"]),
+        "production-validation-options": " ".join(production_options + ["optional-args=validate-digest-only", "platform=linux,windows"]),
         "source-images": ", ".join(images),
         "tag-docker-latest": tag_docker_latest,
         "cloudfront-paths": " ".join(cloudfront_paths),
+        "production-docker-build-number-override": override,
     }
 
 
@@ -159,6 +170,9 @@ def plan_markdown(result: Dict[str, Any], dry_run: bool) -> str:
     ]
     if result["opensearch"]:
         lines.append(f"| Publish to Maven | publish-to-maven ({'plan only' if dry_run else 'dispatched, not awaited'}) | BUILD_ID={result['os-rc']}, VERSION={result['release-version']} |")
+    if result["production-docker-build-number-override"]:
+        lines += ["", f"> **Production docker digest gate checked against `{result['production-docker-build-number-override']}`, "
+                  f"not OpenSearch RC {result['os-rc']}** (production-docker-build-number-override, dry run only)."]
     return "\n".join(lines) + "\n"
 
 
@@ -230,6 +244,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     plan_cmd.add_argument("--projects", default="both")
     plan_cmd.add_argument("--tag-docker-latest", default="true")
     plan_cmd.add_argument("--dry-run", default="true")
+    plan_cmd.add_argument("--production-docker-build-number-override", default="")
     plan_cmd.add_argument("--github-output")
     plan_cmd.add_argument("--summary")
     summary_cmd = commands.add_parser("summary")
@@ -241,7 +256,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.command == "plan":
         try:
-            result = plan(args.release_version, args.opensearch_rc, args.opensearch_dashboards_rc, args.projects, args.tag_docker_latest == "true")
+            result = plan(args.release_version, args.opensearch_rc, args.opensearch_dashboards_rc, args.projects, args.tag_docker_latest == "true",
+                          args.dry_run == "true", args.production_docker_build_number_override)
         except ParameterError as error:
             print(f"::error::{error}")
             return 1
