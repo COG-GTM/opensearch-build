@@ -705,15 +705,15 @@ def notes_pr(args: argparse.Namespace, github: GitHub) -> None:
         committed = open(target).read() if os.path.isfile(target) else None
         if args.dry_run:
             compare_notes(committed, generated, f"release-notes/{filename}")
-        if committed == generated:
-            echo(f"No changes to commit for component {name}. Skipping PR creation.")
-            return
         try:
             base = pr_base(ref)
         except ChoreError as error:
             if not args.dry_run:
                 raise
             echo(f"[dry-run] would fail like Jenkins: {error}")
+            return
+        if committed == generated:
+            echo(f"No changes to commit for component {name}. Skipping PR creation.")
             return
         os.makedirs(os.path.dirname(target), exist_ok=True)
         shutil.copyfile(generated_path, target)

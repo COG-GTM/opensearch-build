@@ -292,6 +292,23 @@ def test_notes_pr_dry_run(tmp_path: Any, capsys: Any) -> None:
     assert gh.calls == [["api", "repos/opensearch-project/job-scheduler/pulls?head=opensearch-project:release-chores/release-notes-3.9.0&state=open", "--jq", ".[0].number"]]
 
 
+def test_notes_pr_tag_ref_fails_even_when_notes_unchanged(tmp_path: Any) -> None:
+    notes = tmp_path / "release-notes"
+    notes.mkdir()
+    (notes / "opensearch-job-scheduler.release-notes-3.9.0.0.md").write_text("same\n")
+
+    def fake_clone(repository: str, ref: str, destination: str) -> None:
+        os.makedirs(os.path.join(destination, "release-notes"))
+        with open(os.path.join(destination, "release-notes", "opensearch-job-scheduler.release-notes-3.9.0.0.md"), "w") as f:
+            f.write("same\n")
+
+    gh = FakeGh()
+    args = release_chores.parse_args(["notes-pr", "--manifest", OS_MANIFEST, "--component", "job-scheduler", "--notes-dir", str(notes), "--ref", "tags/3.9.0.0"])
+    with patch.object(release_chores, "clone", fake_clone), pytest.raises(release_chores.ChoreError, match="is a tag"):
+        release_chores.notes_pr(args, release_chores.GitHub(False, gh))
+    assert gh.calls == []
+
+
 def test_main_reports_errors(capsys: Any) -> None:
     assert release_chores.main(["doc-prs", "--action", "check"]) == 1
     assert "::error::Version parameter is required." in capsys.readouterr().out
