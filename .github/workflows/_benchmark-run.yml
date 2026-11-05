@@ -149,6 +149,9 @@ jobs:
             echo "discovery.type: single-node"
             if [ -d plugins/opensearch-security ]; then echo "plugins.security.disabled: true"; fi
           } >> config/opensearch.yml
+          # hosted runners export JAVA_HOME (JDK 17); OpenSearch 3.x needs its bundled JDK 21
+          unset JAVA_HOME
+          [ -d jdk ] && export OPENSEARCH_JAVA_HOME="$PWD/jdk"
           OPENSEARCH_JAVA_OPTS="-Xms4g -Xmx4g" ./bin/opensearch -d -p opensearch.pid
           # the benchmark runs in a container, so it needs the runner's address rather than localhost
           host="$(hostname -I | awk '{print $1}')"
