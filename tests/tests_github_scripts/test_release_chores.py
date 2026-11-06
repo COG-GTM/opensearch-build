@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 SCRIPT = os.path.join(os.path.dirname(__file__), "..", "..", ".github", "scripts", "release_chores.py")
 SPEC = importlib.util.spec_from_file_location("release_chores", SCRIPT)
@@ -292,8 +293,17 @@ def test_notes_pr_dry_run(tmp_path: Any, capsys: Any) -> None:
     def fake_clone(repository: str, ref: str, destination: str) -> None:
         os.makedirs(os.path.join(destination, "release-notes"))
 
+    # the notes PR targets the manifest ref (-B ${ref}); pin it to a branch, the repo manifest may be commit-locked
+    with open(OS_MANIFEST) as f:
+        manifest = yaml.safe_load(f)
+    for component in manifest["components"]:
+        if component["name"] == "job-scheduler":
+            component["ref"] = "main"
+    manifest_path = tmp_path / "opensearch-3.9.0.yml"
+    manifest_path.write_text(yaml.safe_dump(manifest))
+
     gh = FakeGh({"api": "null"})
-    args = release_chores.parse_args(["notes-pr", "--manifest", OS_MANIFEST, "--component", "job-scheduler", "--notes-dir", str(notes), "--dry-run"])
+    args = release_chores.parse_args(["notes-pr", "--manifest", str(manifest_path), "--component", "job-scheduler", "--notes-dir", str(notes), "--dry-run"])
     with patch.object(release_chores, "clone", fake_clone):
         release_chores.notes_pr(args, release_chores.GitHub(True, gh))
     out = capsys.readouterr().out
