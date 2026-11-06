@@ -9,7 +9,8 @@
 #   compare-*    check the GitHub build manifest against the Jenkins RC build manifest (same commit per component;
 #                functionalTestDashboards is left unlocked by MATCH_BUILD_MANIFEST on Jenkins too, so it is not compared),
 #   integ-test-* run integ-test-opensearch(-dashboards).yml on the GitHub builds, Dashboards against the replayed
-#                OpenSearch (Jenkins: passed for both components).
+#                OpenSearch (Jenkins: passed for both components). The OpenSearch build carries geospatial and
+#                job-scheduler because customImportMapDashboards uploads GeoJSON through the geospatial plugin.
 # Branch/tag/lock, promotion (release-promotion-dry-run.yml) and release notes (release-notes-check.yml compile) of
 # the same RC run as dry-run dispatches of their own workflows. Live staging targets are out of scope until the
 # runner/OIDC infrastructure and the staging buckets/registries are applied.
@@ -40,7 +41,7 @@ jobs:
       architecture: x64
       distribution: tar
       rc-number: '4'
-      component-name: OpenSearch security custom-codecs opensearch-system-templates
+      component-name: OpenSearch security custom-codecs opensearch-system-templates job-scheduler geospatial
       job-name: distribution-build-opensearch
       upload: false
       update-latest-url: false
@@ -81,7 +82,7 @@ jobs:
       matrix:
         include:
           - product: opensearch
-            components: OpenSearch security custom-codecs opensearch-system-templates
+            components: OpenSearch security custom-codecs opensearch-system-templates job-scheduler geospatial
           - product: opensearch-dashboards
             components: OpenSearch-Dashboards securityDashboards customImportMapDashboards
     steps:
