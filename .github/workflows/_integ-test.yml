@@ -720,7 +720,8 @@ jobs:
             printf -v COMMAND '%q ' "${REPORT[@]}"
             docker exec test-report bash -c "${COMMAND}"
           fi
-          [ "${PLATFORM}" = windows ] || sudo chown "$(id -u):$(id -g)" test-report.yml
+          # sed -i writes its temporary file next to test-report.yml, in the workspace the container (uid 1000) wrote to
+          [ "${PLATFORM}" = windows ] || sudo chown "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" test-report.yml
           if [ -n "${ARTIFACTS_FROM_RUN}" ]; then
             # Local builds are reported under their artifact URLs (uploaded or not), never the runner workspace.
             sed -i -e "s#${LOCAL_ROOT}/\([a-z]*\)/opensearch-dashboards/#${ARTIFACT_ROOT_URL}/\1/opensearch-dashboards/#g" \
