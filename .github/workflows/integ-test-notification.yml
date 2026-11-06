@@ -172,6 +172,8 @@ jobs:
           "$RUNNER_TEMP/metrics-venv/bin/python" .github/scripts/integ_test_failures.py "${args[@]}"
 
       - name: Update AUTOCUT issues
+        # skipped: a GitHub run id build number, out of the metrics integer range
+        if: steps.query.outputs.skipped != 'true'
         uses: ./.github/actions/notify-failure
         with:
           kind: integ-test
