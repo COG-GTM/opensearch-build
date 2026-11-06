@@ -700,7 +700,7 @@ jobs:
           REPORT=(./report.sh "${TEST_MANIFEST}" --artifact-paths "${PATHS[@]}"
             --test-run-id "${TEST_RUN_ID}" --test-type "${TEST_TYPE}" --base-path "${BASE_PATH}")
           [ -n "${RC_NUMBER}" ] && REPORT+=(--release-candidate "${RC_NUMBER}")
-          if [ "${TEST_TYPE}" = integ-test ] && [ -n "${COMPONENT_NAME}" ]; then
+          if [ "${TEST_TYPE}" != bwc-test ] && [ -n "${COMPONENT_NAME}" ]; then
             read -r -a COMPONENTS <<< "${COMPONENT_NAME}"
             REPORT+=(--component "${COMPONENTS[@]}")
           fi
