@@ -1,27 +1,43 @@
 ---
-# Reusable integration test: jenkins/opensearch/integ-test.jenkinsfile (jenkins@12.0.1) for one build manifest.
-# verify-parameters + the component list (:67-172), one matrix leg per component running runIntegTestScript()
-# (`./test.sh integ-test`) inside the test-manifest CI image (detectTestDockerAgent) with uploadTestResults() in
-# `finally`, then createUploadTestReportManifest() (`./report.sh`) in post { always }. The image is started with
-# `docker run` + `docker exec` because the tar test image runs as `-u 1000` (actions/checkout cannot write the runner
-# file-command dir as uid 1000) and the rpm/deb images need their systemd `--entrypoint`, which job containers reject.
+# Reusable distribution test for one build manifest, shared by the s4.3 test workflows:
+#   test-type integ-test: jenkins/opensearch/integ-test.jenkinsfile and opensearch-dashboards/integ-test.jenkinsfile
+#     (jenkins@12.0.1). verify-parameters + the component list, one matrix leg per component running
+#     runIntegTestScript() / runIntegTestScriptForOSD() (`./test.sh integ-test`, OpenSearch-Dashboards split into
+#     `ci-groups` legs with --ci-group) with uploadTestResults() in `finally`, then createUploadTestReportManifest()
+#     (`./report.sh`) and publishIntegTestResults() in post { always }.
+#   test-type bwc-test: opensearch(-dashboards)/bwc-test.jenkinsfile, one runBwcTestScript() leg + uploadTestResults().
+#   test-type smoke-test: opensearch/smoke-test-lf.jenkinsfile, one runSmokeTestScript() leg + uploadTestResults(),
+#     then the smoke-test report and publishSmokeTestResults().
+# Every leg runs inside the test-manifest CI image (detectTestDockerAgent). The image is started with `docker run` +
+# `docker exec` because the tar test image runs as `-u 1000` (actions/checkout cannot write the runner file-command
+# dir as uid 1000) and the rpm/deb images need their systemd `--entrypoint`, which job containers reject.
+# Without AWS_ROLE_TEST_RESULTS / ARTIFACT_BUCKET_NAME (or on pull requests) nothing is uploaded: the run prints the
+# s3://<bucket>/<key> list Jenkins would have written and keeps the files as run artifacts instead.
 name: _integ-test
 
 on:
   workflow_call:
     inputs:
+      test-type:
+        description: 'integ-test, bwc-test or smoke-test (./test.sh <test-type>)'
+        required: false
+        default: 'integ-test'
+        type: string
       test-manifest:
         description: 'Test manifest under manifests/, e.g. 3.9.0/opensearch-3.9.0-test.yml (Jenkins TEST_MANIFEST)'
         required: true
         type: string
       build-manifest-url:
-        description: 'Build manifest URL (Jenkins BUILD_MANIFEST_URL), e.g. the build-manifest-url output of _build-distribution.yml'
+        description: >-
+          Build manifest URL (Jenkins BUILD_MANIFEST_URL), e.g. the build-manifest-url output of _build-distribution.yml.
+          With artifacts-from-run, the manifest path inside that artifact instead (builds/<filename>/manifest.yml).
         required: true
         type: string
       opensearch-build-manifest-url:
         description: >-
           OpenSearch build manifest URL (Jenkins BUILD_MANIFEST_URL_OPENSEARCH), required for OpenSearch Dashboards
-          builds: its artifacts are downloaded next to the Dashboards ones and reported as the opensearch path.
+          integ tests: its artifacts are downloaded next to the Dashboards ones and reported as the opensearch path.
+          With opensearch-artifacts-from-run, the manifest path inside that artifact instead.
         required: false
         default: ''
         type: string
@@ -30,6 +46,11 @@ on:
         required: false
         default: ''
         type: string
+      ci-groups:
+        description: 'integ-test: split the OpenSearch-Dashboards component into this many --ci-group legs (9 in Jenkins)'
+        required: false
+        default: 0
+        type: number
       rc-number:
         description: 'RC number for report.sh --release-candidate (Jenkins RC_NUMBER)'
         required: false
@@ -47,16 +68,46 @@ on:
         type: string
       download-artifacts:
         description: >-
-          Download the build from the artifact bucket and test the local copy, as Jenkins did. false passes the public
-          artifact root URL to --paths instead (runIntegTestScript without localPath), for runs without AWS secrets.
+          Download the build from the artifact bucket and test the local copy, as the integ-test jobs did. false passes
+          the public artifact root URL to --paths instead (runIntegTestScript without localPath, and always for
+          bwc-test / smoke-test in Jenkins).
         required: false
         default: true
         type: boolean
+      artifacts-from-run:
+        description: >-
+          Name of an artifact of this run holding the <distribution>/{builds,dist} tree of the build under test (the
+          keep-distribution artifact of _build-distribution.yml). Tests that local copy instead of S3 or the public URL.
+        required: false
+        default: ''
+        type: string
+      opensearch-artifacts-from-run:
+        description: 'Same as artifacts-from-run for the OpenSearch build an OpenSearch Dashboards integ test runs against'
+        required: false
+        default: ''
+        type: string
       upload-results:
-        description: 'Upload test-results/ and test-report.yml to the artifact bucket (AWS_ROLE_TEST_RESULTS)'
+        description: >-
+          Upload test-results/ and test-report.yml to the artifact bucket (AWS_ROLE_TEST_RESULTS). Without the role or
+          bucket, and on pull requests, the S3 keys are printed instead.
         required: false
         default: true
         type: boolean
+      publish-results:
+        description: 'Publish the integ / smoke test report records with the publish-metrics action (dry run without AWS_ROLE_METRICS)'
+        required: false
+        default: true
+        type: boolean
+      distribution-build-url:
+        description: 'Run URL of the build under test for the metrics records; empty derives it from build.id'
+        required: false
+        default: ''
+        type: string
+      timeout-minutes:
+        description: 'Timeout of each test leg (integ-test OpenSearch 12 h, Dashboards 6 h, bwc 3-4 h, smoke 1 h in Jenkins)'
+        required: false
+        default: 720
+        type: number
       runs-on:
         description: 'JSON label array overriding the ADR 0001 label map of the build platform/architecture'
         required: false
@@ -74,12 +125,25 @@ on:
         required: false
       ARTIFACT_BUCKET_NAME:
         required: false
+      AWS_ROLE_METRICS:
+        required: false
+      METRICS_CLUSTER_ENDPOINT:
+        required: false
     outputs:
       components:
-        description: 'JSON array of the components that were tested'
+        description: 'JSON array of the matrix legs that were run'
         value: ${{ jobs.setup.outputs.components }}
+      name:
+        description: 'build.name of the build under test'
+        value: ${{ jobs.setup.outputs.name }}
+      version:
+        description: 'build.version of the build under test'
+        value: ${{ jobs.setup.outputs.version }}
+      build-id:
+        description: 'build.id of the build under test (Jenkins buildId, the DISTRIBUTION_NUMBER of integ-test-notification)'
+        value: ${{ jobs.setup.outputs.build-id }}
       test-report-url:
-        description: 'Public URL of test-report.yml; empty when upload-results is false'
+        description: 'Public URL of test-report.yml; empty when nothing was uploaded'
         value: ${{ jobs.test-report.outputs.test-report-url }}
 
 permissions: {}
@@ -112,6 +176,9 @@ jobs:
       java-version: ${{ steps.image.outputs.java-version }}
       components: ${{ steps.components.outputs.components }}
       has-components: ${{ steps.components.outputs.has-components }}
+      selected-components: ${{ steps.components.outputs.selected-components }}
+      upload: ${{ steps.upload.outputs.upload }}
+      local-artifacts: ${{ steps.upload.outputs.local-artifacts }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -119,15 +186,19 @@ jobs:
 
       - name: Verify the parameters
         env:
+          TEST_TYPE: ${{ inputs.test-type }}
           TEST_MANIFEST: ${{ inputs.test-manifest }}
           BUILD_MANIFEST_URL: ${{ inputs.build-manifest-url }}
           OPENSEARCH_BUILD_MANIFEST_URL: ${{ inputs.opensearch-build-manifest-url }}
+          ARTIFACTS_FROM_RUN: ${{ inputs.artifacts-from-run }}
+          OPENSEARCH_ARTIFACTS_FROM_RUN: ${{ inputs.opensearch-artifacts-from-run }}
           COMPONENT_NAME: ${{ inputs.component-name }}
           RC_NUMBER: ${{ inputs.rc-number }}
           BUILD_JOB_NAME: ${{ inputs.build-job-name }}
           JOB_NAME: ${{ inputs.job-name }}
           RUNS_ON: ${{ inputs.runs-on }}
           PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
+          DISTRIBUTION_BUILD_URL: ${{ inputs.distribution-build-url }}
         run: |
           set -euo pipefail
           check() {
@@ -136,17 +207,34 @@ jobs:
               exit 1
             fi
           }
+          URL='^https://[A-Za-z0-9._~/-]+$'
+          RELATIVE='^[A-Za-z0-9._-][A-Za-z0-9._/-]*$'
+          check test-type "${TEST_TYPE}" '^(integ-test|bwc-test|smoke-test)$'
           check test-manifest "${TEST_MANIFEST}" '^[A-Za-z0-9._/-]+$'
-          check build-manifest-url "${BUILD_MANIFEST_URL}" '^https://[A-Za-z0-9._~/-]+$'
-          check opensearch-build-manifest-url "${OPENSEARCH_BUILD_MANIFEST_URL}" '^(https://[A-Za-z0-9._~/-]+)?$'
+          check artifacts-from-run "${ARTIFACTS_FROM_RUN}" '^[A-Za-z0-9._-]*$'
+          check opensearch-artifacts-from-run "${OPENSEARCH_ARTIFACTS_FROM_RUN}" '^[A-Za-z0-9._-]*$'
+          if [ -n "${ARTIFACTS_FROM_RUN}" ]; then
+            check build-manifest-url "${BUILD_MANIFEST_URL}" "${RELATIVE}"
+          else
+            check build-manifest-url "${BUILD_MANIFEST_URL}" "${URL}"
+          fi
+          if [ -n "${OPENSEARCH_ARTIFACTS_FROM_RUN}" ]; then
+            check opensearch-build-manifest-url "${OPENSEARCH_BUILD_MANIFEST_URL}" "${RELATIVE}"
+          elif [ -n "${OPENSEARCH_BUILD_MANIFEST_URL}" ]; then
+            check opensearch-build-manifest-url "${OPENSEARCH_BUILD_MANIFEST_URL}" "${URL}"
+          fi
+          for value in "${BUILD_MANIFEST_URL}" "${OPENSEARCH_BUILD_MANIFEST_URL}"; do
+            case "/${value}/" in */../*) echo "::error::manifest paths must not contain '..'."; exit 1 ;; esac
+          done
           check component-name "${COMPONENT_NAME}" '^[A-Za-z0-9 ._-]*$'
           check rc-number "${RC_NUMBER}" '^[0-9]+$'
           check build-job-name "${BUILD_JOB_NAME}" '^[A-Za-z0-9._-]+$'
           check job-name "${JOB_NAME}" '^[A-Za-z0-9._-]+$'
-          check public-artifact-url "${PUBLIC_ARTIFACT_URL}" '^https://[A-Za-z0-9._~/-]+$'
+          check public-artifact-url "${PUBLIC_ARTIFACT_URL}" "${URL}"
+          check distribution-build-url "${DISTRIBUTION_BUILD_URL}" '^(https://[A-Za-z0-9._~/:-]+)?$'
           case "/${TEST_MANIFEST}/" in */../*) echo "::error::test-manifest must stay under manifests/."; exit 1 ;; esac
           if [ ! -f "manifests/${TEST_MANIFEST}" ]; then
-            echo "::error::Integration Tests failed to start. Test manifest was not provided or not found in manifests/${TEST_MANIFEST}."
+            echo "::error::Tests failed to start. Test manifest was not provided or not found in manifests/${TEST_MANIFEST}."
             exit 1
           fi
           if [ -n "${RUNS_ON}" ]; then
@@ -156,11 +244,25 @@ jobs:
               || { echo "::error::runs-on must be a JSON array of runner labels, got '${RUNS_ON}'."; exit 1; }
           fi
 
+      - name: Download the build from this run
+        if: ${{ inputs.artifacts-from-run != '' }}
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: ${{ inputs.artifacts-from-run }}
+          path: run-artifacts
+
+      - name: Download the OpenSearch build from this run
+        if: ${{ inputs.opensearch-artifacts-from-run != '' }}
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: ${{ inputs.opensearch-artifacts-from-run }}
+          path: run-artifacts-opensearch
+
       - name: Download the build manifest
         id: build
         uses: ./.github/actions/download-build-manifest
         with:
-          url: ${{ inputs.build-manifest-url }}
+          url: ${{ inputs.artifacts-from-run != '' && format('file://{0}/run-artifacts/{1}', github.workspace, inputs.build-manifest-url) || inputs.build-manifest-url }}
           path: ${{ env.BUILD_MANIFEST }}
           job-name: ${{ inputs.build-job-name }}
           public-artifact-url: ${{ inputs.public-artifact-url }}
@@ -168,10 +270,13 @@ jobs:
       - name: Download the OpenSearch build manifest
         # opensearch-dashboards/integ-test.jenkinsfile:87-100
         id: opensearch
-        if: ${{ steps.build.outputs.name != 'OpenSearch' }}
+        if: ${{ steps.build.outputs.name != 'OpenSearch' && inputs.test-type == 'integ-test' }}
         uses: ./.github/actions/download-build-manifest
         with:
-          url: ${{ inputs.opensearch-build-manifest-url || 'https://missing.invalid/opensearch-build-manifest-url' }}
+          url: >-
+            ${{ inputs.opensearch-artifacts-from-run != ''
+            && format('file://{0}/run-artifacts-opensearch/{1}', github.workspace, inputs.opensearch-build-manifest-url)
+            || inputs.opensearch-build-manifest-url || 'https://missing.invalid/opensearch-build-manifest-url' }}
           path: build-manifest-opensearch.yml
           job-name: distribution-build-opensearch
           public-artifact-url: ${{ inputs.public-artifact-url }}
@@ -200,12 +305,61 @@ jobs:
       - name: Select the components to test
         id: components
         env:
+          TEST_TYPE: ${{ inputs.test-type }}
           TEST_MANIFEST: ${{ inputs.test-manifest }}
           COMPONENT_NAME: ${{ inputs.component-name }}
+          CI_GROUPS: ${{ inputs.ci-groups }}
         run: |
           set -euo pipefail
+          if [ "${TEST_TYPE}" != integ-test ]; then
+            # bwc-test and smoke-test run the whole test manifest (or the COMPONENT_NAME subset of smoke-test) in one stage
+            SELECTED=""
+            if [ "${TEST_TYPE}" = smoke-test ] && [ -n "${COMPONENT_NAME}" ]; then
+              # report.sh rejects focused components missing from the bundle: test and report only the built ones
+              SELECTED="$(python3 .github/scripts/manifest_paths.py integ-test-components "manifests/${TEST_MANIFEST}" \
+                --build-manifest "${BUILD_MANIFEST}" --component-name "${COMPONENT_NAME}" --no-package-exclusions \
+                | sed -n 's/^components=//p' | jq -r 'join(" ")')"
+              [ -n "${SELECTED}" ] || { echo "::error::None of ${COMPONENT_NAME} is in the build manifest"; exit 1; }
+            fi
+            printf 'components=["%s"]\nhas-components=true\nselected-components=%s\n' "${TEST_TYPE}" "${SELECTED}" | tee -a "$GITHUB_OUTPUT"
+            exit 0
+          fi
           python3 .github/scripts/manifest_paths.py integ-test-components "manifests/${TEST_MANIFEST}" \
-            --build-manifest "${BUILD_MANIFEST}" --component-name "${COMPONENT_NAME}" | tee -a "$GITHUB_OUTPUT"
+            --build-manifest "${BUILD_MANIFEST}" --component-name "${COMPONENT_NAME}" --ci-groups "${CI_GROUPS}" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Check the upload credentials
+        id: upload
+        env:
+          EVENT: ${{ github.event_name }}
+          UPLOAD_RESULTS: ${{ inputs.upload-results }}
+          HAS_UPLOAD_ROLE: ${{ secrets.AWS_ROLE_TEST_RESULTS != '' && secrets.ARTIFACT_BUCKET_NAME != '' }}
+          DOWNLOAD_ARTIFACTS: ${{ inputs.download-artifacts }}
+          ARTIFACTS_FROM_RUN: ${{ inputs.artifacts-from-run }}
+          HAS_ARTIFACT_ROLE: ${{ secrets.AWS_ROLE_ARTIFACTS != '' && secrets.ARTIFACT_BUCKET_NAME != '' }}
+        run: |
+          set -euo pipefail
+          UPLOAD=false
+          if [ "${UPLOAD_RESULTS}" = true ]; then
+            if [ "${HAS_UPLOAD_ROLE}" = true ] && [ "${EVENT}" != pull_request ]; then
+              UPLOAD=true
+            else
+              echo "::notice::Test results upload is a dry run (AWS_ROLE_TEST_RESULTS / ARTIFACT_BUCKET_NAME not configured or pull request): the S3 keys are printed and the files kept in the run."
+            fi
+          fi
+          LOCAL=false
+          if [ -n "${ARTIFACTS_FROM_RUN}" ]; then
+            LOCAL=run
+          elif [ "${DOWNLOAD_ARTIFACTS}" = true ]; then
+            if [ "${HAS_ARTIFACT_ROLE}" != true ]; then
+              echo "::error::download-artifacts needs AWS_ROLE_ARTIFACTS and ARTIFACT_BUCKET_NAME (or pass download-artifacts: false to test the public artifact URLs)."
+              exit 1
+            fi
+            LOCAL=s3
+          fi
+          {
+            echo "upload=${UPLOAD}"
+            echo "local-artifacts=${LOCAL}"
+          } | tee -a "$GITHUB_OUTPUT"
 
       - name: Pick the runner
         id: runner
@@ -227,8 +381,8 @@ jobs:
     needs: setup
     if: ${{ needs.setup.outputs.has-components == 'true' }}
     runs-on: ${{ fromJSON(needs.setup.outputs.runs-on) }}
-    # timeout(time: 12, unit: 'HOURS') around each component node
-    timeout-minutes: 720
+    # timeout(time: 12, unit: 'HOURS') around each component node; 3 h for an OpenSearch-Dashboards ci-group
+    timeout-minutes: ${{ contains(matrix.component, '-ci-group-') && 180 || inputs.timeout-minutes }}
     permissions:
       contents: read
       id-token: write
@@ -245,6 +399,9 @@ jobs:
       IMAGE: ${{ needs.setup.outputs.image }}
       IMAGE_ARGS: ${{ needs.setup.outputs.args }}
       COMPONENT: ${{ matrix.component }}
+      TEST_RESULTS_KEY: >-
+        ${{ inputs.job-name }}/${{ needs.setup.outputs.version }}/${{ needs.setup.outputs.build-id }}/${{
+        needs.setup.outputs.platform }}/${{ needs.setup.outputs.architecture }}/${{ needs.setup.outputs.distribution }}/test-results
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -258,16 +415,30 @@ jobs:
           echo "${COMPONENT} with index ${JOB_INDEX} will sleep ${WAIT_SECONDS} seconds to reduce load"
           sleep "${WAIT_SECONDS}"
 
+      - name: Download the build from this run
+        if: ${{ needs.setup.outputs.local-artifacts == 'run' }}
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: ${{ inputs.artifacts-from-run }}
+          path: artifacts
+
+      - name: Download the OpenSearch build from this run
+        if: ${{ needs.setup.outputs.local-artifacts == 'run' && inputs.opensearch-artifacts-from-run != '' && needs.setup.outputs.name != 'OpenSearch' }}
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: ${{ inputs.opensearch-artifacts-from-run }}
+          path: artifacts-opensearch
+
       - name: Download the build manifest
         uses: ./.github/actions/download-build-manifest
         with:
-          url: ${{ inputs.build-manifest-url }}
+          url: ${{ inputs.artifacts-from-run != '' && format('file://{0}/artifacts/{1}', github.workspace, inputs.build-manifest-url) || inputs.build-manifest-url }}
           path: ${{ env.BUILD_MANIFEST }}
           job-name: ${{ inputs.build-job-name }}
           public-artifact-url: ${{ inputs.public-artifact-url }}
 
       - name: Download the build artifacts
-        if: ${{ inputs.download-artifacts }}
+        if: ${{ needs.setup.outputs.local-artifacts == 's3' }}
         uses: ./.github/actions/s3-sync
         with:
           direction: download
@@ -278,7 +449,7 @@ jobs:
 
       - name: Download the OpenSearch build artifacts
         # opensearch-dashboards/integ-test.jenkinsfile:194-205 downloads the OpenSearch build first
-        if: ${{ inputs.download-artifacts && needs.setup.outputs.name != 'OpenSearch' }}
+        if: ${{ needs.setup.outputs.local-artifacts == 's3' && needs.setup.outputs.name != 'OpenSearch' && inputs.test-type == 'integ-test' }}
         uses: ./.github/actions/s3-sync
         with:
           direction: download
@@ -291,7 +462,10 @@ jobs:
         # rm -rf $WORKSPACE/$distribution && mv -v $WORKSPACE/artifacts/${artifactPath} $WORKSPACE; Dashboards builds
         # `cp -a` the OpenSearch tree into the same <distribution>/ first, so builds/opensearch and
         # builds/opensearch-dashboards sit side by side under one local path.
-        if: ${{ inputs.download-artifacts }}
+        if: ${{ needs.setup.outputs.local-artifacts != 'false' }}
+        env:
+          ARCHITECTURE: ${{ needs.setup.outputs.architecture }}
+          LOCAL_ARTIFACTS: ${{ needs.setup.outputs.local-artifacts }}
         run: |
           set -euo pipefail
           rm -rf "${DISTRIBUTION}"
@@ -300,13 +474,21 @@ jobs:
             cp -a artifacts-opensearch/. "${DISTRIBUTION}/"
             rm -rf artifacts-opensearch
           fi
+          if [ "${LOCAL_ARTIFACTS}" = run ]; then
+            # Only this job's copy: the uploaded manifests keep the Jenkins locations the build was not uploaded to.
+            python3 .github/scripts/localize_bundle_locations.py "${GITHUB_WORKSPACE}/${DISTRIBUTION}" \
+              --platform "${PLATFORM}" --architecture "${ARCHITECTURE}" --distribution "${DISTRIBUTION}"
+          fi
+          find "${DISTRIBUTION}" -maxdepth 3 | sort
 
       - name: Start the test container
         if: ${{ needs.setup.outputs.platform == 'linux' }}
         run: bash .github/scripts/start-ci-container.sh integ-test "${IMAGE}" "${IMAGE_ARGS}"
 
-      - name: Run the integration tests
+      - name: Run the tests
         env:
+          TEST_TYPE: ${{ inputs.test-type }}
+          COMPONENT_NAME: ${{ needs.setup.outputs.selected-components }}
           TEST_MANIFEST: manifests/${{ inputs.test-manifest }}
           NAME: ${{ needs.setup.outputs.name }}
           VERSION: ${{ needs.setup.outputs.version }}
@@ -315,33 +497,59 @@ jobs:
           FILENAME: ${{ needs.setup.outputs.filename }}
           JAVA_VERSION: ${{ needs.setup.outputs.java-version }}
           ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.artifact-root-url }}
-          LOCAL_ARTIFACTS: ${{ inputs.download-artifacts }}
+          LOCAL_ARTIFACTS: ${{ needs.setup.outputs.local-artifacts }}
+          OPENSEARCH_ARTIFACTS_FROM_RUN: ${{ inputs.opensearch-artifacts-from-run }}
           OPENSEARCH_ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.opensearch-artifact-root-url }}
-          UPLOAD_RESULTS: ${{ inputs.upload-results }}
+          UPLOAD_RESULTS: ${{ needs.setup.outputs.upload }}
+          CI_GROUPS: ${{ inputs.ci-groups }}
           JOB_NAME: ${{ inputs.job-name }}
           PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
           TEST_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          # runIntegTestScript.groovy (jenkins@12.0.1)
           rm -rf test-results
-          if [ "${LOCAL_ARTIFACTS}" = true ]; then
-            LOCAL_PATH="${GITHUB_WORKSPACE}/${DISTRIBUTION}"
-            if [ "${NAME}" = OpenSearch ]; then PATHS=("opensearch=${LOCAL_PATH}"); else PATHS=("opensearch=${LOCAL_PATH}" "opensearch-dashboards=${LOCAL_PATH}"); fi
-          elif [ "${NAME}" = OpenSearch ]; then
-            PATHS=("opensearch=${ARTIFACT_ROOT_URL}")
-          else
-            # runIntegTestScript fell back to the latest OpenSearch build; the given OpenSearch manifest wins when set.
-            OPENSEARCH_ROOT="${OPENSEARCH_ARTIFACT_ROOT_URL:-${PUBLIC_ARTIFACT_URL}/distribution-build-opensearch/${VERSION}/latest/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}}"
-            PATHS=("opensearch=${OPENSEARCH_ROOT}" "opensearch-dashboards=${ARTIFACT_ROOT_URL}")
-          fi
-          BASE_PATH="${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${VERSION}/${BUILD_ID}/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}"
-          # Without the S3 upload the component ymls must reference the local test-results, which test-report reads back.
-          [ "${UPLOAD_RESULTS}" = true ] || BASE_PATH="${GITHUB_WORKSPACE}"
-          TEST=(./test.sh integ-test "${TEST_MANIFEST}" --component "${COMPONENT}" --test-run-id "${TEST_RUN_ID}" --paths "${PATHS[@]}" --base-path "${BASE_PATH}")
+          ROOT="${ARTIFACT_ROOT_URL}"
+          [ "${LOCAL_ARTIFACTS}" != false ] && ROOT="${GITHUB_WORKSPACE}/${DISTRIBUTION}"
+          case "${TEST_TYPE}" in
+            bwc-test)
+              # runBwcTestScript.groovy: the build under test only, opensearch= or opensearch-dashboards=
+              if [ "${NAME}" = OpenSearch ]; then PATHS=("opensearch=${ROOT}"); else PATHS=("opensearch-dashboards=${ROOT}"); fi
+              TEST=(./test.sh bwc-test "${TEST_MANIFEST}" --test-run-id "${TEST_RUN_ID}" --paths "${PATHS[@]}")
+              ;;
+            smoke-test)
+              # runSmokeTestScript.groovy (jenkins@lf-jenkins)
+              TEST=(./test.sh smoke-test "${TEST_MANIFEST}" --test-run-id "${TEST_RUN_ID}" --paths "opensearch=${ROOT}")
+              if [ -n "${COMPONENT_NAME}" ]; then read -r -a COMPONENTS <<< "${COMPONENT_NAME}"; TEST+=(--component "${COMPONENTS[@]}"); fi
+              ;;
+            *)
+              # runIntegTestScript.groovy / runIntegTestScriptForOSD.groovy (jenkins@12.0.1)
+              if [ "${NAME}" = OpenSearch ]; then
+                PATHS=("opensearch=${ROOT}")
+              else
+                # runIntegTestScript fell back to the latest OpenSearch build; the given OpenSearch manifest wins when set.
+                OPENSEARCH_ROOT="${OPENSEARCH_ARTIFACT_ROOT_URL:-${PUBLIC_ARTIFACT_URL}/distribution-build-opensearch/${VERSION}/latest/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}}"
+                # The OpenSearch tree is in <distribution>/ only when it was downloaded next to the Dashboards build.
+                if [ "${LOCAL_ARTIFACTS}" = s3 ] || { [ "${LOCAL_ARTIFACTS}" = run ] && [ -n "${OPENSEARCH_ARTIFACTS_FROM_RUN}" ]; }; then
+                  OPENSEARCH_ROOT="${ROOT}"
+                fi
+                PATHS=("opensearch=${OPENSEARCH_ROOT}" "opensearch-dashboards=${ROOT}")
+              fi
+              TEST_COMPONENT="${COMPONENT}"
+              CI_GROUP=()
+              if [ "${CI_GROUPS}" -gt 0 ] && [[ "${COMPONENT}" =~ ^(.+)-ci-group-([0-9]+)$ ]]; then
+                TEST_COMPONENT="${BASH_REMATCH[1]}"
+                CI_GROUP=(--ci-group "${BASH_REMATCH[2]}")
+              fi
+              BASE_PATH="${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${VERSION}/${BUILD_ID}/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}"
+              # Without the S3 upload the component ymls must reference the local test-results, which test-report reads back.
+              [ "${UPLOAD_RESULTS}" = true ] || BASE_PATH="${GITHUB_WORKSPACE}"
+              TEST=(./test.sh integ-test "${TEST_MANIFEST}" --component "${TEST_COMPONENT}" ${CI_GROUP[@]+"${CI_GROUP[@]}"}
+                --test-run-id "${TEST_RUN_ID}" --paths "${PATHS[@]}" --base-path "${BASE_PATH}")
+              ;;
+          esac
           echo "Run command: ${TEST[*]}"
           if [ "${PLATFORM}" = windows ]; then
-            if [ "${FILENAME}" = opensearch ]; then
+            if [ "${TEST_TYPE}" = integ-test ] && [ "${FILENAME}" = opensearch ]; then
               JAVA_VERSION_NUMBER="${JAVA_VERSION//[^0-9]/}"
               echo "Switching to Java ${JAVA_VERSION_NUMBER} on Windows"
               scoop reset "$(scoop list jdk | cut -d ' ' -f1 | grep "${JAVA_VERSION_NUMBER}" | head -1)"
@@ -350,12 +558,13 @@ jobs:
             exit 0
           fi
           ENV=(env "PATH=\$PATH")
-          [ "${FILENAME}" = opensearch ] && ENV+=("JAVA_HOME=/opt/java/${JAVA_VERSION}")
+          [ "${TEST_TYPE}" = integ-test ] && [ "${FILENAME}" = opensearch ] && ENV+=("JAVA_HOME=/opt/java/${JAVA_VERSION}")
           printf -v COMMAND '%q ' "${ENV[@]}" "${TEST[@]}"
           COMMAND="${COMMAND//\\\$PATH/\$PATH}"
-          case "${DISTRIBUTION}" in
-            # switch_user_non_root: rpm/deb hosts run the tests as uid 1000 through su
-            rpm|deb) docker exec integ-test bash -c "su \"\$(id -un 1000)\" -c $(printf '%q' "${COMMAND}")" ;;
+          case "${TEST_TYPE}:${DISTRIBUTION}" in
+            # switch_user_non_root: rpm/deb hosts run integ and smoke tests as uid 1000 through su
+            integ-test:rpm|integ-test:deb|smoke-test:rpm|smoke-test:deb)
+              docker exec integ-test bash -c "su \"\$(id -un 1000)\" -c $(printf '%q' "${COMMAND}")" ;;
             *) docker exec integ-test bash -c "${COMMAND}" ;;
           esac
 
@@ -367,28 +576,35 @@ jobs:
 
       - name: Upload the test results
         # uploadTestResults(jobName: JOB_NAME) in `finally`: <job>/<version>/<build id>/<platform>/<arch>/<dist>/test-results
-        if: ${{ always() && inputs.upload-results }}
+        if: ${{ always() && needs.setup.outputs.upload == 'true' }}
         uses: ./.github/actions/s3-sync
         with:
           direction: upload
           role-to-assume: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
           bucket: ${{ secrets.ARTIFACT_BUCKET_NAME }}
-          remote-path: ${{ inputs.job-name }}/${{ needs.setup.outputs.version }}/${{ needs.setup.outputs.build-id }}/${{ needs.setup.outputs.platform }}/${{ needs.setup.outputs.architecture }}/${{ needs.setup.outputs.distribution }}/test-results
+          remote-path: ${{ env.TEST_RESULTS_KEY }}
           local-path: test-results
           tolerate-missing: 'true'
+
+      - name: Print the S3 keys of the test results
+        if: ${{ always() && needs.setup.outputs.upload != 'true' }}
+        env:
+          BUCKET: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+        run: bash .github/scripts/print-s3-keys.sh "${BUCKET:-<ARTIFACT_BUCKET_NAME>}" "${TEST_RESULTS_KEY}" test-results
 
       - name: Keep the test results in the run
         if: ${{ always() }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          name: test-results-${{ matrix.component }}
+          name: test-results-${{ needs.setup.outputs.name }}-${{ inputs.test-type }}-${{ needs.setup.outputs.platform }}-${{ needs.setup.outputs.architecture }}-${{ needs.setup.outputs.distribution }}-${{ matrix.component }}
           path: test-results
           if-no-files-found: ignore
 
   test-report:
+    # createUploadTestReportManifest + publishIntegTestResults / publishSmokeTestResults; bwc-test had no report.
     name: test-report
     needs: [setup, integ-test]
-    if: ${{ always() && needs.setup.result == 'success' && needs.setup.outputs.has-components == 'true' }}
+    if: ${{ always() && needs.setup.result == 'success' && needs.setup.outputs.has-components == 'true' && inputs.test-type != 'bwc-test' }}
     runs-on: ${{ fromJSON(needs.setup.outputs.runs-on) }}
     timeout-minutes: 60
     permissions:
@@ -407,31 +623,61 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Download the build from this run
+        if: ${{ inputs.artifacts-from-run != '' }}
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: ${{ inputs.artifacts-from-run }}
+          path: run-artifacts
+
+      - name: Download the OpenSearch build from this run
+        if: ${{ inputs.artifacts-from-run != '' && inputs.opensearch-artifacts-from-run != '' && needs.setup.outputs.name != 'OpenSearch' }}
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: ${{ inputs.opensearch-artifacts-from-run }}
+          path: run-artifacts-opensearch
+
       - name: Download the build manifest
         uses: ./.github/actions/download-build-manifest
         with:
-          url: ${{ inputs.build-manifest-url }}
+          url: ${{ inputs.artifacts-from-run != '' && format('file://{0}/run-artifacts/{1}', github.workspace, inputs.build-manifest-url) || inputs.build-manifest-url }}
           path: ${{ env.BUILD_MANIFEST }}
           job-name: ${{ inputs.build-job-name }}
           public-artifact-url: ${{ inputs.public-artifact-url }}
 
+      - name: Move the build from this run into place
+        # report.sh loads the bundle manifest from --artifact-paths, so the local build stays in <distribution>/
+        if: ${{ inputs.artifacts-from-run != '' }}
+        env:
+          DISTRIBUTION: ${{ needs.setup.outputs.distribution }}
+        run: |
+          set -euo pipefail
+          rm -rf "${DISTRIBUTION}"
+          mv run-artifacts "${DISTRIBUTION}"
+          if [ -d run-artifacts-opensearch ]; then
+            cp -a run-artifacts-opensearch/. "${DISTRIBUTION}/"
+            rm -rf run-artifacts-opensearch
+          fi
+
       - name: Collect the test results of the run
         # Without the S3 upload the component ymls only exist as the matrix legs' artifacts; report.sh reads them locally.
-        if: ${{ !inputs.upload-results }}
+        if: ${{ needs.setup.outputs.upload != 'true' }}
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
         with:
-          pattern: test-results-*
+          pattern: test-results-${{ needs.setup.outputs.name }}-${{ inputs.test-type }}-${{ needs.setup.outputs.platform }}-${{ needs.setup.outputs.architecture }}-${{ needs.setup.outputs.distribution }}-*
           path: test-results
           merge-multiple: true
 
       - name: Start the test container
         # post { always } ran createUploadTestReportManifest inside the test docker agent
         if: ${{ needs.setup.outputs.platform == 'linux' }}
-        run: bash .github/scripts/start-ci-container.sh test-report "${IMAGE}" "${IMAGE_ARGS}"
+        run: |
+          bash .github/scripts/start-ci-container.sh test-report "${IMAGE}" "${IMAGE_ARGS}"
 
       - name: Create the test report
         id: report
         env:
+          TEST_TYPE: ${{ inputs.test-type }}
           TEST_MANIFEST: manifests/${{ inputs.test-manifest }}
           VERSION: ${{ needs.setup.outputs.version }}
           BUILD_ID: ${{ needs.setup.outputs.build-id }}
@@ -439,30 +685,39 @@ jobs:
           ARCHITECTURE: ${{ needs.setup.outputs.architecture }}
           DISTRIBUTION: ${{ needs.setup.outputs.distribution }}
           RC_NUMBER: ${{ inputs.rc-number }}
-          COMPONENT_NAME: ${{ inputs.component-name }}
+          COMPONENT_NAME: ${{ inputs.test-type == 'smoke-test' && needs.setup.outputs.selected-components || inputs.component-name }}
           JOB_NAME: ${{ inputs.job-name }}
-          BUILD_JOB_NAME: ${{ inputs.build-job-name }}
           PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
           TEST_RUN_ID: ${{ github.run_id }}
           NAME: ${{ needs.setup.outputs.name }}
           ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.artifact-root-url }}
           OPENSEARCH_ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.opensearch-artifact-root-url }}
-          UPLOAD_RESULTS: ${{ inputs.upload-results }}
+          UPLOAD_RESULTS: ${{ needs.setup.outputs.upload }}
+          ARTIFACTS_FROM_RUN: ${{ inputs.artifacts-from-run }}
+          OPENSEARCH_ARTIFACTS_FROM_RUN: ${{ inputs.opensearch-artifacts-from-run }}
         run: |
           set -euo pipefail
           # createUploadTestReportManifest.groovy (jenkins@12.0.1)
           ROOT="${VERSION}/${BUILD_ID}/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}"
+          LOCAL_ROOT="${GITHUB_WORKSPACE}/${DISTRIBUTION}"
+          DIST_ROOT="${ARTIFACT_ROOT_URL}"
+          [ -n "${ARTIFACTS_FROM_RUN}" ] && DIST_ROOT="${LOCAL_ROOT}"
+          OPENSEARCH_URL="${ARTIFACT_ROOT_URL}"
           if [ "${NAME}" = OpenSearch ]; then
-            PATHS=("opensearch=${ARTIFACT_ROOT_URL}")
+            PATHS=("opensearch=${DIST_ROOT}")
           else
-            PATHS=("opensearch=${OPENSEARCH_ARTIFACT_ROOT_URL}" "opensearch-dashboards=${ARTIFACT_ROOT_URL}")
+            OPENSEARCH_URL="${OPENSEARCH_ARTIFACT_ROOT_URL:-${PUBLIC_ARTIFACT_URL}/distribution-build-opensearch/${VERSION}/latest/${PLATFORM}/${ARCHITECTURE}/${DISTRIBUTION}}"
+            OPENSEARCH_ROOT="${OPENSEARCH_URL}"
+            [ -n "${ARTIFACTS_FROM_RUN}" ] && [ -n "${OPENSEARCH_ARTIFACTS_FROM_RUN}" ] && OPENSEARCH_ROOT="${LOCAL_ROOT}"
+            PATHS=("opensearch=${OPENSEARCH_ROOT}" "opensearch-dashboards=${DIST_ROOT}")
           fi
-          BASE_PATH="${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${ROOT}"
+          PUBLIC_BASE_PATH="${PUBLIC_ARTIFACT_URL}/${JOB_NAME}/${ROOT}"
+          BASE_PATH="${PUBLIC_BASE_PATH}"
           [ "${UPLOAD_RESULTS}" = true ] || BASE_PATH="${GITHUB_WORKSPACE}"
           REPORT=(./report.sh "${TEST_MANIFEST}" --artifact-paths "${PATHS[@]}"
-            --test-run-id "${TEST_RUN_ID}" --test-type integ-test --base-path "${BASE_PATH}")
+            --test-run-id "${TEST_RUN_ID}" --test-type "${TEST_TYPE}" --base-path "${BASE_PATH}")
           [ -n "${RC_NUMBER}" ] && REPORT+=(--release-candidate "${RC_NUMBER}")
-          if [ -n "${COMPONENT_NAME}" ]; then
+          if [ "${TEST_TYPE}" != bwc-test ] && [ -n "${COMPONENT_NAME}" ]; then
             read -r -a COMPONENTS <<< "${COMPONENT_NAME}"
             REPORT+=(--component "${COMPONENTS[@]}")
           fi
@@ -473,11 +728,27 @@ jobs:
             printf -v COMMAND '%q ' "${REPORT[@]}"
             docker exec test-report bash -c "${COMMAND}"
           fi
-          UPLOAD_PATH="${JOB_NAME}/${ROOT}/test-results/${TEST_RUN_ID}/integ-test/test-report.yml"
+          # sed -i writes its temporary file next to test-report.yml, in the workspace the container (uid 1000) wrote to
+          [ "${PLATFORM}" = windows ] || sudo chown "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" test-report.yml
+          if [ -n "${ARTIFACTS_FROM_RUN}" ]; then
+            # Local builds are reported under their artifact URLs (uploaded or not), never the runner workspace.
+            sed -i -e "s#${LOCAL_ROOT}/\([a-z]*\)/opensearch-dashboards/#${ARTIFACT_ROOT_URL}/\1/opensearch-dashboards/#g" \
+              -e "s#${LOCAL_ROOT}/\([a-z]*\)/opensearch/#${OPENSEARCH_URL}/\1/opensearch/#g" \
+              -e "s#opensearch=${LOCAL_ROOT}#opensearch=${OPENSEARCH_URL}#g" \
+              -e "s#${LOCAL_ROOT}#${ARTIFACT_ROOT_URL}#g" test-report.yml
+          fi
+          if [ "${UPLOAD_RESULTS}" != true ]; then
+            # Keep the report exactly as it would have been uploaded: the local base path read back by report.sh
+            # becomes the public test-results location Jenkins wrote into test-report.yml.
+            sed -i "s#${GITHUB_WORKSPACE}#${PUBLIC_BASE_PATH}#g" test-report.yml
+          fi
+          UPLOAD_PATH="${JOB_NAME}/${ROOT}/test-results/${TEST_RUN_ID}/${TEST_TYPE}/test-report.yml"
           echo "upload-path=${UPLOAD_PATH}" >> "$GITHUB_OUTPUT"
+          echo "Download report manifest from ${PUBLIC_ARTIFACT_URL}/${UPLOAD_PATH}"
           if [ "${UPLOAD_RESULTS}" = true ]; then
             echo "test-report-url=${PUBLIC_ARTIFACT_URL}/${UPLOAD_PATH}" >> "$GITHUB_OUTPUT"
           fi
+          cat test-report.yml
 
       - name: Stop the test container
         if: ${{ always() && needs.setup.outputs.platform == 'linux' }}
@@ -486,7 +757,7 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" || true
 
       - name: Upload the test report
-        if: ${{ inputs.upload-results }}
+        if: ${{ needs.setup.outputs.upload == 'true' }}
         uses: ./.github/actions/s3-sync
         with:
           direction: upload
@@ -495,9 +766,60 @@ jobs:
           remote-path: ${{ steps.report.outputs.upload-path }}
           local-path: test-report.yml
 
+      - name: Print the S3 key of the test report
+        if: ${{ needs.setup.outputs.upload != 'true' }}
+        env:
+          BUCKET: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+          UPLOAD_PATH: ${{ steps.report.outputs.upload-path }}
+        run: bash .github/scripts/print-s3-keys.sh "${BUCKET:-<ARTIFACT_BUCKET_NAME>}" "${UPLOAD_PATH}" test-report.yml
+
       - name: Keep the test report in the run
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          name: integ-test-report
+          name: test-report-${{ needs.setup.outputs.name }}-${{ inputs.test-type }}-${{ needs.setup.outputs.platform }}-${{ needs.setup.outputs.architecture }}-${{ needs.setup.outputs.distribution }}
           path: test-report.yml
           if-no-files-found: warn
+
+      - name: Check the metrics credentials
+        id: metrics
+        if: ${{ inputs.publish-results }}
+        env:
+          EVENT: ${{ github.event_name }}
+          METRICS: ${{ secrets.METRICS_CLUSTER_ENDPOINT != '' && secrets.AWS_ROLE_METRICS != '' }}
+          DISTRIBUTION_BUILD_URL: ${{ inputs.distribution-build-url }}
+          BUILD_ID: ${{ needs.setup.outputs.build-id }}
+          BUILD_JOB_NAME: ${{ inputs.build-job-name }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          DRY_RUN=true
+          if [ "${EVENT}" != pull_request ] && [ "${METRICS}" = true ]; then
+            DRY_RUN=false
+          else
+            echo "::notice::Metrics indexing is a dry run (METRICS_CLUSTER_ENDPOINT / AWS_ROLE_METRICS not configured or pull request)."
+          fi
+          if [ -z "${DISTRIBUTION_BUILD_URL}" ]; then
+            # build.id is the Actions run id for GitHub-built distributions and the Jenkins BUILD_NUMBER otherwise.
+            if [ "${#BUILD_ID}" -ge 9 ]; then
+              DISTRIBUTION_BUILD_URL="${REPOSITORY_URL}/actions/runs/${BUILD_ID}"
+            else
+              DISTRIBUTION_BUILD_URL="https://build.ci.opensearch.org/blue/organizations/jenkins/${BUILD_JOB_NAME}/detail/${BUILD_JOB_NAME}/${BUILD_ID}/pipeline"
+            fi
+          fi
+          {
+            echo "dry-run=${DRY_RUN}"
+            echo "distribution-build-url=${DISTRIBUTION_BUILD_URL}"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Publish the test results
+        if: ${{ inputs.publish-results }}
+        uses: ./.github/actions/publish-metrics
+        with:
+          kind: ${{ inputs.test-type == 'smoke-test' && 'smoke' || 'integ' }}
+          test-report: test-report.yml
+          job-name: ${{ inputs.job-name }}
+          distribution-build-url: ${{ steps.metrics.outputs.distribution-build-url }}
+          build-number: ${{ github.run_id }}
+          metrics-host-url: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+          role-to-assume: ${{ secrets.AWS_ROLE_METRICS }}
+          dry-run: ${{ steps.metrics.outputs.dry-run }}

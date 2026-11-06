@@ -5,8 +5,8 @@
 # so the S3 layout stays <job>/<version>/<run id>/<platform>/<arch>/<distribution>/{builds,dist} + index/.../index.json.
 # The Dashboards toolchain (nvm + node/yarn) comes from the manifest's ci-runner image (detectDockerAgent), exactly as in
 # Jenkins. The `build job:` triggers become:
-#   integ / bwc tests          -> `gh workflow run <INTEG|BWC_TEST_JOB_NAME>.yml` (Jenkins wait: false), skipped with a
-#                                 notice until the s4.3 workflow exists
+#   integ / bwc tests          -> integ-test / bwc-test: workflow_call of integ-test-opensearch-dashboards.yml and
+#                                 bwc-test-opensearch-dashboards.yml per uploaded, tested cell (Jenkins wait: false)
 #   buildDockerImage           -> docker-build.yml -> docker-copy.yml (build-number tag) -> docker-scan.yml
 #   distribution-validation    -> validate-artifacts.yml, dispatched and watched (Jenkins wait/propagate: true)
 #   post always                -> publish-metrics (publishDistributionBuildResults) + notify-failure
@@ -198,6 +198,9 @@ jobs:
           # Jenkins job names could carry a folder (Playground/...); workflows are flat files in this repository.
           check INTEG_TEST_JOB_NAME "${INTEG_TEST_JOB_NAME}" '^[A-Za-z0-9._-]*$'
           check BWC_TEST_JOB_NAME "${BWC_TEST_JOB_NAME}" '^[A-Za-z0-9._-]*$'
+          # `uses:` of a reusable workflow is static: the job names only switch the ported workflows on or off.
+          check INTEG_TEST_JOB_NAME "${INTEG_TEST_JOB_NAME}" '^(integ-test-opensearch-dashboards)?$'
+          check BWC_TEST_JOB_NAME "${BWC_TEST_JOB_NAME}" '^(bwc-test-opensearch-dashboards)?$'
           # verifyParameterPlatformDistribution: every token must be an allowed value; TEST_* only when set.
           verify_tokens() {
             local name="$1" value="$2" allowed="$3" token
@@ -313,12 +316,15 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-      actions: write
     outputs:
       artifact-url-linux-x64-tar: ${{ steps.urls.outputs.artifact-url-linux-x64-tar }}
       artifact-url-linux-arm64-tar: ${{ steps.urls.outputs.artifact-url-linux-arm64-tar }}
       tar-x64: ${{ steps.urls.outputs.tar-x64 }}
       tar-arm64: ${{ steps.urls.outputs.tar-arm64 }}
+      integ-matrix: ${{ steps.tests.outputs.integ-matrix }}
+      integ-count: ${{ steps.tests.outputs.integ-count }}
+      bwc-matrix: ${{ steps.tests.outputs.bwc-matrix }}
+      bwc-count: ${{ steps.tests.outputs.bwc-count }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -376,60 +382,103 @@ jobs:
           rm -f info.env
           cat cells.txt
 
-      - name: Trigger the integ and bwc tests
+      - name: Select the integ and bwc tests
+        id: tests
         env:
-          GH_TOKEN: ${{ github.token }}
           DRY_RUN: ${{ needs.verify-parameters.outputs.dry-run }}
           TEST_MANIFEST: ${{ needs.verify-parameters.outputs.test-manifest }}
           INTEG_TEST_JOB_NAME: ${{ needs.verify-parameters.outputs.integ-test-job-name }}
           BWC_TEST_JOB_NAME: ${{ needs.verify-parameters.outputs.bwc-test-job-name }}
           TEST_PLATFORM: ${{ inputs.TEST_PLATFORM }}
           TEST_DISTRIBUTION: ${{ inputs.TEST_DISTRIBUTION }}
-          RC_NUMBER: ${{ needs.verify-parameters.outputs.rc-number }}
-          REF: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          : > integ.jsonl
+          : > bwc.jsonl
           if [ "${DRY_RUN}" = true ]; then
             echo "::notice::Dry run: integ and bwc tests are not triggered."
-            exit 0
+          else
+            while read -r CELL STATE BUILD_MANIFEST_URL OPENSEARCH_URL _; do
+              [ "${STATE}" = failed ] && continue
+              PLATFORM="${CELL%%-*}"
+              DISTRIBUTION="${CELL##*-}"
+              if [ "${STATE}" != uploaded ]; then
+                echo "::notice::${CELL}: the build was not uploaded (S3 upload skipped), so no tests are triggered."
+                continue
+              fi
+              ENTRY=$(jq -cn --arg cell "${CELL}" --arg url "${BUILD_MANIFEST_URL}" --arg os "${OPENSEARCH_URL}" \
+                '{cell: $cell, "build-manifest-url": $url, "opensearch-build-manifest-url": $os}')
+              # triggerIntegrationTests: skipped when any value is empty or the platform/distribution is not under test
+              if [ -z "${INTEG_TEST_JOB_NAME}" ] || [ -z "${TEST_MANIFEST}" ] || [[ "${TEST_PLATFORM}" != *"${PLATFORM}"* ]] || [[ "${TEST_DISTRIBUTION}" != *"${DISTRIBUTION}"* ]]; then
+                echo "${CELL}: Skipping INTEG tests as one of the values has empty or wrong string: INTEG_TEST_JOB_NAME, TEST_MANIFEST, buildManifestUrl, buildManifestUrlOpenSearch, TEST_PLATFORM, TEST_DISTRIBUTION"
+              else
+                echo "${CELL}: Running INTEG tests"
+                echo "${ENTRY}" >> integ.jsonl
+              fi
+              # triggerBWCTests runs from the linux tar stages only; AGENT_LABEL becomes the test workflow's runs-on.
+              [ "${DISTRIBUTION}" = tar ] || continue
+              if [ -z "${BWC_TEST_JOB_NAME}" ] || [ -z "${TEST_MANIFEST}" ] || [[ "${TEST_PLATFORM}" != *"${PLATFORM}"* ]] || [[ "${TEST_DISTRIBUTION}" != *"${DISTRIBUTION}"* ]]; then
+                echo "${CELL}: Skipping BWC tests as one of the values has empty or wrong string: BWC_TEST_JOB_NAME, TEST_MANIFEST, buildManifestUrl, TEST_PLATFORM, TEST_DISTRIBUTION"
+              else
+                echo "${CELL}: Running BWC tests"
+                echo "${ENTRY}" >> bwc.jsonl
+              fi
+            done < cells.txt
           fi
-          dispatch() {
-            local job="$1"; shift
-            if [ ! -f ".github/workflows/${job}.yml" ]; then
-              echo "::notice::${job}.yml is not ported yet (plan step s4.3); skipping the trigger: $*"
-              echo "- ${job}: not ported yet (s4.3), skipped: $*" >> "$GITHUB_STEP_SUMMARY"
-              return 0
-            fi
-            local args=() kv
-            for kv in "$@"; do args+=(-f "${kv}"); done
-            gh workflow run "${job}.yml" --ref "${REF}" "${args[@]}"
-            echo "- ${job}: triggered with $*" >> "$GITHUB_STEP_SUMMARY"
-          }
-          while read -r CELL STATE BUILD_MANIFEST_URL OPENSEARCH_URL _; do
-            [ "${STATE}" = failed ] && continue
-            PLATFORM="${CELL%%-*}"
-            DISTRIBUTION="${CELL##*-}"
-            if [ "${STATE}" != uploaded ]; then
-              echo "::notice::${CELL}: the build was not uploaded (S3 upload skipped), so no tests are triggered."
-              continue
-            fi
-            # triggerIntegrationTests: skipped when any value is empty or the platform/distribution is not under test
-            if [ -z "${INTEG_TEST_JOB_NAME}" ] || [ -z "${TEST_MANIFEST}" ] || [[ "${TEST_PLATFORM}" != *"${PLATFORM}"* ]] || [[ "${TEST_DISTRIBUTION}" != *"${DISTRIBUTION}"* ]]; then
-              echo "${CELL}: Skipping INTEG tests as one of the values has empty or wrong string: INTEG_TEST_JOB_NAME, TEST_MANIFEST, buildManifestUrl, buildManifestUrlOpenSearch, TEST_PLATFORM, TEST_DISTRIBUTION"
-            else
-              echo "${CELL}: Running INTEG tests"
-              dispatch "${INTEG_TEST_JOB_NAME}" "TEST_MANIFEST=${TEST_MANIFEST}" "BUILD_MANIFEST_URL=${BUILD_MANIFEST_URL}" \
-                "RC_NUMBER=${RC_NUMBER}" "BUILD_MANIFEST_URL_OPENSEARCH=${OPENSEARCH_URL}" "UPDATE_GITHUB_ISSUES=true"
-            fi
-            # triggerBWCTests runs from the linux tar stages only; AGENT_LABEL becomes the test workflow's runs-on.
-            [ "${DISTRIBUTION}" = tar ] || continue
-            if [ -z "${BWC_TEST_JOB_NAME}" ] || [ -z "${TEST_MANIFEST}" ] || [[ "${TEST_PLATFORM}" != *"${PLATFORM}"* ]] || [[ "${TEST_DISTRIBUTION}" != *"${DISTRIBUTION}"* ]]; then
-              echo "${CELL}: Skipping BWC tests as one of the values has empty or wrong string: BWC_TEST_JOB_NAME, TEST_MANIFEST, buildManifestUrl, TEST_PLATFORM, TEST_DISTRIBUTION"
-            else
-              echo "${CELL}: Running BWC tests"
-              dispatch "${BWC_TEST_JOB_NAME}" "TEST_MANIFEST=${TEST_MANIFEST}" "BUILD_MANIFEST_URL=${BUILD_MANIFEST_URL}"
-            fi
-          done < cells.txt
+          {
+            echo "integ-matrix=$(jq -cs '{include: .}' integ.jsonl)"
+            echo "integ-count=$(wc -l < integ.jsonl | tr -d ' ')"
+            echo "bwc-matrix=$(jq -cs '{include: .}' bwc.jsonl)"
+            echo "bwc-count=$(wc -l < bwc.jsonl | tr -d ' ')"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  integ-test:
+    # triggerIntegrationTests(): build job: INTEG_TEST_JOB_NAME, wait: false, per uploaded and tested cell
+    name: integ-test (${{ matrix.cell }})
+    needs: [verify-parameters, build-results]
+    if: ${{ !cancelled() && needs.build-results.result == 'success' && needs.build-results.outputs.integ-count != '0' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build-results.outputs.integ-matrix) }}
+    uses: ./.github/workflows/integ-test-opensearch-dashboards.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      TEST_MANIFEST: ${{ needs.verify-parameters.outputs.test-manifest }}
+      BUILD_MANIFEST_URL: ${{ matrix.build-manifest-url }}
+      BUILD_MANIFEST_URL_OPENSEARCH: ${{ matrix.opensearch-build-manifest-url }}
+      RC_NUMBER: ${{ needs.verify-parameters.outputs.rc-number }}
+      RUNS_ON: ${{ needs.verify-parameters.outputs.runs-on }}
+    secrets:
+      AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+      AWS_ROLE_TEST_RESULTS: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+      AWS_ROLE_METRICS: ${{ secrets.AWS_ROLE_METRICS }}
+      METRICS_CLUSTER_ENDPOINT: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+  bwc-test:
+    # triggerBWCTests(): build job: BWC_TEST_JOB_NAME, wait: false, linux tar cells only
+    name: bwc-test (${{ matrix.cell }})
+    needs: [verify-parameters, build-results]
+    if: ${{ !cancelled() && needs.build-results.result == 'success' && needs.build-results.outputs.bwc-count != '0' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build-results.outputs.bwc-matrix) }}
+    uses: ./.github/workflows/bwc-test-opensearch-dashboards.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      TEST_MANIFEST: ${{ needs.verify-parameters.outputs.test-manifest }}
+      BUILD_MANIFEST_URL: ${{ matrix.build-manifest-url }}
+      RUNS_ON: ${{ needs.verify-parameters.outputs.runs-on }}
+    secrets:
+      AWS_ROLE_TEST_RESULTS: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+      INTEG_TEST_WEBHOOK_URL: ${{ secrets.INTEG_TEST_WEBHOOK_URL }}
 
   # stage('docker build'): buildDockerImage() once both linux tar bundles are uploaded.
   docker-script:

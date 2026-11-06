@@ -9,7 +9,9 @@
 #   stage('build-and-test-<p>-<a>-<d>')-> build: matrix over linux x64/arm64 tar/rpm/deb and windows x64 zip, each cell
 #                                         one call of _build-distribution.yml (build.sh, assemble.sh, S3 upload and the
 #                                         index.json `latest` file under the same keys as Jenkins)
-#   triggerIntegrationTests()          -> integ-test: workflow_call of _integ-test.yml per tested cell
+#   triggerIntegrationTests()          -> integ-test: workflow_call of integ-test-opensearch.yml per tested cell
+#   triggerSmokeTests()                -> smoke-test: workflow_call of smoke-test-opensearch.yml per tested linux cell
+#   triggerBWCTests()                  -> bwc-test: workflow_call of bwc-test-opensearch.yml for the linux x64 tar cell
 #   stage('docker build')              -> docker-artifacts, docker-build, docker-copy, docker-scan
 #   post { always }                    -> build-results: publishDistributionBuildResults + updateBuildFailureIssues
 #                                         through the publish-metrics and notify-failure actions
@@ -17,9 +19,9 @@
 #
 # Jenkins BUILD_NUMBER is github.run_id here (build.id of the manifests and the <build> segment of the S3 keys), so the
 # artifact layout is distribution-build-opensearch/<revision>/<run_id>/<platform>/<arch>/<distribution>/{builds,dist}.
-# Not ported: INCREMENTAL / PREVIOUS_BUILD_ID (every build is a full build; the keys it writes are the same), and the
-# smoke-test / bwc-test triggers (s4.3 ports those jobs). Jenkins fired the downstream jobs with `propagate: false`;
-# a reusable-workflow job cannot set continue-on-error, so a failing min-snapshot or integ-test call shows on this run.
+# Not ported: INCREMENTAL / PREVIOUS_BUILD_ID (every build is a full build; the keys it writes are the same).
+# Jenkins fired the downstream jobs with `propagate: false`; a reusable-workflow job cannot set continue-on-error, so a
+# failing min-snapshot or test call shows on this run.
 #
 # pull_request runs are the evidence build: OpenSearch min + bundle of the current dev manifest for linux x64 tar on a
 # GitHub-hosted runner with every upload off, diffed against the latest Jenkins build of the same version.
@@ -73,7 +75,7 @@ on:
         description: >-
           <Optional> Space-separated flags for the other Jenkins parameters, each starting from its Jenkins default;
           prefix a flag with no- to turn it off. Flags: update-github-issue (on), integ-test (on, INTEG_TEST_JOB_NAME),
-          min-snapshot (on), skip-artifact-check (off), sign-rpm (on when the run uploads; rpm uploads require it), upload (on), release-candidate-upload
+          smoke-test (on, SMOKE_TEST_JOB_NAME), bwc-test (on, BWC_TEST_JOB_NAME), min-snapshot (on), skip-artifact-check (off), sign-rpm (on when the run uploads; rpm uploads require it), upload (on), release-candidate-upload
           (on when RC_NUMBER > 0), compare-jenkins (off). Values: test-platform=<linux,windows>,
           test-distribution=<tar,rpm,deb,zip>, parallel=<n> (4), build-docker=<build_docker |
           build_docker_with_build_number_tag | do_not_build_docker> (build_docker), architecture=<x64,arm64>.
@@ -116,6 +118,10 @@ jobs:
       build-count: ${{ steps.params.outputs.build-count }}
       test-matrix: ${{ steps.params.outputs.test-matrix }}
       test-count: ${{ steps.params.outputs.test-count }}
+      smoke-matrix: ${{ steps.params.outputs.smoke-matrix }}
+      smoke-count: ${{ steps.params.outputs.smoke-count }}
+      bwc-matrix: ${{ steps.params.outputs.bwc-matrix }}
+      bwc-count: ${{ steps.params.outputs.bwc-count }}
       min-snapshot: ${{ steps.params.outputs.min-snapshot }}
       min-snapshot-targets: ${{ steps.params.outputs.min-snapshot-targets }}
       parallel: ${{ steps.params.outputs.parallel }}
@@ -198,7 +204,7 @@ jobs:
                   fail(f"RUNS_ON must be a JSON array of runner labels, got '{runs_on}'")
               runs_on = json.dumps(labels, separators=(",", ":"))
 
-          flags = {"update-github-issue": True, "integ-test": True, "min-snapshot": True, "skip-artifact-check": False,
+          flags = {"update-github-issue": True, "integ-test": True, "smoke-test": True, "bwc-test": True, "min-snapshot": True, "skip-artifact-check": False,
                    "sign-rpm": None, "upload": True, "release-candidate-upload": int(rc) > 0, "compare-jenkins": False}
           values = {"test-platform": "", "test-distribution": "", "parallel": "4", "build-docker": "build_docker", "architecture": "x64 arm64"}
           for option in env["OPTIONS"].split():
@@ -252,12 +258,17 @@ jobs:
           filename = build["name"].lower().replace(" ", "-")
 
           root = "https://ci.opensearch.org/ci/dbc/distribution-build-opensearch"
-          tests = []
-          if test_manifest and flags["integ-test"]:
+          # trigger*Tests(): skipped without a TEST_MANIFEST or when the cell is not in TEST_PLATFORM x TEST_DISTRIBUTION.
+          tested = []
+          if test_manifest:
               for c in cells:
                   if c["platform"] in values["test-platform"].split() and c["distribution"] in values["test-distribution"].split():
                       url = f"{root}/{revision}/{env['RUN_ID']}/{c['platform']}/{c['architecture']}/{c['distribution']}/builds/{filename}/manifest.yml"
-                      tests.append(dict(c, **{"build-manifest-url": url}))
+                      tested.append(dict(c, **{"build-manifest-url": url}))
+          tests = tested if flags["integ-test"] else []
+          # The linux stages call triggerSmokeTests(); only the linux x64 tar stage calls triggerBWCTests().
+          smoke_tests = [c for c in tested if c["platform"] == "linux"] if flags["smoke-test"] else []
+          bwc_tests = [c for c in tested if (c["platform"], c["architecture"], c["distribution"]) == ("linux", "x64", "tar")] if flags["bwc-test"] else []
 
           upload = flags["upload"]
           can_upload = upload and env["HAS_ARTIFACT_ROLE"] == "true"
@@ -269,8 +280,6 @@ jobs:
               fail("no-sign-rpm needs no-upload (or no rpm in BUILD_DISTRIBUTION): Jenkins never uploaded unsigned rpm packages.")
           if upload and not can_upload:
               print("::notice::S3 upload skipped: AWS_ROLE_ARTIFACTS / ARTIFACT_BUCKET_NAME are not configured, so the integ-test, docker and validation follow-ups are skipped too.", file=sys.stderr)
-          if test_manifest and flags["integ-test"]:
-              print("::notice::smoke-test and bwc-test are not triggered from GitHub Actions yet (Port integration, BWC and smoke tests).", file=sys.stderr)
           tar_cells = {c["architecture"] for c in cells if c["platform"] == "linux" and c["distribution"] == "tar"}
           min_targets = "linux-x64-tar linux-arm64-tar darwin-x64-tar darwin-arm64-tar windows-x64-zip"
           if env["EVENT"] == "pull_request":
@@ -291,6 +300,10 @@ jobs:
               "build-count": str(len(cells)),
               "test-matrix": json.dumps({"include": tests}, separators=(",", ":")),
               "test-count": str(len(tests)),
+              "smoke-matrix": json.dumps({"include": smoke_tests}, separators=(",", ":")),
+              "smoke-count": str(len(smoke_tests)),
+              "bwc-matrix": json.dumps({"include": bwc_tests}, separators=(",", ":")),
+              "bwc-count": str(len(bwc_tests)),
               "min-snapshot": b(flags["min-snapshot"]),
               "min-snapshot-targets": min_targets,
               "parallel": values["parallel"],
@@ -378,17 +391,62 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.verify-parameters.outputs.test-matrix) }}
-    uses: ./.github/workflows/_integ-test.yml
+    uses: ./.github/workflows/integ-test-opensearch.yml
     permissions:
       contents: read
       id-token: write
     with:
-      test-manifest: ${{ needs.verify-parameters.outputs.test-manifest }}
-      build-manifest-url: ${{ matrix.build-manifest-url }}
-      rc-number: ${{ needs.verify-parameters.outputs.rc-number }}
-      runs-on: ${{ needs.verify-parameters.outputs.runs-on }}
+      TEST_MANIFEST: ${{ needs.verify-parameters.outputs.test-manifest }}
+      BUILD_MANIFEST_URL: ${{ matrix.build-manifest-url }}
+      RC_NUMBER: ${{ needs.verify-parameters.outputs.rc-number }}
+      RUNS_ON: ${{ needs.verify-parameters.outputs.runs-on }}
     secrets:
       AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+      AWS_ROLE_TEST_RESULTS: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+      AWS_ROLE_METRICS: ${{ secrets.AWS_ROLE_METRICS }}
+      METRICS_CLUSTER_ENDPOINT: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+  smoke-test:
+    # triggerSmokeTests(): same conditions as the integ tests, linux stages only
+    needs: [verify-parameters, build]
+    if: ${{ always() && needs.verify-parameters.outputs.smoke-count != '0' && needs.verify-parameters.outputs.can-upload == 'true' && needs.build.result != 'cancelled' && needs.build.result != 'skipped' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.verify-parameters.outputs.smoke-matrix) }}
+    uses: ./.github/workflows/smoke-test-opensearch.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      TEST_MANIFEST: ${{ needs.verify-parameters.outputs.test-manifest }}
+      BUILD_MANIFEST_URL: ${{ matrix.build-manifest-url }}
+      RC_NUMBER: ${{ needs.verify-parameters.outputs.rc-number }}
+      RUNS_ON: ${{ needs.verify-parameters.outputs.runs-on }}
+    secrets:
+      AWS_ROLE_TEST_RESULTS: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+      AWS_ROLE_METRICS: ${{ secrets.AWS_ROLE_METRICS }}
+      METRICS_CLUSTER_ENDPOINT: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+
+  bwc-test:
+    # triggerBWCTests(): linux x64 tar stage only, AGENT_LABEL = AGENT_LINUX_X64 (the ADR 0001 linux x64 pool)
+    needs: [verify-parameters, build]
+    if: ${{ always() && needs.verify-parameters.outputs.bwc-count != '0' && needs.verify-parameters.outputs.can-upload == 'true' && needs.build.result != 'cancelled' && needs.build.result != 'skipped' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.verify-parameters.outputs.bwc-matrix) }}
+    uses: ./.github/workflows/bwc-test-opensearch.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      TEST_MANIFEST: ${{ needs.verify-parameters.outputs.test-manifest }}
+      BUILD_MANIFEST_URL: ${{ matrix.build-manifest-url }}
+      RUNS_ON: ${{ needs.verify-parameters.outputs.runs-on }}
+    secrets:
       AWS_ROLE_TEST_RESULTS: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
       ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
 

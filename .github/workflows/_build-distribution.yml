@@ -97,9 +97,17 @@ on:
         required: false
         default: false
         type: boolean
+      keep-distribution:
+        description: >-
+          Keep <distribution>/{builds,dist} in the run as the distribution-<platform>-<architecture>-<distribution>
+          artifact, so a test workflow in the same run can test the build without the artifact bucket
+          (_integ-test.yml artifacts-from-run).
+        required: false
+        default: false
+        type: boolean
       artifact-suffix:
         description: >-
-          Appended to the names of the run artifacts (builds-, build-log-, build-record-, min-snapshot-) so two calls
+          Appended to the names of the run artifacts (builds-, build-log-, build-record-, min-snapshot-, distribution-) so two calls
           for the same platform/architecture/distribution in one run do not collide, e.g. '-min'.
         required: false
         default: ''
@@ -522,6 +530,17 @@ jobs:
           path: build-record
           if-no-files-found: warn
 
+      - name: Keep the distribution in the run
+        if: ${{ inputs.keep-distribution && needs.setup.outputs.package != 'true' }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: distribution-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}${{ inputs.artifact-suffix }}
+          path: |
+            ${{ needs.setup.outputs.distribution }}/builds
+            ${{ needs.setup.outputs.distribution }}/dist
+          if-no-files-found: error
+          retention-days: 1
+
   assemble:
     name: assemble-archive-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}
     needs: [setup, build]
@@ -616,6 +635,17 @@ jobs:
           name: build-record-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}${{ inputs.artifact-suffix }}
           path: build-record
           if-no-files-found: warn
+
+      - name: Keep the distribution in the run
+        if: ${{ inputs.keep-distribution && steps.assemble.outcome == 'success' }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: distribution-${{ inputs.platform }}-${{ inputs.architecture }}-${{ needs.setup.outputs.distribution }}${{ inputs.artifact-suffix }}
+          path: |
+            ${{ needs.setup.outputs.distribution }}/builds
+            ${{ needs.setup.outputs.distribution }}/dist
+          if-no-files-found: error
+          retention-days: 1
 
   release-candidate:
     # uploadArtifacts.groovy: when buildFeature == build.version (always for distribution builds, never for feature builds) the core min artifact

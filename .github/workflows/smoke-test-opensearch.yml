@@ -1,0 +1,96 @@
+---
+# GitHub Actions port of jenkins/opensearch/smoke-test-lf.jenkinsfile (job smoke-test, jenkins@lf-jenkins) through
+# _integ-test.yml (test-type smoke-test): verify-parameters, one runSmokeTestScript() stage (`./test.sh smoke-test
+# <manifest> --test-run-id <run id> --paths opensearch=<artifact root URL>`, as uid 1000 on rpm/deb) with
+# uploadTestResults() to smoke-test/<version>/<build>/<platform>/<arch>/<distribution>/test-results, then
+# createUploadTestReportManifest(testType: 'smoke-test') and publishSmokeTestResults (publish-metrics kind smoke).
+# distribution-build-opensearch.yml calls it for every tested linux cell (Jenkins triggerSmokeTests, wait: false).
+name: smoke-test-opensearch
+run-name: smoke-test-opensearch ${{ inputs.TEST_MANIFEST }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      TEST_MANIFEST:
+        description: '<Required> Test manifest under the manifests folder, e.g. 2.19.0/opensearch-2.19.0-test.yml.'
+        required: true
+        type: string
+      BUILD_MANIFEST_URL:
+        description: '<Required> The build manifest URL for OpenSearch, e.g. https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/2.19.0/10545/linux/x64/tar/builds/opensearch/manifest.yml.'
+        required: true
+        type: string
+      COMPONENT_NAME:
+        description: '<Optional> Space-separated components to smoke test instead of every component of the test manifest.'
+        required: false
+        default: ''
+        type: string
+      RC_NUMBER:
+        description: '<Optional> The RC build count. Default is 0 which means its not an RC build.'
+        required: false
+        default: '0'
+        type: string
+      RUNS_ON:
+        description: '<Optional> JSON runner label array instead of the ADR 0001 pool of the build platform/architecture.'
+        required: false
+        default: ''
+        type: string
+  workflow_call:
+    inputs:
+      TEST_MANIFEST:
+        required: true
+        type: string
+      BUILD_MANIFEST_URL:
+        required: true
+        type: string
+      COMPONENT_NAME:
+        required: false
+        default: ''
+        type: string
+      RC_NUMBER:
+        required: false
+        default: '0'
+        type: string
+      RUNS_ON:
+        required: false
+        default: ''
+        type: string
+      ARTIFACTS_FROM_RUN:
+        description: 'Test the keep-distribution artifact of this run instead of the public artifact URL (dry runs)'
+        required: false
+        default: ''
+        type: string
+    secrets:
+      AWS_ROLE_TEST_RESULTS:
+        required: false
+      ARTIFACT_BUCKET_NAME:
+        required: false
+      AWS_ROLE_METRICS:
+        required: false
+      METRICS_CLUSTER_ENDPOINT:
+        required: false
+
+permissions: {}
+
+jobs:
+  smoke-test:
+    uses: ./.github/workflows/_integ-test.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      test-type: smoke-test
+      test-manifest: ${{ inputs.TEST_MANIFEST }}
+      build-manifest-url: ${{ inputs.BUILD_MANIFEST_URL }}
+      component-name: ${{ inputs.COMPONENT_NAME }}
+      rc-number: ${{ inputs.RC_NUMBER }}
+      build-job-name: distribution-build-opensearch
+      job-name: smoke-test
+      download-artifacts: false
+      artifacts-from-run: ${{ inputs.ARTIFACTS_FROM_RUN }}
+      timeout-minutes: 60
+      runs-on: ${{ inputs.RUNS_ON }}
+    secrets:
+      AWS_ROLE_TEST_RESULTS: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+      AWS_ROLE_METRICS: ${{ secrets.AWS_ROLE_METRICS }}
+      METRICS_CLUSTER_ENDPOINT: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}

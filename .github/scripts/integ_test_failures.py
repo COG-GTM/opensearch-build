@@ -34,6 +34,9 @@ INTEG_TEST_INDEX = "opensearch-integration-test-results"
 BUILD_INDEX = "opensearch-distribution-build-results"
 RELEASE_INDEX = "opensearch_release_metrics"
 COMPONENTS_QUERY_SIZE = 50
+# distribution_build_number is an integer field of the metrics indices; GitHub run ids (the GHA build.id) exceed it.
+MAX_BUILD_NUMBER = 2**31 - 1
+BUILD_NUMBER_FOLLOW_UP = "Make GHA build numbers fit Jenkins integer fields"
 
 
 def qualifier_filter(qualifier: Optional[str]) -> List[Dict[str, Any]]:
@@ -223,9 +226,19 @@ def main(argv: Optional[List[str]] = None, search: Optional[Search] = None) -> i
     parser.add_argument("--report", default="", help="Write the collected result as JSON to this file")
     args = parser.parse_args(argv)
 
+    build_number = args.distribution_number.strip()
+    if build_number.isdigit() and int(build_number) > MAX_BUILD_NUMBER:
+        print(f"::warning::Distribution build number {build_number} does not fit the integer distribution_build_number field of the "
+              f"metrics indices; skipping the integration test results query and the AUTOCUT issue update until "
+              f"'{BUILD_NUMBER_FOLLOW_UP}' lands.")
+        write_output("skipped", "true")
+        write_summary(f"### Integration test results for {args.input_manifest}\n\nSkipped: distribution build {build_number} "
+                      f"is out of the metrics integer range ({BUILD_NUMBER_FOLLOW_UP}).")
+        return 0
+
     with open(args.input_manifest) as manifest_file:
         manifest = yaml.safe_load(manifest_file)
-    result = collect(search or from_args(args.endpoint, args.dashboards_url).search, manifest, args.distribution_number.strip())
+    result = collect(search or from_args(args.endpoint, args.dashboards_url).search, manifest, build_number)
 
     write_output("distribution-build-number", result["distribution_build_number"])
     write_output("failures", json.dumps(result["failures"]))

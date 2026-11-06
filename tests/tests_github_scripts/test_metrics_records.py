@@ -98,6 +98,23 @@ class TestMetricsRecords(unittest.TestCase):
         )
         self.assertTrue(all(r["action"] == {"index": {"_index": "failures"}} for r in parse_bulk(bodies["failures"])))
 
+    def test_smoke_test_records(self) -> None:
+        body = metrics_records.smoke_test_records(
+            "smoke", metrics_records.load(TEST_REPORT), "smoke-test", "77", "https://run", "https://build", 1700000000000
+        )
+        records = parse_bulk(body)
+        self.assertTrue(all(r["action"] == {"index": {"_index": "smoke"}} for r in records))
+        alerting = [r["doc"] for r in records if r["doc"]["component"] == "alerting"]
+        self.assertEqual([d["component_test_spec_name"] for d in alerting], ["with-security", "without-security"])
+        self.assertEqual(alerting[0]["component_test_spec_result"], "FAIL")
+        self.assertEqual(alerting[0]["component_test_spec_cluster_stdout"], "local-cluster-logs/stdout.txt")
+        self.assertEqual(alerting[0]["smoke_test_build_number"], 77)
+        self.assertEqual(alerting[0]["qualifier"], "alpha1")
+        self.assertEqual(
+            alerting[0]["test_report_manifest_yml"],
+            "https://ci.opensearch.org/ci/dbc/smoke-test/3.9.0-alpha1/11089/linux/x64/tar/test-results/77/smoke-test/test-report.yml",
+        )
+
     def test_failed_tests_sentinels(self) -> None:
         self.assertEqual(metrics_records.failed_tests([]), [])
         self.assertEqual(metrics_records.failed_tests(["No Failed Test"]), [])
@@ -132,3 +149,17 @@ class TestMetricsRecords(unittest.TestCase):
                 self.assertEqual(len(parse_bulk(records.read())), 3)
         out, _ = self.capfd.readouterr()
         self.assertIn("failures-alias=opensearch-integration-test-failures\n", out)
+
+    def test_main_smoke_test_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "records.ndjson")
+            argv = ["metrics_records.py", "smoke-test-results", "--test-report", TEST_REPORT, "--smoke-test-build-number", "77",
+                    "--smoke-test-build-url", "https://run", "--distribution-build-url", "https://build", "--build-start-time", "1",
+                    "--output", output]
+            with patch("argparse._sys.argv", argv):
+                self.assertEqual(metrics_records.main(), 0)
+            with open(output) as records:
+                self.assertGreater(len(parse_bulk(records.read())), 0)
+        out, _ = self.capfd.readouterr()
+        self.assertIn("alias=opensearch-smoke-test-results\n", out)
+        self.assertRegex(out, r"index=opensearch-smoke-test-results-\d{2}-\d{4}\n")

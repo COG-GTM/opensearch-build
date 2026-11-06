@@ -2,7 +2,7 @@
 name: 'Publish metrics'
 description: >-
   Generates the build or test result records the shared-library steps publishDistributionBuildResults()
-  (`kind: build`) and publishIntegTestResults() (`kind: integ`) bulk-indexed into the metrics cluster, and indexes them
+  (`kind: build`), publishIntegTestResults() (`kind: integ`) and publishSmokeTestResults() (`kind: smoke`) bulk-indexed into the metrics cluster, and indexes them
   with SigV4 through the AWS_ROLE_METRICS OIDC role (ADR 0001). Record generation is
   .github/scripts/metrics_records.py; the index/alias creation and `_bulk` call are index-records.sh. With
   `dry-run: true` the records are generated and summarised but nothing is sent. Indexing needs
@@ -10,7 +10,7 @@ description: >-
 
 inputs:
   kind:
-    description: 'build (distribution build results) or integ (integration test results and failures)'
+    description: 'build (distribution build results), integ (integration test results and failures) or smoke (smoke test results)'
     required: true
   input-manifest:
     description: 'kind=build: input manifest of the build'
@@ -35,15 +35,15 @@ inputs:
     required: false
     default: 'SUCCESS'
   test-report:
-    description: 'kind=integ: test-report.yml written by ./report.sh'
+    description: 'kind=integ/smoke: test-report.yml written by ./report.sh'
     required: false
     default: ''
   job-name:
-    description: 'kind=integ: test job name in the test-report URL (Jenkins JOB_NAME)'
+    description: 'kind=integ/smoke: test job name in the test-report URL (Jenkins JOB_NAME)'
     required: false
     default: 'integ-test'
   distribution-build-url:
-    description: 'kind=integ: URL of the distribution build run under test'
+    description: 'kind=integ/smoke: URL of the distribution build run under test'
     required: false
     default: ''
   build-number:
@@ -160,8 +160,19 @@ runs:
             echo "failures-file=${OUT_DIR}/failures.ndjson" >> "$GITHUB_OUTPUT"
             echo "failure-count=$(( $(wc -l < "${OUT_DIR}/failures.ndjson") / 2 ))" >> "$GITHUB_OUTPUT"
             ;;
+          smoke)
+            [ -f "${TEST_REPORT}" ] || { echo "::error::test-report '${TEST_REPORT}' not found."; exit 1; }
+            python3 "${SCRIPT}" smoke-test-results \
+              --test-report "${TEST_REPORT}" \
+              --job-name "${JOB_NAME}" \
+              --smoke-test-build-number "${BUILD_NUMBER}" \
+              --smoke-test-build-url "${BUILD_URL}" \
+              --distribution-build-url "${DISTRIBUTION_BUILD_URL}" \
+              --build-start-time "${START_TIME}" \
+              --output "${OUT_DIR}/records.ndjson" | tee -a "$GITHUB_OUTPUT"
+            ;;
           *)
-            echo "::error::kind must be build or integ, got '${KIND}'."
+            echo "::error::kind must be build, integ or smoke, got '${KIND}'."
             exit 1
             ;;
         esac
@@ -204,6 +215,8 @@ runs:
         INDEX_RECORDS="${GITHUB_ACTION_PATH}/index-records.sh"
         if [ "${KIND}" = build ]; then
           bash "${INDEX_RECORDS}" "${RECORDS_FILE}" "${INDEX}" "${ALIAS}" "${MAPPINGS}/opensearch-distribution-build-results.json"
+        elif [ "${KIND}" = smoke ]; then
+          bash "${INDEX_RECORDS}" "${RECORDS_FILE}" "${INDEX}" "${ALIAS}" "${MAPPINGS}/opensearch-smoke-test-results.json"
         else
           bash "${INDEX_RECORDS}" "${RECORDS_FILE}" "${INDEX}" "${ALIAS}" "${MAPPINGS}/opensearch-integration-test-results.json"
           bash "${INDEX_RECORDS}" "${FAILURES_FILE}" "${FAILURES_INDEX}" "${FAILURES_ALIAS}" "${MAPPINGS}/opensearch-integration-test-failures.json"

@@ -1,0 +1,200 @@
+---
+# GitHub Actions port of jenkins/opensearch/integ-test.jenkinsfile (job integ-test, jenkins@12.0.1).
+#   stage('verify-parameters')     -> verify-parameters (downloadBuildManifest through the s2.1 action)
+#   stage('validate-artifacts')    -> validate-artifacts: workflow_call of validate-artifacts.yml (distribution-validation)
+#   stage('integ-test') + post     -> integ-test: _integ-test.yml, one matrix leg per test-manifest component, test
+#                                     results + test-report.yml under integ-test/<version>/<build>/<platform>/<arch>/
+#                                     <distribution>/test-results/<run id>/integ-test/, publishIntegTestResults through
+#                                     the publish-metrics action
+#   post { always } build job: 'integ-test-notification' -> notification: workflow_call of integ-test-notification.yml,
+#                                     a dry run until vars.AUTOCUT_LIVE is 'true' so Jenkins and Actions never edit the
+#                                     same AUTOCUT issues before cutover
+# distribution-build-opensearch.yml calls it per tested cell (Jenkins triggerIntegrationTests, wait: false);
+# workflow_dispatch keeps manual reruns. Jenkins BUILD_NUMBER (the test run id) is github.run_id.
+name: integ-test-opensearch
+run-name: integ-test-opensearch ${{ inputs.TEST_MANIFEST }} ${{ inputs.COMPONENT_NAME }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      COMPONENT_NAME:
+        description: '<Optional> One or more component names (e.g. index-management geospatial) separated by space; empty tests everything in the TEST_MANIFEST.'
+        required: false
+        default: ''
+        type: string
+      TEST_MANIFEST:
+        description: '<Required> Test manifest under the manifests folder, e.g. 2.0.0/opensearch-2.0.0-test.yml.'
+        required: true
+        type: string
+      BUILD_MANIFEST_URL:
+        description: '<Required> The build manifest URL for OpenSearch, e.g. https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/2.9.0/8172/linux/x64/tar/builds/opensearch/manifest.yml.'
+        required: true
+        type: string
+      RC_NUMBER:
+        description: '<Optional> The RC build count. Default is 0 which means its not an RC build.'
+        required: false
+        default: '0'
+        type: string
+      VALIDATE_ARTIFACTS:
+        description: '<Optional> If true the provided artifacts are validated before triggering integ-tests else skip the validation stage'
+        required: false
+        default: true
+        type: boolean
+      RUNS_ON:
+        description: '<Optional> JSON runner label array instead of the ADR 0001 pool of the build platform/architecture.'
+        required: false
+        default: ''
+        type: string
+  workflow_call:
+    inputs:
+      COMPONENT_NAME:
+        required: false
+        default: ''
+        type: string
+      TEST_MANIFEST:
+        required: true
+        type: string
+      BUILD_MANIFEST_URL:
+        description: 'Build manifest URL, or its path inside ARTIFACTS_FROM_RUN'
+        required: true
+        type: string
+      RC_NUMBER:
+        required: false
+        default: '0'
+        type: string
+      VALIDATE_ARTIFACTS:
+        required: false
+        default: true
+        type: boolean
+      RUNS_ON:
+        required: false
+        default: ''
+        type: string
+      ARTIFACTS_FROM_RUN:
+        description: 'Test the keep-distribution artifact of this run instead of the artifact bucket (dry runs)'
+        required: false
+        default: ''
+        type: string
+    secrets:
+      AWS_ROLE_ARTIFACTS:
+        required: false
+      AWS_ROLE_TEST_RESULTS:
+        required: false
+      ARTIFACT_BUCKET_NAME:
+        required: false
+      AWS_ROLE_METRICS:
+        required: false
+      METRICS_CLUSTER_ENDPOINT:
+        required: false
+      GH_APP_ID:
+        required: false
+      GH_APP_PRIVATE_KEY:
+        required: false
+
+permissions: {}
+
+jobs:
+  verify-parameters:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      build-id: ${{ steps.build.outputs.build-id }}
+      distribution: ${{ steps.build.outputs.distribution }}
+      architecture: ${{ steps.build.outputs.architecture }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Verify the parameters
+        env:
+          TEST_MANIFEST: ${{ inputs.TEST_MANIFEST }}
+          BUILD_MANIFEST_URL: ${{ inputs.BUILD_MANIFEST_URL }}
+          VALIDATE_ARTIFACTS: ${{ inputs.VALIDATE_ARTIFACTS }}
+          ARTIFACTS_FROM_RUN: ${{ inputs.ARTIFACTS_FROM_RUN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_MANIFEST}" ] || [[ "${TEST_MANIFEST}" == *..* ]] || [ ! -f "manifests/${TEST_MANIFEST}" ]; then
+            echo "::error::Integration Tests failed to start. Test manifest was not provided or not found in manifests/${TEST_MANIFEST}."
+            exit 1
+          fi
+          if [ -z "${BUILD_MANIFEST_URL}" ]; then
+            echo "::error::Integration Tests failed to start. Build manifest url was not provided."
+            exit 1
+          fi
+          if [ -n "${ARTIFACTS_FROM_RUN}" ] && [ "${VALIDATE_ARTIFACTS}" = true ]; then
+            echo "::error::VALIDATE_ARTIFACTS checks the staging bucket; it needs an uploaded build, not ARTIFACTS_FROM_RUN."
+            exit 1
+          fi
+      - name: Download the build from this run
+        if: ${{ inputs.ARTIFACTS_FROM_RUN != '' }}
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: ${{ inputs.ARTIFACTS_FROM_RUN }}
+          path: run-artifacts
+      - name: Download the build manifest
+        id: build
+        uses: ./.github/actions/download-build-manifest
+        with:
+          url: ${{ inputs.ARTIFACTS_FROM_RUN != '' && format('file://{0}/run-artifacts/{1}', github.workspace, inputs.BUILD_MANIFEST_URL) || inputs.BUILD_MANIFEST_URL }}
+          job-name: distribution-build-opensearch
+
+  validate-artifacts:
+    # stage('validate-artifacts'): build job: 'distribution-validation', propagate: true, wait: true
+    needs: verify-parameters
+    if: ${{ inputs.VALIDATE_ARTIFACTS }}
+    uses: ./.github/workflows/validate-artifacts.yml
+    permissions:
+      contents: read
+    with:
+      VERSION: ${{ needs.verify-parameters.outputs.version }}
+      DISTRIBUTION: ${{ needs.verify-parameters.outputs.distribution }}
+      ARCHITECTURE: ${{ needs.verify-parameters.outputs.architecture }}
+      PROJECTS: opensearch
+      ARTIFACT_TYPE: staging
+      OPTIONS: os-build-number=${{ needs.verify-parameters.outputs.build-id }} optional-args=using-staging-artifact-only skip-core-plugins=arrow-base,arrow-flight-rpc
+
+  integ-test:
+    needs: [verify-parameters, validate-artifacts]
+    if: ${{ always() && needs.verify-parameters.result == 'success' && (needs.validate-artifacts.result == 'success' || needs.validate-artifacts.result == 'skipped') }}
+    uses: ./.github/workflows/_integ-test.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      test-type: integ-test
+      test-manifest: ${{ inputs.TEST_MANIFEST }}
+      build-manifest-url: ${{ inputs.BUILD_MANIFEST_URL }}
+      component-name: ${{ inputs.COMPONENT_NAME }}
+      rc-number: ${{ inputs.RC_NUMBER }}
+      build-job-name: distribution-build-opensearch
+      job-name: integ-test
+      artifacts-from-run: ${{ inputs.ARTIFACTS_FROM_RUN }}
+      timeout-minutes: 720
+      runs-on: ${{ inputs.RUNS_ON }}
+    secrets:
+      AWS_ROLE_ARTIFACTS: ${{ secrets.AWS_ROLE_ARTIFACTS }}
+      AWS_ROLE_TEST_RESULTS: ${{ secrets.AWS_ROLE_TEST_RESULTS }}
+      ARTIFACT_BUCKET_NAME: ${{ secrets.ARTIFACT_BUCKET_NAME }}
+      AWS_ROLE_METRICS: ${{ secrets.AWS_ROLE_METRICS }}
+      METRICS_CLUSTER_ENDPOINT: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+
+  notification:
+    # post { always }: build job: 'integ-test-notification', propagate: false, wait: false
+    needs: [verify-parameters, integ-test]
+    if: ${{ always() && needs.verify-parameters.result == 'success' }}
+    uses: ./.github/workflows/integ-test-notification.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      INPUT_MANIFEST: ${{ needs.verify-parameters.outputs.version }}/opensearch-${{ needs.verify-parameters.outputs.version }}.yml
+      DISTRIBUTION_NUMBER: ${{ needs.verify-parameters.outputs.build-id }}
+      DRY_RUN: ${{ vars.AUTOCUT_LIVE != 'true' }}
+    secrets:
+      AWS_ROLE_METRICS: ${{ secrets.AWS_ROLE_METRICS }}
+      METRICS_CLUSTER_ENDPOINT: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
+      GH_APP_ID: ${{ secrets.GH_APP_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
