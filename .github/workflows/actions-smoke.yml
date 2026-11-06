@@ -267,13 +267,13 @@ jobs:
           INTEG_FAILURES: ${{ steps.integ.outputs.failure-count }}
           INTEG_FILE: ${{ steps.integ.outputs.records-file }}
           NO_ROLE_OUTCOME: ${{ steps.no-role.outcome }}
-          RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
+          BUILD_NUMBER=$(GITHUB_OUTPUT='' python3 .github/scripts/build_number.py number | sed -n 's/^build-number=//p')
           test "${BUILD_COUNT}" = 3
           [[ "${BUILD_INDEX}" =~ ^opensearch-distribution-build-results-[0-9]{2}-[0-9]{4}$ ]]
           jq -s -e '[.[] | select(.component == "alertingDashboards")][0].component_build_result == "failed"' "${BUILD_FILE}" > /dev/null
-          jq -s -e "[.[] | select(.component)][0].distribution_build_number == ${RUN_NUMBER}" "${BUILD_FILE}" > /dev/null
+          jq -s -e "[.[] | select(.component)][0].distribution_build_number == ${BUILD_NUMBER}" "${BUILD_FILE}" > /dev/null
           test "${INTEG_COUNT}" = 2
           test "${INTEG_FAILURES}" = 3
           jq -s -e '[.[] | select(.component == "alerting")][0].with_security == "fail"' "${INTEG_FILE}" > /dev/null

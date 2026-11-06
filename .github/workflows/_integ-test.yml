@@ -179,10 +179,18 @@ jobs:
       selected-components: ${{ steps.components.outputs.selected-components }}
       upload: ${{ steps.upload.outputs.upload }}
       local-artifacts: ${{ steps.upload.outputs.local-artifacts }}
+      test-build-number: ${{ steps.build-number.outputs.build-number }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Derive the test build number
+        # Jenkins BUILD_NUMBER: offset + run_number (.github/scripts/build_number.py, plan decision d-build-number)
+        id: build-number
+        env:
+          JOB_NAME: ${{ inputs.job-name }}
+        run: python3 .github/scripts/build_number.py number --job "${JOB_NAME}"
 
       - name: Verify the parameters
         env:
@@ -504,7 +512,7 @@ jobs:
           CI_GROUPS: ${{ inputs.ci-groups }}
           JOB_NAME: ${{ inputs.job-name }}
           PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
-          TEST_RUN_ID: ${{ github.run_id }}
+          TEST_RUN_ID: ${{ needs.setup.outputs.test-build-number }}
         run: |
           set -euo pipefail
           rm -rf test-results
@@ -688,7 +696,7 @@ jobs:
           COMPONENT_NAME: ${{ inputs.test-type == 'smoke-test' && needs.setup.outputs.selected-components || inputs.component-name }}
           JOB_NAME: ${{ inputs.job-name }}
           PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
-          TEST_RUN_ID: ${{ github.run_id }}
+          TEST_RUN_ID: ${{ needs.setup.outputs.test-build-number }}
           NAME: ${{ needs.setup.outputs.name }}
           ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.artifact-root-url }}
           OPENSEARCH_ARTIFACT_ROOT_URL: ${{ needs.setup.outputs.opensearch-artifact-root-url }}
@@ -799,12 +807,10 @@ jobs:
             echo "::notice::Metrics indexing is a dry run (METRICS_CLUSTER_ENDPOINT / AWS_ROLE_METRICS not configured or pull request)."
           fi
           if [ -z "${DISTRIBUTION_BUILD_URL}" ]; then
-            # build.id is the Actions run id for GitHub-built distributions and the Jenkins BUILD_NUMBER otherwise.
-            if [ "${#BUILD_ID}" -ge 9 ]; then
-              DISTRIBUTION_BUILD_URL="${REPOSITORY_URL}/actions/runs/${BUILD_ID}"
-            else
-              DISTRIBUTION_BUILD_URL="https://build.ci.opensearch.org/blue/organizations/jenkins/${BUILD_JOB_NAME}/detail/${BUILD_JOB_NAME}/${BUILD_ID}/pipeline"
-            fi
+            # build.id is a Jenkins BUILD_NUMBER or a GitHub build number (offset + run_number, build_number.py).
+            DISTRIBUTION_BUILD_URL=$(GITHUB_OUTPUT='' python3 .github/scripts/build_number.py build-url --job "${BUILD_JOB_NAME}" \
+              --number "${BUILD_ID}" --repository-url "${REPOSITORY_URL}" | sed -n 's/^build-url=//p')
+            [ -n "${DISTRIBUTION_BUILD_URL}" ] || exit 1
           fi
           {
             echo "dry-run=${DRY_RUN}"
@@ -819,7 +825,7 @@ jobs:
           test-report: test-report.yml
           job-name: ${{ inputs.job-name }}
           distribution-build-url: ${{ steps.metrics.outputs.distribution-build-url }}
-          build-number: ${{ github.run_id }}
+          build-number: ${{ needs.setup.outputs.test-build-number }}
           metrics-host-url: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
           role-to-assume: ${{ secrets.AWS_ROLE_METRICS }}
           dry-run: ${{ steps.metrics.outputs.dry-run }}

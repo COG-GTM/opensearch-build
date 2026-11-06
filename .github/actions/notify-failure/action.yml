@@ -164,12 +164,13 @@ runs:
         RUN_URL: ${{ steps.prepare.outputs.run-url }}
         FAILURES: ${{ inputs.failures }}
         JOB_NAME: ${{ github.workflow }}
-        RUN_NUMBER: ${{ github.run_number }}
         MESSAGE: ${{ inputs.webhook-message }}
         ICON: ${{ inputs.webhook-icon }}
         WEBHOOK_MANIFEST: ${{ inputs.webhook-manifest }}
         DRY_RUN: ${{ inputs.dry-run }}
       run: |
+        RUN_NUMBER=$(GITHUB_OUTPUT='' "$PYTHON" "${GITHUB_ACTION_PATH}/../../scripts/build_number.py" number | sed -n 's/^build-number=//p')
+        [ -n "$RUN_NUMBER" ] || exit 1
         args=(webhook --component "$COMPONENT" --run-url "$RUN_URL" --failures "$FAILURES" --job-name "$JOB_NAME"
           --run-number "$RUN_NUMBER" --message "$MESSAGE" --icon "$ICON" --webhook-manifest "$WEBHOOK_MANIFEST")
         if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi

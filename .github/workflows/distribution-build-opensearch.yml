@@ -17,8 +17,9 @@
 #                                         through the publish-metrics and notify-failure actions
 #   post { success / unstable }        -> distribution-validation (validate-artifacts.yml) and nightly-playground
 #
-# Jenkins BUILD_NUMBER is github.run_id here (build.id of the manifests and the <build> segment of the S3 keys), so the
-# artifact layout is distribution-build-opensearch/<revision>/<run_id>/<platform>/<arch>/<distribution>/{builds,dist}.
+# Jenkins BUILD_NUMBER is .github/scripts/build_number.py's offset + run_number (build.id of the manifests, the <build>
+# segment of the S3 keys, the docker tag suffix), derived once in verify-parameters, so the artifact layout is
+# distribution-build-opensearch/<revision>/<build number>/<platform>/<arch>/<distribution>/{builds,dist}.
 # Not ported: INCREMENTAL / PREVIOUS_BUILD_ID (every build is a full build; the keys it writes are the same).
 # Jenkins fired the downstream jobs with `propagate: false`; a reusable-workflow job cannot set continue-on-error, so a
 # failing min-snapshot or test call shows on this run.
@@ -108,6 +109,7 @@ jobs:
       contents: read
     outputs:
       input-manifest: ${{ steps.params.outputs.input-manifest }}
+      build-number: ${{ steps.build-number.outputs.build-number }}
       component-name: ${{ steps.params.outputs.component-name }}
       rc-number: ${{ steps.params.outputs.rc-number }}
       continue-on-error: ${{ steps.params.outputs.continue-on-error }}
@@ -141,6 +143,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Derive the build number
+        # Jenkins BUILD_NUMBER: offset + run_number (.github/scripts/build_number.py, plan decision d-build-number)
+        id: build-number
+        env:
+          JOB_NAME: distribution-build-opensearch
+        run: python3 .github/scripts/build_number.py number --job "${JOB_NAME}"
+
       - name: Verify the parameters and build the matrix
         id: params
         env:
@@ -155,7 +164,7 @@ jobs:
           TEST_MANIFEST: ${{ inputs.TEST_MANIFEST }}
           OPTIONS: ${{ inputs.OPTIONS }}
           RUNS_ON: ${{ inputs.RUNS_ON }}
-          RUN_ID: ${{ github.run_id }}
+          BUILD_NUMBER: ${{ steps.build-number.outputs.build-number }}
           HAS_ARTIFACT_ROLE: ${{ secrets.AWS_ROLE_ARTIFACTS != '' && secrets.ARTIFACT_BUCKET_NAME != '' }}
         run: |
           set -euo pipefail
@@ -263,7 +272,7 @@ jobs:
           if test_manifest:
               for c in cells:
                   if c["platform"] in values["test-platform"].split() and c["distribution"] in values["test-distribution"].split():
-                      url = f"{root}/{revision}/{env['RUN_ID']}/{c['platform']}/{c['architecture']}/{c['distribution']}/builds/{filename}/manifest.yml"
+                      url = f"{root}/{revision}/{env['BUILD_NUMBER']}/{c['platform']}/{c['architecture']}/{c['distribution']}/builds/{filename}/manifest.yml"
                       tested.append(dict(c, **{"build-manifest-url": url}))
           tests = tested if flags["integ-test"] else []
           # The linux stages call triggerSmokeTests(); only the linux x64 tar stage calls triggerBWCTests().
@@ -362,6 +371,7 @@ jobs:
       component-name: ${{ needs.verify-parameters.outputs.component-name }}
       rc-number: ${{ needs.verify-parameters.outputs.rc-number }}
       job-name: distribution-build-opensearch
+      build-number: ${{ needs.verify-parameters.outputs.build-number }}
       continue-on-error: ${{ needs.verify-parameters.outputs.continue-on-error == 'true' }}
       skip-artifact-check: ${{ needs.verify-parameters.outputs.skip-artifact-check == 'true' }}
       parallel: ${{ needs.verify-parameters.outputs.parallel }}
@@ -468,10 +478,10 @@ jobs:
         id: urls
         env:
           REVISION: ${{ needs.verify-parameters.outputs.revision }}
-          RUN_ID: ${{ github.run_id }}
+          BUILD_NUMBER: ${{ needs.verify-parameters.outputs.build-number }}
         run: |
           set -euo pipefail
-          ROOT="https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/${REVISION}/${RUN_ID}/linux"
+          ROOT="https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/${REVISION}/${BUILD_NUMBER}/linux"
           X64="${ROOT}/x64/tar/dist/opensearch/opensearch-${REVISION}-linux-x64.tar.gz"
           ARM64="${ROOT}/arm64/tar/dist/opensearch/opensearch-${REVISION}-linux-arm64.tar.gz"
           if ! curl -sSfIL --retry 3 "${X64}" > /dev/null || ! curl -sSfIL --retry 3 "${ARM64}" > /dev/null; then
@@ -483,7 +493,7 @@ jobs:
           MAJOR="${REVISION%%.*}"
           BASE_OS=al2023
           [ "${MAJOR}" = 1 ] && BASE_OS=al2
-          SCRIPT="id && pwd && cd docker/release && curl -sSL ${X64} -o opensearch-x64.tgz && curl -sSL ${ARM64} -o opensearch-arm64.tgz && bash build-image-multi-arch.sh -v ${REVISION} -f ./dockerfiles/opensearch.${BASE_OS}.dockerfile -p opensearch -a 'x64,arm64' -r opensearchstaging/opensearch -t 'opensearch-x64.tgz,opensearch-arm64.tgz' -n ${RUN_ID}"
+          SCRIPT="id && pwd && cd docker/release && curl -sSL ${X64} -o opensearch-x64.tgz && curl -sSL ${ARM64} -o opensearch-arm64.tgz && bash build-image-multi-arch.sh -v ${REVISION} -f ./dockerfiles/opensearch.${BASE_OS}.dockerfile -p opensearch -a 'x64,arm64' -r opensearchstaging/opensearch -t 'opensearch-x64.tgz,opensearch-arm64.tgz' -n ${BUILD_NUMBER}"
           {
             echo "ready=true"
             echo "script=${SCRIPT}"
@@ -512,7 +522,7 @@ jobs:
       SOURCE_IMAGE_REGISTRY: opensearchstaging
       SOURCE_IMAGE: opensearch:${{ needs.verify-parameters.outputs.revision }}
       DESTINATION_IMAGE_REGISTRY: opensearchstaging
-      DESTINATION_IMAGE: opensearch:${{ needs.verify-parameters.outputs.revision }}.${{ github.run_id }}
+      DESTINATION_IMAGE: opensearch:${{ needs.verify-parameters.outputs.revision }}.${{ needs.verify-parameters.outputs.build-number }}
     secrets: inherit  # zizmor: ignore[secrets-inherit] docker-copy.yml declares no workflow_call secrets
 
   docker-scan:
@@ -612,7 +622,7 @@ jobs:
             || needs.build.result == 'success' && steps.classify.outputs.failed != '' && 'UNSTABLE'
             || needs.build.result == 'success' && 'SUCCESS'
             || 'ABORTED' }}
-          build-number: ${{ github.run_id }}
+          build-number: ${{ needs.verify-parameters.outputs.build-number }}
           build-start-time: ${{ needs.verify-parameters.outputs.build-start-time }}
           metrics-host-url: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
           role-to-assume: ${{ secrets.AWS_ROLE_METRICS }}
@@ -640,7 +650,7 @@ jobs:
       contents: read
     with:
       VERSION: ${{ needs.verify-parameters.outputs.revision }}
-      OPTIONS: os-build-number=${{ github.run_id }} optional-args=using-staging-artifact-only
+      OPTIONS: os-build-number=${{ needs.verify-parameters.outputs.build-number }} optional-args=using-staging-artifact-only
       DOCKER_SOURCE: dockerhub
       PROJECTS: opensearch
       ARTIFACT_TYPE: staging
