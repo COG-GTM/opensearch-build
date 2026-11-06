@@ -1,9 +1,9 @@
 ---
 # Evidence run of the s4.3 test workflows against GitHub-built distributions, on a GitHub-hosted runner with no AWS
-# secrets: OpenSearch 3.8.1 (OpenSearch, job-scheduler, security, from their 3.8 branches) and OpenSearch
-# Dashboards 3.8.0 (core, functionalTestDashboards, securityDashboards, customImportMapDashboards, from
+# secrets: OpenSearch 3.8.1 (OpenSearch, security, custom-codecs, opensearch-system-templates, from their 3.8
+# branches) and OpenSearch Dashboards 3.8.0 (core, functionalTestDashboards, securityDashboards, customImportMapDashboards, from
 # their 3.8.0 tags) are built for linux x64 tar through _build-distribution.yml with keep-distribution, then
-#   integ-test-opensearch.yml             runs one OpenSearch plugin (job-scheduler) against the OpenSearch build,
+#   integ-test-opensearch.yml             runs one OpenSearch plugin (opensearch-system-templates) against the OpenSearch build,
 #   integ-test-opensearch-dashboards.yml  runs one Dashboards plugin (customImportMapDashboards) against the Dashboards
 #                                         build and Jenkins build 12115 of OpenSearch 3.8.0 (its public artifact URL),
 #   smoke-test-opensearch.yml             runs the smoke tests of a few components against Jenkins build 12115 of
@@ -17,9 +17,9 @@ on:
   workflow_dispatch:
     inputs:
       OPENSEARCH_COMPONENT:
-        description: 'OpenSearch component to integ-test (must be built: OpenSearch, job-scheduler or security)'
+        description: 'OpenSearch component to integ-test (in the 3.8.1 test manifest and built: OpenSearch, security or opensearch-system-templates)'
         required: false
-        default: job-scheduler
+        default: opensearch-system-templates
         type: string
       DASHBOARDS_COMPONENT:
         description: 'OpenSearch Dashboards component to integ-test (must be built: securityDashboards or customImportMapDashboards)'
@@ -54,7 +54,7 @@ jobs:
       platform: linux
       architecture: x64
       distribution: tar
-      component-name: OpenSearch job-scheduler security
+      component-name: OpenSearch security custom-codecs opensearch-system-templates
       job-name: distribution-build-opensearch
       upload: false
       update-latest-url: false
@@ -91,7 +91,7 @@ jobs:
     with:
       TEST_MANIFEST: 3.8.1/opensearch-3.8.1-test.yml
       BUILD_MANIFEST_URL: builds/opensearch/manifest.yml
-      COMPONENT_NAME: ${{ inputs.OPENSEARCH_COMPONENT || 'job-scheduler' }}
+      COMPONENT_NAME: ${{ inputs.OPENSEARCH_COMPONENT || 'opensearch-system-templates' }}
       VALIDATE_ARTIFACTS: false
       RUNS_ON: '["ubuntu-24.04"]'
       ARTIFACTS_FROM_RUN: distribution-linux-x64-tar-opensearch
