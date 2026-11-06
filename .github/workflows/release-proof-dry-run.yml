@@ -5,8 +5,8 @@
 #   OpenSearch Dashboards 3.9.0  Jenkins build 9054 (RC 3)
 # manifests/3.9.0 carry the MATCH_BUILD_MANIFEST lock of those builds (release-manifest-commit-lock.yml dry-run output),
 # as the Jenkins lock PR did before the RC builds. The jobs here
-#   build-*      build linux x64 tar through _build-distribution.yml with the RC numbers and the Jenkins build ids
-#                (build-number, so build_number.py is not involved), no upload, keep-distribution,
+#   build-*      build linux x64 tar through _build-distribution.yml with the RC numbers (build ids from the
+#                release-proof-dry-run.yml lane of build_number.py), no upload, keep-distribution,
 #   compare-*    check the GitHub build manifest against the Jenkins RC build manifest (same commit per component;
 #                functionalTestDashboards is left unlocked by MATCH_BUILD_MANIFEST on Jenkins too, so it is not compared),
 #   integ-test-* run integ-test-opensearch(-dashboards).yml on the GitHub builds, Dashboards against the replayed
@@ -42,7 +42,6 @@ jobs:
       architecture: x64
       distribution: tar
       rc-number: '4'
-      build-number: '12228'
       component-name: OpenSearch security custom-codecs opensearch-system-templates job-scheduler geospatial
       job-name: distribution-build-opensearch
       upload: false
@@ -62,7 +61,6 @@ jobs:
       architecture: x64
       distribution: tar
       rc-number: '3'
-      build-number: '9054'
       component-name: OpenSearch-Dashboards functionalTestDashboards securityDashboards customImportMapDashboards
       job-name: distribution-build-opensearch-dashboards
       upload: false

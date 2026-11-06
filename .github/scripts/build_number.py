@@ -65,6 +65,7 @@ CALLER_LANES = {
     "build-distribution-min-snapshot.yml": 3,
     "test-workflows-dry-run.yml": 4,
     "actions-smoke.yml": 5,
+    "release-proof-dry-run.yml": 6,
 }
 
 
