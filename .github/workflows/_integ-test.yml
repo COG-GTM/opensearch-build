@@ -471,6 +471,7 @@ jobs:
       - name: Run the tests
         env:
           TEST_TYPE: ${{ inputs.test-type }}
+          COMPONENT_NAME: ${{ inputs.component-name }}
           TEST_MANIFEST: manifests/${{ inputs.test-manifest }}
           NAME: ${{ needs.setup.outputs.name }}
           VERSION: ${{ needs.setup.outputs.version }}
@@ -501,6 +502,7 @@ jobs:
             smoke-test)
               # runSmokeTestScript.groovy (jenkins@lf-jenkins)
               TEST=(./test.sh smoke-test "${TEST_MANIFEST}" --test-run-id "${TEST_RUN_ID}" --paths "opensearch=${ROOT}")
+              if [ -n "${COMPONENT_NAME}" ]; then read -r -a COMPONENTS <<< "${COMPONENT_NAME}"; TEST+=(--component "${COMPONENTS[@]}"); fi
               ;;
             *)
               # runIntegTestScript.groovy / runIntegTestScriptForOSD.groovy (jenkins@12.0.1)

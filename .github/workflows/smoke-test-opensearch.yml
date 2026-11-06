@@ -19,6 +19,11 @@ on:
         description: '<Required> The build manifest URL for OpenSearch, e.g. https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/2.19.0/10545/linux/x64/tar/builds/opensearch/manifest.yml.'
         required: true
         type: string
+      COMPONENT_NAME:
+        description: '<Optional> Space-separated components to smoke test instead of every component of the test manifest.'
+        required: false
+        default: ''
+        type: string
       RC_NUMBER:
         description: '<Optional> The RC build count. Default is 0 which means its not an RC build.'
         required: false
@@ -36,6 +41,10 @@ on:
         type: string
       BUILD_MANIFEST_URL:
         required: true
+        type: string
+      COMPONENT_NAME:
+        required: false
+        default: ''
         type: string
       RC_NUMBER:
         required: false
@@ -72,6 +81,7 @@ jobs:
       test-type: smoke-test
       test-manifest: ${{ inputs.TEST_MANIFEST }}
       build-manifest-url: ${{ inputs.BUILD_MANIFEST_URL }}
+      component-name: ${{ inputs.COMPONENT_NAME }}
       rc-number: ${{ inputs.RC_NUMBER }}
       build-job-name: distribution-build-opensearch
       job-name: smoke-test
