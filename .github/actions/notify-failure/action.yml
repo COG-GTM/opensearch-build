@@ -69,6 +69,11 @@ inputs:
   webhook-manifest:
     description: Optional MANIFEST line of the webhook post.
     default: ''
+  build-number:
+    description: >-
+      BUILD_NUMBER of the webhook post: the number the run's results were written under (e.g. the test-build-number
+      output of _integ-test.yml). Empty derives this run's own number with .github/scripts/build_number.py.
+    default: ''
 
 outputs:
   repositories:
@@ -168,8 +173,11 @@ runs:
         ICON: ${{ inputs.webhook-icon }}
         WEBHOOK_MANIFEST: ${{ inputs.webhook-manifest }}
         DRY_RUN: ${{ inputs.dry-run }}
+        RUN_NUMBER: ${{ inputs.build-number }}
       run: |
-        RUN_NUMBER=$(GITHUB_OUTPUT='' "$PYTHON" "${GITHUB_ACTION_PATH}/../../scripts/build_number.py" number | sed -n 's/^build-number=//p')
+        if [ -z "$RUN_NUMBER" ]; then
+          RUN_NUMBER=$(GITHUB_OUTPUT='' "$PYTHON" "${GITHUB_ACTION_PATH}/../../scripts/build_number.py" number | sed -n 's/^build-number=//p')
+        fi
         [ -n "$RUN_NUMBER" ] || exit 1
         args=(webhook --component "$COMPONENT" --run-url "$RUN_URL" --failures "$FAILURES" --job-name "$JOB_NAME"
           --run-number "$RUN_NUMBER" --message "$MESSAGE" --icon "$ICON" --webhook-manifest "$WEBHOOK_MANIFEST")

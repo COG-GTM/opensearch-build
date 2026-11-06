@@ -653,6 +653,7 @@ jobs:
           rc-number: ${{ needs.verify-parameters.outputs.rc-number }}
           component-category: OpenSearch Dashboards
           overall-build-result: ${{ steps.result.outputs.result }}
+          build-number: ${{ needs.verify-parameters.outputs.build-number }}
           metrics-host-url: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
           role-to-assume: ${{ secrets.AWS_ROLE_METRICS }}
           dry-run: ${{ steps.result.outputs.metrics-dry-run }}

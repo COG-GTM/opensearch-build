@@ -142,6 +142,9 @@ on:
       build-id:
         description: 'build.id of the build under test (Jenkins buildId, the DISTRIBUTION_NUMBER of integ-test-notification)'
         value: ${{ jobs.setup.outputs.build-id }}
+      test-build-number:
+        description: 'Jenkins BUILD_NUMBER of this test run (build_number.py), the <test run> of the test-results keys'
+        value: ${{ jobs.setup.outputs.test-build-number }}
       test-report-url:
         description: 'Public URL of test-report.yml; empty when nothing was uploaded'
         value: ${{ jobs.test-report.outputs.test-report-url }}

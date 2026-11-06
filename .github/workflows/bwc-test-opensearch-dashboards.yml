@@ -112,4 +112,5 @@ jobs:
           webhook-icon: ${{ needs.bwc-test.result == 'success' && ':white_check_mark:' || ':warning:' }}
           webhook-message: ${{ needs.bwc-test.result == 'success' && 'BWC Tests Successful' || 'Failed BWC Tests' }}
           webhook-manifest: ${{ inputs.TEST_MANIFEST }}
+          build-number: ${{ needs.bwc-test.outputs.test-build-number }}
           dry-run: ${{ steps.webhook.outputs.dry-run }}
