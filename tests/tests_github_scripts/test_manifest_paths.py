@@ -143,6 +143,14 @@ class TestManifestPaths(unittest.TestCase):
             ["query-insights"],
         )
 
+    def test_integ_test_components_without_package_exclusions(self) -> None:
+        test_manifest = {"components": [{"name": "OpenSearch"}, {"name": "query-insights"}, {"name": "k-NN"}]}
+        build_manifest = {"build": {"distribution": "deb"}, "components": [{"name": "OpenSearch"}, {"name": "query-insights"}]}
+        self.assertEqual(
+            manifest_paths.integ_test_components(test_manifest, build_manifest, "OpenSearch query-insights k-NN", package_exclusions=False),
+            ["OpenSearch", "query-insights"],
+        )
+
     def test_expand_ci_groups(self) -> None:
         self.assertEqual(manifest_paths.expand_ci_groups(["OpenSearch-Dashboards", "securityDashboards"], 0), ["OpenSearch-Dashboards", "securityDashboards"])
         expanded = manifest_paths.expand_ci_groups(["OpenSearch-Dashboards", "securityDashboards"], manifest_paths.OSD_CI_GROUPS)

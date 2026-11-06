@@ -198,7 +198,7 @@ def expand_ci_groups(components: List[str], ci_groups: int) -> List[str]:
     return expanded
 
 
-def integ_test_components(test_manifest: Dict[str, Any], build_manifest: Dict[str, Any], requested: str) -> List[str]:
+def integ_test_components(test_manifest: Dict[str, Any], build_manifest: Dict[str, Any], requested: str, package_exclusions: bool = True) -> List[str]:
     """Component list of integ-test.jenkinsfile:149-171.
 
     COMPONENT_NAME (space-separated) or every test-manifest component; a requested name missing from the test manifest
@@ -215,7 +215,7 @@ def integ_test_components(test_manifest: Dict[str, Any], build_manifest: Dict[st
         if name not in in_build_manifest:
             print(f"Skipping tests for {name} as is not present in the provided build manifest.", file=sys.stderr)
             continue
-        if distribution in ("rpm", "deb") and name in INTEG_TEST_SKIPPED_ON_PACKAGES:
+        if package_exclusions and distribution in ("rpm", "deb") and name in INTEG_TEST_SKIPPED_ON_PACKAGES:
             print(f"Skipping integTest for {distribution} distribution for {name}", file=sys.stderr)
             continue
         if name not in components:
@@ -290,6 +290,7 @@ def main() -> int:
     integ.add_argument("--build-manifest", required=True)
     integ.add_argument("--component-name", default="")
     integ.add_argument("--ci-groups", type=int, default=0, help=f"Split {OSD_CI_GROUP_COMPONENT} into this many ci-group legs")
+    integ.add_argument("--no-package-exclusions", action="store_true", help="Keep the integTest-only deb/rpm exclusions out (smoke-test)")
 
     args = parser.parse_args()
     if args.command == "runs-on":
@@ -303,7 +304,7 @@ def main() -> int:
     elif args.command == "input-manifest-info":
         emit(input_manifest_info(manifest))
     elif args.command == "integ-test-components":
-        components = expand_ci_groups(integ_test_components(manifest, load(args.build_manifest), args.component_name), args.ci_groups)
+        components = expand_ci_groups(integ_test_components(manifest, load(args.build_manifest), args.component_name, not args.no_package_exclusions), args.ci_groups)
         emit({"components": json.dumps(components, separators=(",", ":")), "has-components": "true" if components else "false"})
     else:
         emit(ci_image(manifest, args.kind, args.platform, args.distribution, args.docker_run))
