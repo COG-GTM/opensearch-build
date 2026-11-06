@@ -8,7 +8,8 @@
 #   build-*      build linux x64 tar through _build-distribution.yml with the RC numbers, no upload, keep-distribution,
 #   compare-*    check the GitHub build manifest against the Jenkins RC build manifest (same commit per component;
 #                functionalTestDashboards is left unlocked by MATCH_BUILD_MANIFEST on Jenkins too, so it is not compared),
-#   integ-test-* run integ-test-opensearch(-dashboards).yml on the GitHub builds (Jenkins: passed for both components).
+#   integ-test-* run integ-test-opensearch(-dashboards).yml on the GitHub builds, Dashboards against the replayed
+#                OpenSearch (Jenkins: passed for both components).
 # Branch/tag/lock, promotion (release-promotion-dry-run.yml) and release notes (release-notes-check.yml compile) of
 # the same RC run as dry-run dispatches of their own workflows. Live staging targets are out of scope until the
 # runner/OIDC infrastructure and the staging buckets/registries are applied.
@@ -117,12 +118,13 @@ jobs:
       TEST_MANIFEST: 3.9.0/opensearch-3.9.0-test.yml
       BUILD_MANIFEST_URL: builds/opensearch/manifest.yml
       COMPONENT_NAME: opensearch-system-templates
+      RC_NUMBER: '4'
       VALIDATE_ARTIFACTS: false
       RUNS_ON: '["ubuntu-24.04"]'
       ARTIFACTS_FROM_RUN: distribution-linux-x64-tar-opensearch
 
   integ-test-dashboards:
-    needs: build-dashboards
+    needs: [build-opensearch, build-dashboards]
     uses: ./.github/workflows/integ-test-opensearch-dashboards.yml
     permissions:
       contents: read
@@ -130,8 +132,10 @@ jobs:
     with:
       TEST_MANIFEST: 3.9.0/opensearch-dashboards-3.9.0-test.yml
       BUILD_MANIFEST_URL: builds/opensearch-dashboards/manifest.yml
-      BUILD_MANIFEST_URL_OPENSEARCH: https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/3.9.0/12228/linux/x64/tar/builds/opensearch/manifest.yml
+      BUILD_MANIFEST_URL_OPENSEARCH: builds/opensearch/manifest.yml
       COMPONENT_NAME: customImportMapDashboards
+      RC_NUMBER: '3'
       VALIDATE_ARTIFACTS: false
       RUNS_ON: '["ubuntu-24.04"]'
       ARTIFACTS_FROM_RUN: distribution-linux-x64-tar-dashboards
+      OPENSEARCH_ARTIFACTS_FROM_RUN: distribution-linux-x64-tar-opensearch
