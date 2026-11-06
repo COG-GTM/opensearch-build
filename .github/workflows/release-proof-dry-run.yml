@@ -1,0 +1,143 @@
+---
+# s5.5 release proof (d-release-proof), dry-run leg: replays the RC build and test legs of the last released release
+# candidate on GitHub-hosted runners and compares them with the Jenkins outcome of the same RC.
+#   OpenSearch 3.9.0             Jenkins build 12228 (RC 4)
+#   OpenSearch Dashboards 3.9.0  Jenkins build 9054 (RC 3)
+# manifests/3.9.0 carry the MATCH_BUILD_MANIFEST lock of those builds (release-manifest-commit-lock.yml dry-run output),
+# as the Jenkins lock PR did before the RC builds. The jobs here
+#   build-*      build linux x64 tar through _build-distribution.yml with the RC numbers (build ids from the
+#                release-proof-dry-run.yml lane of build_number.py), no upload, keep-distribution,
+#   compare-*    check the GitHub build manifest against the Jenkins RC build manifest (same commit per component;
+#                functionalTestDashboards is left unlocked by MATCH_BUILD_MANIFEST on Jenkins too, so it is not compared),
+#   integ-test-* run integ-test-opensearch(-dashboards).yml on the GitHub builds, Dashboards against the replayed
+#                OpenSearch (Jenkins: passed for both components). The OpenSearch build carries geospatial and
+#                job-scheduler because customImportMapDashboards uploads GeoJSON through the geospatial plugin.
+# Branch/tag/lock, promotion (release-promotion-dry-run.yml) and release notes (release-notes-check.yml compile) of
+# the same RC run as dry-run dispatches of their own workflows. Live staging targets are out of scope until the
+# runner/OIDC infrastructure and the staging buckets/registries are applied.
+name: release-proof-dry-run
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release-proof-dry-run.yml
+      - .github/scripts/release_proof.py
+
+permissions: {}
+
+env:
+  JENKINS_OPENSEARCH: https://ci.opensearch.org/ci/dbc/distribution-build-opensearch/3.9.0/12228/linux/x64/tar/builds/opensearch/manifest.yml
+  JENKINS_OPENSEARCH_DASHBOARDS: https://ci.opensearch.org/ci/dbc/distribution-build-opensearch-dashboards/3.9.0/9054/linux/x64/tar/builds/opensearch-dashboards/manifest.yml
+
+jobs:
+  build-opensearch:
+    uses: ./.github/workflows/_build-distribution.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      input-manifest: 3.9.0/opensearch-3.9.0.yml
+      platform: linux
+      architecture: x64
+      distribution: tar
+      rc-number: '4'
+      component-name: OpenSearch security custom-codecs opensearch-system-templates job-scheduler geospatial
+      job-name: distribution-build-opensearch
+      upload: false
+      update-latest-url: false
+      keep-distribution: true
+      artifact-suffix: -opensearch
+      runs-on: '["ubuntu-24.04"]'
+
+  build-dashboards:
+    uses: ./.github/workflows/_build-distribution.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      input-manifest: 3.9.0/opensearch-dashboards-3.9.0.yml
+      platform: linux
+      architecture: x64
+      distribution: tar
+      rc-number: '3'
+      component-name: OpenSearch-Dashboards functionalTestDashboards securityDashboards customImportMapDashboards
+      job-name: distribution-build-opensearch-dashboards
+      upload: false
+      update-latest-url: false
+      keep-distribution: true
+      artifact-suffix: -dashboards
+      build-user: ci-runner
+      parallel: '0'
+      runs-on: '["ubuntu-24.04"]'
+
+  compare:
+    name: compare-${{ matrix.product }}
+    needs: [build-opensearch, build-dashboards]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - product: opensearch
+            components: OpenSearch security custom-codecs opensearch-system-templates job-scheduler geospatial
+          - product: opensearch-dashboards
+            components: OpenSearch-Dashboards securityDashboards customImportMapDashboards
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: distribution-linux-x64-tar-${{ matrix.product == 'opensearch' && 'opensearch' || 'dashboards' }}
+          path: replay
+      - name: Compare with the Jenkins RC build manifest
+        env:
+          PRODUCT: ${{ matrix.product }}
+          COMPONENTS: ${{ matrix.components }}
+        run: |
+          bash .github/scripts/ensure-pyyaml.sh
+          if [ "$PRODUCT" = opensearch ]; then JENKINS="$JENKINS_OPENSEARCH"; else JENKINS="$JENKINS_OPENSEARCH_DASHBOARDS"; fi
+          read -ra components <<< "$COMPONENTS"
+          set +e
+          python3 .github/scripts/release_proof.py --replay "replay/builds/${PRODUCT}/manifest.yml" --jenkins "$JENKINS" \
+            --components "${components[@]}" | tee compare.md
+          STATUS=${PIPESTATUS[0]}
+          set -e
+          { echo "### ${PRODUCT}: GitHub replay vs Jenkins ${JENKINS}"; echo; cat compare.md; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$STATUS"
+
+  integ-test-opensearch:
+    needs: build-opensearch
+    uses: ./.github/workflows/integ-test-opensearch.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      TEST_MANIFEST: 3.9.0/opensearch-3.9.0-test.yml
+      BUILD_MANIFEST_URL: builds/opensearch/manifest.yml
+      COMPONENT_NAME: opensearch-system-templates
+      RC_NUMBER: '4'
+      VALIDATE_ARTIFACTS: false
+      RUNS_ON: '["ubuntu-24.04"]'
+      ARTIFACTS_FROM_RUN: distribution-linux-x64-tar-opensearch
+
+  integ-test-dashboards:
+    needs: [build-opensearch, build-dashboards]
+    uses: ./.github/workflows/integ-test-opensearch-dashboards.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      TEST_MANIFEST: 3.9.0/opensearch-dashboards-3.9.0-test.yml
+      BUILD_MANIFEST_URL: builds/opensearch-dashboards/manifest.yml
+      BUILD_MANIFEST_URL_OPENSEARCH: builds/opensearch/manifest.yml
+      COMPONENT_NAME: customImportMapDashboards
+      RC_NUMBER: '3'
+      VALIDATE_ARTIFACTS: false
+      RUNS_ON: '["ubuntu-24.04"]'
+      ARTIFACTS_FROM_RUN: distribution-linux-x64-tar-dashboards
+      OPENSEARCH_ARTIFACTS_FROM_RUN: distribution-linux-x64-tar-opensearch
