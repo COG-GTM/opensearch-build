@@ -463,6 +463,9 @@ jobs:
         # `cp -a` the OpenSearch tree into the same <distribution>/ first, so builds/opensearch and
         # builds/opensearch-dashboards sit side by side under one local path.
         if: ${{ needs.setup.outputs.local-artifacts != 'false' }}
+        env:
+          ARCHITECTURE: ${{ needs.setup.outputs.architecture }}
+          LOCAL_ARTIFACTS: ${{ needs.setup.outputs.local-artifacts }}
         run: |
           set -euo pipefail
           rm -rf "${DISTRIBUTION}"
@@ -470,6 +473,11 @@ jobs:
           if [ -d artifacts-opensearch ]; then
             cp -a artifacts-opensearch/. "${DISTRIBUTION}/"
             rm -rf artifacts-opensearch
+          fi
+          if [ "${LOCAL_ARTIFACTS}" = run ]; then
+            # Only this job's copy: the uploaded manifests keep the Jenkins locations the build was not uploaded to.
+            python3 .github/scripts/localize_bundle_locations.py "${GITHUB_WORKSPACE}/${DISTRIBUTION}" \
+              --platform "${PLATFORM}" --architecture "${ARCHITECTURE}" --distribution "${DISTRIBUTION}"
           fi
           find "${DISTRIBUTION}" -maxdepth 3 | sort
 
