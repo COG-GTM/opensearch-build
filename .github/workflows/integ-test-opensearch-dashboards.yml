@@ -12,7 +12,7 @@
 #                                     a dry run until vars.AUTOCUT_LIVE is 'true' so Jenkins and Actions never edit the
 #                                     same AUTOCUT issues before cutover
 # distribution-build-opensearch-dashboards.yml calls it per tested cell (Jenkins triggerIntegrationTests, wait: false);
-# workflow_dispatch keeps manual reruns. Jenkins BUILD_NUMBER (the test run id) is github.run_id.
+# workflow_dispatch keeps manual reruns. Jenkins BUILD_NUMBER (the test run id) is build_number.py's.
 name: integ-test-opensearch-dashboards
 run-name: integ-test-opensearch-dashboards ${{ inputs.TEST_MANIFEST }} ${{ inputs.COMPONENT_NAME }}
 

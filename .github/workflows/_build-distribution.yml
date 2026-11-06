@@ -50,6 +50,13 @@ on:
         required: false
         default: 'distribution-build-opensearch'
         type: string
+      build-number:
+        description: >-
+          Jenkins BUILD_NUMBER equivalent (build.id, <build> of the S3 keys). Empty derives it here with
+          .github/scripts/build_number.py; callers that need it before the build pass theirs so all cells share it.
+        required: false
+        default: ''
+        type: string
       continue-on-error:
         description: 'build.sh --continue-on-error (Jenkins CONTINUE_ON_ERROR)'
         required: false
@@ -183,7 +190,7 @@ on:
         description: 'Artifact root inside the bucket, <job>/<version>/<build>/<platform>/<arch>/<distribution>'
         value: ${{ jobs.assemble.outputs.artifact-root || jobs.build.outputs.artifact-root }}
       build-id:
-        description: 'build.id of the build manifest (github.run_id, the Jenkins BUILD_NUMBER equivalent)'
+        description: 'build.id of the build manifest (build_number.py, the Jenkins BUILD_NUMBER equivalent)'
         value: ${{ jobs.assemble.outputs.build-id || jobs.build.outputs.build-id }}
       rc-number:
         description: 'The rc-number input, for the test workflows'
@@ -210,10 +217,28 @@ jobs:
       filename: ${{ steps.manifest.outputs.filename }}
       manifest-path: ${{ steps.manifest.outputs.manifest-path }}
       build-manifest: ${{ steps.params.outputs.distribution }}/builds/${{ steps.manifest.outputs.filename }}/manifest.yml
+      build-number: ${{ steps.build-number.outputs.build-number }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Derive the build number
+        # Jenkins BUILD_NUMBER: offset + run_number (.github/scripts/build_number.py, plan decision d-build-number)
+        id: build-number
+        env:
+          BUILD_NUMBER: ${{ inputs.build-number }}
+          JOB_NAME: ${{ inputs.job-name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BUILD_NUMBER}" ]; then
+            python3 .github/scripts/build_number.py number --job "${JOB_NAME}"
+          elif [[ "${BUILD_NUMBER}" =~ ^[1-9][0-9]{0,9}$ ]] && [ "${BUILD_NUMBER}" -le 2147483647 ]; then
+            echo "build-number=${BUILD_NUMBER}" | tee -a "$GITHUB_OUTPUT"
+          else
+            echo "::error::build-number is not valid: '${BUILD_NUMBER}'"
+            exit 1
+          fi
 
       - name: Verify the parameters
         id: params
@@ -348,8 +373,8 @@ jobs:
       id-token: write
     env:
       GRADLE_OPTS: '-Drepos.mavenLocal=true'
-      # build.sh writes BUILD_NUMBER into build.id; the run id keeps GHA builds apart from Jenkins build numbers.
-      BUILD_NUMBER: ${{ github.run_id }}
+      # build.sh writes BUILD_NUMBER into build.id; build_number.py keeps GHA builds above the Jenkins build numbers.
+      BUILD_NUMBER: ${{ needs.setup.outputs.build-number }}
       PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
     outputs:
       build-manifest-url: ${{ steps.assemble.outputs.build-manifest-url }}
@@ -502,7 +527,7 @@ jobs:
           filename: ${{ needs.setup.outputs.filename }}
           job-name: ${{ inputs.job-name }}
           build-feature: ${{ inputs.build-feature }}
-          build-number: ${{ github.run_id }}
+          build-number: ${{ needs.setup.outputs.build-number }}
           public-artifact-url: ${{ inputs.public-artifact-url }}
           upload: ${{ steps.creds.outputs.upload }}
           role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
@@ -555,7 +580,7 @@ jobs:
       contents: read
       id-token: write
     env:
-      BUILD_NUMBER: ${{ github.run_id }}
+      BUILD_NUMBER: ${{ needs.setup.outputs.build-number }}
       PUBLIC_ARTIFACT_URL: ${{ inputs.public-artifact-url }}
       RPM_SIGNING_KEY_ID: ${{ secrets.RPM_SIGNING_KEY_ID }}
       RPM_SIGNING_PASSPHRASE_SECRETS_ARN: ${{ secrets.RPM_SIGNING_PASSPHRASE_SECRETS_ARN }}
@@ -606,7 +631,7 @@ jobs:
           filename: ${{ needs.setup.outputs.filename }}
           job-name: ${{ inputs.job-name }}
           build-feature: ${{ inputs.build-feature }}
-          build-number: ${{ github.run_id }}
+          build-number: ${{ needs.setup.outputs.build-number }}
           public-artifact-url: ${{ inputs.public-artifact-url }}
           upload: ${{ steps.creds.outputs.upload }}
           role-to-assume: ${{ secrets.AWS_ROLE_ARTIFACTS }}
