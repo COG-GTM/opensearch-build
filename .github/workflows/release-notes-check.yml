@@ -209,6 +209,9 @@ jobs:
           ./release_notes.sh compile "manifests/$RELEASE_VERSION/opensearch-$RELEASE_VERSION.yml" \
             "manifests/$RELEASE_VERSION/opensearch-dashboards-$RELEASE_VERSION.yml" \
             --output "release-notes/opensearch-release-notes-$RELEASE_VERSION.md"
+      # The job container runs as root but the checkout belongs to the runner user, so git refuses the workspace.
+      - name: Mark workspace as a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Upload consolidated release notes
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
