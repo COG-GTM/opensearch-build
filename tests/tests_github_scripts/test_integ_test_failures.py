@@ -129,20 +129,12 @@ class TestCollect(unittest.TestCase):
         self.assertIn("| k-NN | flaky (latest run passed), skipped | |", summary_text)
         self.assertEqual(saved["version"], "3.9.0")
 
-    def test_main_skips_build_numbers_out_of_the_metrics_integer_range(self) -> None:
-        search = FakeMetrics({"sql": [bucket("failed")]})
-        with tempfile.TemporaryDirectory() as tmp:
-            output, summary = (os.path.join(tmp, name) for name in ("out", "summary"))
-            with patch.dict(os.environ, {"GITHUB_OUTPUT": output, "GITHUB_STEP_SUMMARY": summary}), patch("builtins.print") as printed:
-                self.assertEqual(integ.main(["--input-manifest", MANIFEST, "--distribution-number", "42138819623"], search=search), 0)
-            with open(output) as f:
-                text = f.read()
-        self.assertEqual(search.calls, [])
-        self.assertIn("skipped<<EOF_SKIPPED_", text)
-        self.assertNotIn("failures", text)
-        warning = printed.call_args_list[0].args[0]
-        self.assertTrue(warning.startswith("::warning::Distribution build number 42138819623"))
-        self.assertIn("Make GHA build numbers fit Jenkins integer fields", warning)
+    def test_main_queries_a_github_build_number(self) -> None:
+        search = FakeMetrics({})
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": "", "GITHUB_STEP_SUMMARY": ""}), patch("builtins.print"):
+            self.assertEqual(integ.main(["--input-manifest", MANIFEST, "--distribution-number", "100042"], search=search), 0)
+        self.assertNotEqual(search.calls, [])
+        self.assertIn('"distribution_build_number": "100042"', json.dumps(search.calls))
 
     def test_main_queries_the_largest_integer_build_number(self) -> None:
         search = FakeMetrics({})

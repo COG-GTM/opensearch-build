@@ -114,6 +114,7 @@ jobs:
       contents: read
     outputs:
       dry-run: ${{ steps.verify.outputs.dry-run }}
+      build-number: ${{ steps.build-number.outputs.build-number }}
       input-manifest: ${{ steps.verify.outputs.input-manifest }}
       matrix: ${{ steps.verify.outputs.matrix }}
       runs-on: ${{ steps.verify.outputs.runs-on }}
@@ -133,6 +134,13 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Derive the build number
+        # Jenkins BUILD_NUMBER: offset + run_number (.github/scripts/build_number.py, plan decision d-build-number)
+        id: build-number
+        env:
+          JOB_NAME: distribution-build-opensearch-dashboards
+        run: python3 .github/scripts/build_number.py number --job "${JOB_NAME}"
 
       - name: Verify the parameters
         id: verify
@@ -280,6 +288,7 @@ jobs:
       rc-number: ${{ needs.verify-parameters.outputs.rc-number }}
       component-name: ${{ needs.verify-parameters.outputs.component-name }}
       job-name: distribution-build-opensearch-dashboards
+      build-number: ${{ needs.verify-parameters.outputs.build-number }}
       continue-on-error: ${{ needs.verify-parameters.outputs.continue-on-error == 'true' }}
       skip-artifact-check: ${{ needs.verify-parameters.outputs.skip-artifact-check == 'true' }}
       upload: ${{ needs.verify-parameters.outputs.dry-run != 'true' }}
@@ -342,7 +351,7 @@ jobs:
         env:
           MATRIX: ${{ needs.verify-parameters.outputs.matrix }}
           FILENAME: ${{ needs.verify-parameters.outputs.filename }}
-          BUILD_NUMBER: ${{ github.run_id }}
+          BUILD_NUMBER: ${{ needs.verify-parameters.outputs.build-number }}
         run: |
           set -euo pipefail
           bash .github/scripts/ensure-pyyaml.sh
@@ -508,7 +517,7 @@ jobs:
           TAR_ARM64: ${{ needs.build-results.outputs.tar-arm64 }}
           ARTIFACT_URL_X64: ${{ needs.build-results.outputs.artifact-url-linux-x64-tar }}
           ARTIFACT_URL_ARM64: ${{ needs.build-results.outputs.artifact-url-linux-arm64-tar }}
-          BUILD_NUMBER: ${{ github.run_id }}
+          BUILD_NUMBER: ${{ needs.verify-parameters.outputs.build-number }}
         run: |
           set -euo pipefail
           if [ -z "${TAR_X64}" ] || [ -z "${TAR_ARM64}" ]; then
@@ -565,7 +574,7 @@ jobs:
       SOURCE_IMAGE_REGISTRY: opensearchstaging
       SOURCE_IMAGE: ${{ needs.docker-script.outputs.filename }}:${{ needs.docker-script.outputs.image-version }}
       DESTINATION_IMAGE_REGISTRY: opensearchstaging
-      DESTINATION_IMAGE: ${{ needs.docker-script.outputs.filename }}:${{ needs.docker-script.outputs.image-version }}.${{ github.run_id }}
+      DESTINATION_IMAGE: ${{ needs.docker-script.outputs.filename }}:${{ needs.docker-script.outputs.image-version }}.${{ needs.verify-parameters.outputs.build-number }}
 
   docker-scan:
     name: docker-scan
@@ -644,6 +653,7 @@ jobs:
           rc-number: ${{ needs.verify-parameters.outputs.rc-number }}
           component-category: OpenSearch Dashboards
           overall-build-result: ${{ steps.result.outputs.result }}
+          build-number: ${{ needs.verify-parameters.outputs.build-number }}
           metrics-host-url: ${{ secrets.METRICS_CLUSTER_ENDPOINT }}
           role-to-assume: ${{ secrets.AWS_ROLE_METRICS }}
           dry-run: ${{ steps.result.outputs.metrics-dry-run }}
@@ -696,14 +706,14 @@ jobs:
           REPO: ${{ github.repository }}
           REF: ${{ github.ref_name }}
           REVISION: ${{ needs.verify-parameters.outputs.revision }}
-          BUILD_NUMBER: ${{ github.run_id }}
+          BUILD_NUMBER: ${{ needs.verify-parameters.outputs.build-number }}
         run: |
           set -euo pipefail
           OPTIONS="os-build-number=latest osd-build-number=${BUILD_NUMBER} optional-args=using-staging-artifact-only"
           gh workflow run validate-artifacts.yml -R "${REPO}" --ref "${REF}" \
             -f VERSION="${REVISION}" -f PROJECTS=Both -f ARTIFACT_TYPE=staging -f DOCKER_SOURCE=dockerhub \
             -f OPTIONS="${OPTIONS}"
-          # validate-artifacts.yml's run-name carries OPTIONS, whose osd-build-number is this run's id: that is the
+          # validate-artifacts.yml's run-name carries OPTIONS, whose osd-build-number is this build's number: that is the
           # run this build dispatched, even when several release-candidate builds dispatch at once.
           RUN_ID=''
           for _ in $(seq 1 30); do

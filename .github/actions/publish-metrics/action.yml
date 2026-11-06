@@ -47,9 +47,9 @@ inputs:
     required: false
     default: ''
   build-number:
-    description: 'Build or test run number (Jenkins BUILD_NUMBER). Defaults to the workflow run number.'
+    description: 'Build or test run number (Jenkins BUILD_NUMBER). Empty derives this run''s with .github/scripts/build_number.py.'
     required: false
-    default: ${{ github.run_number }}
+    default: ''
   build-url:
     description: 'URL of this run (Jenkins RUN_DISPLAY_URL). Defaults to the workflow run URL.'
     required: false
@@ -118,6 +118,10 @@ runs:
         set -euo pipefail
         bash "${GITHUB_ACTION_PATH}/../../scripts/ensure-pyyaml.sh"
         SCRIPT="${GITHUB_ACTION_PATH}/../../scripts/metrics_records.py"
+        if [ -z "${BUILD_NUMBER}" ]; then
+          BUILD_NUMBER=$(GITHUB_OUTPUT='' python3 "${GITHUB_ACTION_PATH}/../../scripts/build_number.py" number | sed -n 's/^build-number=//p')
+          [ -n "${BUILD_NUMBER}" ] || exit 1
+        fi
         OUT_DIR="${RUNNER_TEMP}/publish-metrics-${KIND}"
         mkdir -p "${OUT_DIR}"
         START_TIME="${BUILD_START_TIME:-$(($(date +%s) * 1000))}"

@@ -14,7 +14,7 @@
 #                                     feature-build-opensearch/<version>/shas/ and otherwise dispatches this workflow
 #
 # Not ported, as in distribution-build-opensearch.yml: INCREMENTAL / PREVIOUS_BUILD_ID (every build is a full build).
-# Jenkins BUILD_NUMBER is github.run_id. RUNS_ON is not a Jenkins parameter: a JSON runner label array overriding the
+# Jenkins BUILD_NUMBER is offset + run_number (.github/scripts/build_number.py). RUNS_ON is not a Jenkins parameter: a JSON runner label array overriding the
 # ADR 0001 pools for both cells.
 name: feature-build-opensearch
 
