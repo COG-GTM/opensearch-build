@@ -1,3 +1,10 @@
+// Copyright OpenSearch Contributors
+// SPDX-License-Identifier: Apache-2.0
+//
+// The OpenSearch Contributors require contributions made to
+// this file be licensed under the Apache-2.0 license or a
+// compatible open source license.
+
 // Editable source for architecture.png / architecture.svg. Re-render with ./render.sh (needs Graphviz).
 digraph opensearch_build {
   graph [rankdir=TB, newrank=true, fontname="DejaVu Sans", fontsize=16, nodesep=0.35, ranksep=0.7, pad=0.3,
