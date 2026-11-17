@@ -4,6 +4,9 @@
 [![groovy](https://github.com/opensearch-project/opensearch-build/actions/workflows/groovy-tests.yml/badge.svg)](https://github.com/opensearch-project/opensearch-build/actions/workflows/groovy-tests.yml)
 [![codecov](https://codecov.io/gh/opensearch-project/opensearch-build/branch/main/graph/badge.svg?token=03S5XZ80UI)](https://codecov.io/gh/opensearch-project/opensearch-build)
 
+- [Architecture](#architecture)
+  - [Repository Layout](#repository-layout)
+  - [Developer Setup](#developer-setup)
 - [Releasing OpenSearch](#releasing-opensearch)
   - [Releases and Versions](#releases-and-versions)
   - [Release labels](#release-labels)
@@ -15,9 +18,8 @@
     - [Windows](#windows)
   - [Signing RPM artifacts](#signing-rpm-artifacts)
 - [Making a Release](#making-a-release)
-  - [Releasing for Linux](#releasing-for-linux)
+  - [Releasing for Linux and Windows](#releasing-for-linux-and-windows)
   - [Releasing for FreeBSD](#releasing-for-freebsd)
-  - [Releasing for Windows](#releasing-for-windows)
   - [Releasing for macOS](#releasing-for-macos)
 - [Utilities](#utilities)
   - [Checking Out Source](#checking-out-source)
@@ -32,9 +34,39 @@
 - [License](#license)
 - [Copyright](#copyright)
 
+### Architecture
+
+[![opensearch-build architecture](docs/diagrams/architecture.png)](docs/OpenSearch-Project-Build-System-Quick-Overview.md)
+
+Manifests drive every build. Jenkins pipelines and their GitHub Actions ports, which run side by side during the migration, call the Python workflows in `src/`, which upload to staging, record test results and prepare releases. The [build system overview](docs/OpenSearch-Project-Build-System-Quick-Overview.md) explains each workflow group, and the [Jenkins to GitHub Actions inventory](docs/jenkins-gha-inventory.md) maps every Jenkins pipeline to its GitHub Actions workflow. The diagram source is [docs/diagrams/architecture.dot](docs/diagrams/architecture.dot).
+
+#### Repository Layout
+
+| Path | Contents |
+| --- | --- |
+| [manifests](manifests) | Input and test manifests per version, plus [templates](manifests/templates). |
+| [src](src) | Python workflows, one package per workflow (`build_workflow`, `assemble_workflow`, `test_workflow`, `release_git_workflow`, `release_notes_workflow`, ...), started by the `src/run_*.py` entry points. |
+| `*.sh` | Wrappers that run those entry points through Pipenv: `build.sh`, `assemble.sh`, `test.sh`, `sign.sh`, `checkout.sh`, `ci.sh`, `manifests.sh`, `release_notes.sh`, `report.sh`, `validation.sh`. |
+| [jenkins](jenkins) | Jenkins pipelines; `jenkins/legacy` holds retired ones. Groovy tests live in [tests/jenkins](tests/jenkins). |
+| [.github/workflows](.github/workflows), [.github/actions](.github/actions) | GitHub Actions ports of the Jenkins pipelines, repository CI, and the composite actions they share. |
+| [deployment](deployment) | Terraform for the GitHub Actions runners and AWS OIDC roles ([gha-runners](deployment/gha-runners)) and Packer templates for runner and agent images ([packer](deployment/packer)). |
+| [docker](docker), [scripts](scripts), [config](config) | CI and release Dockerfiles, packaging and helper scripts, and shared configuration. |
+| [docs](docs) | Build, test and release guides, the architecture overview, and [ADRs](docs/adr). |
+| [tests](tests) | Python tests for `src/`, `scripts/` and `.github/scripts`. |
+
+#### Developer Setup
+
+The [Developer Guide](DEVELOPER_GUIDE.md) covers the prerequisites (Python 3.9 with Pipenv; JDK 17 for the Groovy tests). In short:
+
+```bash
+pipenv install
+pipenv run pytest     # Python tests
+./gradlew test        # Jenkins pipeline (Groovy) tests
+```
+
 ### Releasing OpenSearch
 
-Please refer to the [release process document](https://github.com/opensearch-project/opensearch-build/wiki/Releasing-the-Distribution) for detailed information on how to release the OpenSearch and OpenSearch Dashboards software.
+Please refer to the [release process document](docs/Releasing-the-Distribution.md) for detailed information on how to release the OpenSearch and OpenSearch Dashboards software.
 
 
 #### Releases and Versions
@@ -55,11 +87,11 @@ Plugin owners can follow the [Onboarding Process](ONBOARDING.md) to onboard thei
 
 ### Building and Testing an OpenSearch Distribution
 
-See [wiki](https://github.com/opensearch-project/opensearch-build/wiki/Building-an-OpenSearch-and-OpenSearch-Dashboards-Distribution)
+See [Building an OpenSearch and OpenSearch Dashboards Distribution](docs/Building-an-OpenSearch-and-OpenSearch-Dashboards-Distribution.md).
 
 #### Testing the Distribution
 
-See [wiki](https://github.com/opensearch-project/opensearch-build/wiki/Testing-the-Distribution)
+See [Testing the Distribution](docs/Testing-the-Distribution.md).
 
 #### Signing Artifacts
 
@@ -118,7 +150,7 @@ At this moment there's no official macOS distribution. However, this project doe
 The [checkout workflow](src/checkout_workflow) checks out source code for a given manifest for further examination.
 
 ```bash
-./checkout.sh manifests/1.3.0/opensearch-1.3.0.yml
+./checkout.sh manifests/3.9.0/opensearch-3.9.0.yml
 ```
 
 See [src/checkout_workflow](./src/checkout_workflow) for more information.
@@ -129,27 +161,27 @@ You can perform cross-platform builds. For example, build and assemble a Windows
 
 ```bash
 export JAVA_HOME=$(/usr/libexec/java_home) # required by OpenSearch install-plugin during assemble
-./build.sh manifests/1.3.0/opensearch-1.3.0.yml --snapshot --platform windows
+./build.sh manifests/3.9.0/opensearch-3.9.0.yml --snapshot --platform windows
 ./assemble.sh builds/opensearch/manifest.yml
 ```
 
-This will produce `dist/opensearch-1.3.0-SNAPSHOT-windows-x64.zip` on Linux and macOS.
+This will produce `dist/opensearch-3.9.0-SNAPSHOT-windows-x64.zip` on Linux and macOS.
 
 #### Sanity Checking the Bundle
 
 This workflow runs sanity checks on every component present in the bundle, executed as part of the [manifests workflow](.github/workflows/manifests.yml) in this repository. It ensures that the component GitHub repositories are correct and versions in those components match the OpenSearch version.
 
-The following example sanity-checks components in the OpenSearch 1.3.0 manifest.
+The following example sanity-checks components in the OpenSearch 3.9.0 manifest.
 
 ```bash
-./ci.sh manifests/1.3.0/opensearch-1.3.0.yml --snapshot
+./ci.sh manifests/3.9.0/opensearch-3.9.0.yml --snapshot
 ```
 
 See [src/ci_workflow](./src/ci_workflow) for more information.
 
 #### Auto-Generating Manifests
 
-The [manifests workflow](src/manifests_workflow) reacts to version increments in OpenSearch and its components by extracting Gradle properties from project branches. When a new version is found, a new input manifest is added to [manifests](manifests), and [a pull request is opened](.github/workflows/manifests.yml) (e.g. [opensearch-build#491](https://github.com/opensearch-project/opensearch-build/pull/491)).
+The [manifests workflow](src/manifests_workflow) reacts to version increments in OpenSearch and its components by extracting Gradle properties from project branches. When a new version is found, a new input manifest is added to [manifests](manifests), and [a pull request is opened](.github/workflows/manifests-update.yml) (e.g. [opensearch-build#491](https://github.com/opensearch-project/opensearch-build/pull/491)).
 
 Show information about existing manifests. 
 
@@ -167,7 +199,7 @@ See [src/manifests_workflow](./src/manifests_workflow) for more information.
 
 ### Deploying Infrastructure
 
-This project uses jenkins as the build infrastructure for building, testing and releasing the artifacts. The infrastructure is deployed using CDK and code can be found in [opensearch-ci](https://github.com/opensearch-project/opensearch-ci/tree/main) repository. The GitHub Actions self-hosted runners and AWS OIDC roles that replace it are defined in [deployment/gha-runners](deployment/gha-runners/README.md).
+This project uses Jenkins as the build infrastructure for building, testing and releasing the artifacts. The infrastructure is deployed using CDK and code can be found in [opensearch-ci](https://github.com/opensearch-project/opensearch-ci/tree/main) repository. The GitHub Actions self-hosted runners and AWS OIDC roles that replace it are defined in [deployment/gha-runners](deployment/gha-runners/README.md) and applied by [gha-runners-terraform.yml](.github/workflows/gha-runners-terraform.yml); runner and agent images are built from [deployment/packer](deployment/packer). See [ADR 0001](docs/adr/0001-gha-runners-and-secrets.md) for the runner and secrets design.
 
 ## Contributing
 
