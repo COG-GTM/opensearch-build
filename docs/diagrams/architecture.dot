@@ -1,0 +1,53 @@
+// Copyright OpenSearch Contributors
+// SPDX-License-Identifier: Apache-2.0
+//
+// The OpenSearch Contributors require contributions made to
+// this file be licensed under the Apache-2.0 license or a
+// compatible open source license.
+
+// Editable source for architecture.png / architecture.svg. Re-render with ./render.sh (needs Graphviz).
+digraph opensearch_build {
+  graph [rankdir=TB, newrank=true, fontname="DejaVu Sans", fontsize=16, nodesep=0.35, ranksep=0.7, pad=0.3,
+         label="opensearch-build on main: what drives a build, what runs it, where its output goes", labelloc=t];
+  node  [shape=box, style="rounded,filled", fontname="DejaVu Sans", fontsize=14, fillcolor="#ffffff", color="#5a6b7b"];
+  edge  [fontname="DejaVu Sans", fontsize=12, color="#5a6b7b"];
+
+  subgraph cluster_inputs {
+    label="Inputs"; style="rounded,filled"; fillcolor="#eef4fb"; color="#9db4cc";
+    manifests [label="manifests/\ninput + test manifests\n(per version)"];
+    schedules [label=".github/schedules/\ncron entries per workflow"];
+    repos     [label="Component repos\n(OpenSearch, Dashboards,\nplugins on GitHub)"];
+  }
+
+  subgraph cluster_orch {
+    label="Orchestration (both live during the migration)"; style="rounded,filled"; fillcolor="#fdf3e7"; color="#e0b98a";
+    jenkins [label="Jenkins\njenkins/*.jenkinsfile\n+ opensearch-build-libraries\n(jenkins/legacy = retired)"];
+    gha     [label="GitHub Actions\n.github/workflows (ports)\n_build-distribution · _integ-test\n_scheduled-build · _benchmark-run\n+ .github/actions composites"];
+    runners [label="Ephemeral self-hosted runners\ndeployment/gha-runners (Terraform)\ndeployment/packer AMIs\nAWS access via GitHub OIDC"];
+  }
+
+  subgraph cluster_py {
+    label="Python workflows (src/)"; style="rounded,filled"; fillcolor="#eef8ef"; color="#9cc7a1";
+    buildpy   [label="checkout · build · assemble\nsign · ci · manifests"];
+    testpy    [label="test_workflow\ninteg · bwc · smoke\nbenchmark · perf · validation\nreport_workflow"];
+    releasepy [label="release_git_workflow\n(branch · tag · manifest lock)\nrelease_schedule_workflow\nrelease_notes_workflow + llms"];
+  }
+
+  subgraph cluster_out {
+    label="Outputs"; style="rounded,filled"; fillcolor="#f4eff9"; color="#bba6d3";
+    staging [label="Staging: artifacts S3 bucket\n(ci.opensearch.org)\nstaging Docker repos"];
+    prod    [label="Production: S3/CloudFront,\nAPT/YUM repos, Docker Hub/ECR,\nMaven Central"];
+    metrics [label="Metrics cluster\n(test + benchmark results)"];
+    github  [label="GitHub\nrelease branches/tags,\nmanifest PRs, AUTOCUT issues"];
+  }
+
+  manifests -> jenkins; manifests -> gha; schedules -> gha;
+  jenkins -> buildpy [label="runs"]; gha -> runners [label="runs-on"]; runners -> buildpy [label="runs"];
+  repos -> buildpy [label="checkout"];
+  buildpy -> testpy [label="build manifest"];
+  buildpy -> staging [label="upload"];
+  testpy -> metrics; testpy -> github [label="failure issues"];
+  gha -> releasepy [label="release-*"]; jenkins -> releasepy [style=dashed];
+  releasepy -> github [label="refs, notes"];
+  staging -> prod [label="promote (manual)"];
+}

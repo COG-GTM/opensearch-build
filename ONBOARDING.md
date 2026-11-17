@@ -21,29 +21,29 @@ Add the new plugin to the [opensearch-plugins meta](https://github.com/opensearc
 
 ### Onboard to Build Workflow
 
-1. Update a [manifest](/manifests) for a particular release to include your plugin.  For example to be included in the 1.1.0 release, you would update [opensearch-1.1.0.yml](https://github.com/opensearch-project/opensearch-build/blob/opensearch-1.1.0/manifests/1.1.0/opensearch-1.1.0.yml). We require your plugin name, repository URL, and git ref that should be used. For unreleased versions this should be a branch in your repository.  Once a release is cut, these refs will be updated to build from a tag or specific commit hash.
+1. Update a [manifest](/manifests) for a particular release to include your plugin.  For example to be included in the 3.9.0 release, you would update [opensearch-3.9.0.yml](manifests/3.9.0/opensearch-3.9.0.yml). We require your plugin name, repository URL, and git ref that should be used. For unreleased versions this should be a branch in your repository.  Once a release is cut, these refs will be updated to build from a tag or specific commit hash.
 
 2. Create a `scripts/build.sh` if you have specific requirements that are not covered by the default build.sh script. See default build script for [OpenSearch plugins](./scripts/default/opensearch/build.sh) and [OpenSearch-Dashboard plugins](./scripts/default/opensearch-dashboards/build.sh) and commit it to your repository.
 
 3. Ensure your `build.sh` reads and passes along both `-Dbuild.snapshot=` and `-Dopensearch.version=` flags.  Snapshot builds should produce a -SNAPSHOT tagged artifact for example `opensearch-plugin-1.1.0.0-SNAPSHOT.zip` where a release build of the same component would produce `opensearch-plugin-1.1.0.0.zip`.
 
-4. Execute `./build.sh` to ensure your component builds and all artifacts are correctly placed into ./artifacts/ with correct output names.
+4. Execute `./build.sh manifests/<version>/opensearch-<version>.yml --component OpenSearch <your-plugin> --snapshot` (add any plugins yours depends on) to ensure your component builds and all artifacts are correctly placed under `tar/builds/opensearch/` with correct output names, recorded in the build manifest `tar/builds/opensearch/manifest.yml`. The `tar/` prefix is the default `--distribution`; assembly needs the `OpenSearch` core component in the same build manifest.
 
-5. Execute `./assemble.sh` to ensure the full bundle is assembled and placed in to /bundles/*.tar.gz.  Unpack the tarball to ensure all your components are placed in their correct locations.
+5. Execute `./assemble.sh tar/builds/opensearch/manifest.yml` to ensure the bundle is assembled and placed under `tar/dist/opensearch/` (for example `tar/dist/opensearch/opensearch-<version>-SNAPSHOT-linux-x64.tar.gz`).  Unpack the tarball to ensure all your components are placed in their correct locations.
 
 6. Publish a PR to this repo including the updated manifest and the names of the artifacts being added.
 
 ### Onboard to Test Workflow
 
-1. Update the test configuration file (use 1.3.0 as an example), [opensearch-1.3.0-test.yml](https://github.com/opensearch-project/opensearch-build/blob/opensearch-1.3.0/manifests/1.3.0/opensearch-1.3.0-test.yml), for a particular release, to include your plugin. This test configuration defines full suite of tests - `integ`, `bwc`, `smoke` that can be run on the plugin.
+1. Update the test configuration file (use 3.9.0 as an example), [opensearch-3.9.0-test.yml](manifests/3.9.0/opensearch-3.9.0-test.yml), for a particular release, to include your plugin. This test configuration defines full suite of tests - `integ`, `bwc`, `smoke` that can be run on the plugin.
 
-2. For integration testing, the `test-workflow` runs integration tests available in the plugin repository. You will need to add `integ-test` config for your plugin in opensearch-1.3.0-test.yml, [example](https://github.com/opensearch-project/opensearch-build/blob/opensearch-1.3.0/manifests/1.3.0/opensearch-1.3.0-test.yml).
+2. For integration testing, the `test-workflow` runs integration tests available in the plugin repository. You will need to add `integ-test` config for your plugin in opensearch-3.9.0-test.yml, [example](manifests/3.9.0/opensearch-3.9.0-test.yml).
    
     1. It supports two test configs - `with-security` and `without-security`, which runs test with security plugin enabled and disabled respectively. Choose one or both depending on what your plugin integration tests support.
    
     2. If your plugin is dependent on `job-scheduler` zip, you can define that in `build-dependencies` in the config. Currently, the test workflow only supports `job-scheduler` as build dependency. Please create an issue if your plugin needs more support.
 
-3. For backward compatibility testing, the `test-workflow` runs backward compatibility tests available in the plugin repository, (see [reference](https://github.com/opensearch-project/anomaly-detection/blob/d9a122d05282f7efc1e24c61d64f18dec0fd47af/build.gradle#L428)). Like integration test, it has a set of configurable options defined in opensearch-1.3.0-test.yml, [example](https://github.com/opensearch-project/opensearch-build/blob/opensearch-1.3.0/manifests/1.3.0/opensearch-1.3.0-test.yml).
+3. For backward compatibility testing, the `test-workflow` runs backward compatibility tests available in the plugin repository, (see [reference](https://github.com/opensearch-project/anomaly-detection/blob/d9a122d05282f7efc1e24c61d64f18dec0fd47af/build.gradle#L428)). Like integration test, it has a set of configurable options defined in opensearch-3.9.0-test.yml, [example](manifests/3.9.0/opensearch-3.9.0-test.yml).
 
     1. It supports two test configs - `with-security` and `without-security`, which runs test with security plugin enabled and disabled respectively. Choose one or both depending on what your plugin integration tests support.
 
@@ -64,6 +64,8 @@ Standalone components are self-contained products that are published across dive
 This document describes steps to onboard a new component to universal or 1-click release process.
 
 See https://github.com/opensearch-project/opensearch-build/issues/1234 for details about end to end workflow.
+
+_The steps below register a Jenkins job on [build.ci.opensearch.org](https://build.ci.opensearch.org/). This repository is porting its own Jenkins pipelines to GitHub Actions (see the [Jenkins to GitHub Actions inventory](docs/jenkins-gha-inventory.md)); for clients published to PyPI, use the [PyPI GitHub Action release](#onboard-to-pypi-github-action-release) instead._
 
 1. Please ensure that [opensearch-ci-bot](https://github.com/opensearch-ci-bot) has the write access to your repository. If not, request by creating an [issue](https://github.com/opensearch-project/opensearch-build/issues) in this repository.
 1. Add a webhook token as credentials to [CI system](https://build.ci.opensearch.org/) using configuration as code. To generate the token, use command `head -30 /dev/urandom | sha512sum | awk '{print $1;}'` that generates random alpha-numeric string.
