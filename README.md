@@ -165,7 +165,7 @@ export JAVA_HOME=$(/usr/libexec/java_home) # required by OpenSearch install-plug
 ./assemble.sh tar/builds/opensearch/manifest.yml
 ```
 
-This will produce the Windows bundle under `tar/dist/opensearch/` on Linux and macOS (pass `--distribution zip` to both commands, and use `zip/` instead of `tar/`, for a `.zip`).
+This will produce the Windows bundle under `tar/dist/opensearch/` on Linux and macOS (for a `.zip`, pass `--distribution zip` to `build.sh` and assemble `zip/builds/opensearch/manifest.yml`).
 
 #### Sanity Checking the Bundle
 
