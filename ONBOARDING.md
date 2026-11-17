@@ -27,9 +27,9 @@ Add the new plugin to the [opensearch-plugins meta](https://github.com/opensearc
 
 3. Ensure your `build.sh` reads and passes along both `-Dbuild.snapshot=` and `-Dopensearch.version=` flags.  Snapshot builds should produce a -SNAPSHOT tagged artifact for example `opensearch-plugin-1.1.0.0-SNAPSHOT.zip` where a release build of the same component would produce `opensearch-plugin-1.1.0.0.zip`.
 
-4. Execute `./build.sh manifests/<version>/opensearch-<version>.yml --component <your-plugin> --snapshot` to ensure your component builds and all artifacts are correctly placed under `builds/opensearch/` with correct output names, recorded in the build manifest `builds/opensearch/manifest.yml`.
+4. Execute `./build.sh manifests/<version>/opensearch-<version>.yml --component OpenSearch <your-plugin> --snapshot` (add any plugins yours depends on) to ensure your component builds and all artifacts are correctly placed under `tar/builds/opensearch/` with correct output names, recorded in the build manifest `tar/builds/opensearch/manifest.yml`. The `tar/` prefix is the default `--distribution`; assembly needs the `OpenSearch` core component in the same build manifest.
 
-5. Execute `./assemble.sh builds/opensearch/manifest.yml` to ensure the full bundle is assembled and placed under `dist/opensearch/` (for example `dist/opensearch/opensearch-<version>-SNAPSHOT-linux-x64.tar.gz`).  Unpack the tarball to ensure all your components are placed in their correct locations.
+5. Execute `./assemble.sh tar/builds/opensearch/manifest.yml` to ensure the bundle is assembled and placed under `tar/dist/opensearch/` (for example `tar/dist/opensearch/opensearch-<version>-SNAPSHOT-linux-x64.tar.gz`).  Unpack the tarball to ensure all your components are placed in their correct locations.
 
 6. Publish a PR to this repo including the updated manifest and the names of the artifacts being added.
 

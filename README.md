@@ -100,7 +100,7 @@ For all types of signing within OpenSearch project we use `opensearch-signer-cli
 Usage:
 
 ```bash
-./sign.sh builds/opensearch/manifest.yml
+./sign.sh tar/builds/opensearch/manifest.yml
 ```
 
 The tool currently supports following platforms for signing.
@@ -162,10 +162,10 @@ You can perform cross-platform builds. For example, build and assemble a Windows
 ```bash
 export JAVA_HOME=$(/usr/libexec/java_home) # required by OpenSearch install-plugin during assemble
 ./build.sh manifests/3.9.0/opensearch-3.9.0.yml --snapshot --platform windows
-./assemble.sh builds/opensearch/manifest.yml
+./assemble.sh tar/builds/opensearch/manifest.yml
 ```
 
-This will produce `dist/opensearch-3.9.0-SNAPSHOT-windows-x64.zip` on Linux and macOS.
+This will produce the Windows bundle under `tar/dist/opensearch/` on Linux and macOS (pass `--distribution zip` to both commands, and use `zip/` instead of `tar/`, for a `.zip`).
 
 #### Sanity Checking the Bundle
 
