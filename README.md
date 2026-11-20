@@ -115,10 +115,10 @@ At this moment there's no official macOS distribution. However, this project doe
 
 #### Checking Out Source
 
-The [checkout workflow](src/checkout_workflow) checks out source code for a given manifest for further examination.
+The [checkout workflow](src/checkout_workflow) checks out source code for a given manifest for further examination. Input manifests for current versions are in [manifests](manifests); older versions, including 1.3.0, are in [legacy-manifests](legacy-manifests). Run `./manifests.sh list` to see which versions exist.
 
 ```bash
-./checkout.sh manifests/1.3.0/opensearch-1.3.0.yml
+./checkout.sh legacy-manifests/1.3.0/opensearch-1.3.0.yml
 ```
 
 See [src/checkout_workflow](./src/checkout_workflow) for more information.
@@ -128,8 +128,8 @@ See [src/checkout_workflow](./src/checkout_workflow) for more information.
 You can perform cross-platform builds. For example, build and assemble a Windows distribution on macOS.
 
 ```bash
-export JAVA_HOME=$(/usr/libexec/java_home) # required by OpenSearch install-plugin during assemble
-./build.sh manifests/1.3.0/opensearch-1.3.0.yml --snapshot --platform windows
+export JAVA_HOME=$(/usr/libexec/java_home) # macOS; on Linux point JAVA_HOME at your JDK. Required by OpenSearch install-plugin during assemble
+./build.sh legacy-manifests/1.3.0/opensearch-1.3.0.yml --snapshot --platform windows
 ./assemble.sh builds/opensearch/manifest.yml
 ```
 
@@ -142,7 +142,7 @@ This workflow runs sanity checks on every component present in the bundle, execu
 The following example sanity-checks components in the OpenSearch 1.3.0 manifest.
 
 ```bash
-./ci.sh manifests/1.3.0/opensearch-1.3.0.yml --snapshot
+./ci.sh legacy-manifests/1.3.0/opensearch-1.3.0.yml --snapshot
 ```
 
 See [src/ci_workflow](./src/ci_workflow) for more information.
